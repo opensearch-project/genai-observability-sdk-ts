@@ -44,13 +44,15 @@ export interface SessionRecord {
 export function parseMessages(raw: string | unknown[] | null): Message[] {
   if (raw == null) return [];
 
+  if (typeof raw === 'string' && raw.length === 0) return [];
+
   let items: unknown[];
   if (typeof raw === 'string') {
     try {
       const parsed = JSON.parse(raw);
       items = Array.isArray(parsed) ? parsed : [parsed];
     } catch {
-      return [{ role: 'unknown', content: raw }];
+      return [];
     }
   } else {
     items = raw;
@@ -58,12 +60,22 @@ export function parseMessages(raw: string | unknown[] | null): Message[] {
 
   const messages: Message[] = [];
   for (const item of items) {
-    if (item != null && typeof item === 'object') {
-      const obj = item as Record<string, unknown>;
-      messages.push({
-        role: String(obj['role'] ?? 'unknown'),
-        content: String(obj['content'] ?? ''),
-      });
+    if (item == null || typeof item !== 'object') continue;
+    const obj = item as Record<string, unknown>;
+    const role = String(obj['role'] ?? 'unknown');
+
+    // GenAI semconv format: { role, parts: [{ type: "text", content: "..." }] }
+    const parts = obj['parts'];
+    if (Array.isArray(parts)) {
+      const textParts = parts
+        .filter((p: unknown) => p && typeof p === 'object' && (p as Record<string, unknown>)['type'] === 'text')
+        .map((p: unknown) => String((p as Record<string, unknown>)['content'] ?? ''));
+      if (textParts.length > 0) {
+        messages.push({ role, content: textParts.join('\n') });
+      }
+    } else if (obj['content'] !== undefined) {
+      // Simple format: { role, content }
+      messages.push({ role, content: String(obj['content']) });
     }
   }
   return messages;
@@ -85,43 +97,27 @@ export function extractMessagesFromDoc(doc: Record<string, unknown>): {
   let inputMessages: Message[] = [];
   let outputMessages: Message[] = [];
 
-  // Try events first
+  // Try events first (latest GenAI conventions)
   for (const evt of events) {
     if (evt == null || typeof evt !== 'object') continue;
     const event = evt as Record<string, unknown>;
-    const name = event['name'] as string | undefined;
     const eventAttrs =
       (event['attributes'] as Record<string, unknown> | undefined) ?? {};
 
-    if (name === 'gen_ai.content.prompt') {
-      const raw =
-        eventAttrs['gen_ai.prompt'] ?? eventAttrs['gen_ai.content.prompt'];
-      inputMessages = parseMessages(
-        raw as string | unknown[] | null,
-      );
-    } else if (name === 'gen_ai.content.completion') {
-      const raw =
-        eventAttrs['gen_ai.completion'] ??
-        eventAttrs['gen_ai.content.completion'];
-      outputMessages = parseMessages(
-        raw as string | unknown[] | null,
-      );
+    if (inputMessages.length === 0 && eventAttrs['gen_ai.input.messages']) {
+      inputMessages = parseMessages(eventAttrs['gen_ai.input.messages'] as string | unknown[] | null);
+    }
+    if (outputMessages.length === 0 && eventAttrs['gen_ai.output.messages']) {
+      outputMessages = parseMessages(eventAttrs['gen_ai.output.messages'] as string | unknown[] | null);
     }
   }
 
-  // Fall back to span attributes if events didn't yield messages
+  // Fall back to span attributes
   if (inputMessages.length === 0) {
-    const raw = attrs['gen_ai.prompt'] ?? attrs['gen_ai.content.prompt'];
-    if (raw != null) {
-      inputMessages = parseMessages(raw as string | unknown[] | null);
-    }
+    inputMessages = parseMessages(attrs['gen_ai.input.messages'] as string | unknown[] | null);
   }
   if (outputMessages.length === 0) {
-    const raw =
-      attrs['gen_ai.completion'] ?? attrs['gen_ai.content.completion'];
-    if (raw != null) {
-      outputMessages = parseMessages(raw as string | unknown[] | null);
-    }
+    outputMessages = parseMessages(attrs['gen_ai.output.messages'] as string | unknown[] | null);
   }
 
   return { inputMessages, outputMessages };

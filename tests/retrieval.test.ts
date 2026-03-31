@@ -38,10 +38,8 @@ describe('parseMessages', () => {
 
   it('handles invalid JSON string', () => {
     const result = parseMessages('not valid json');
-    // Should return the raw string as a message with role 'unknown'
-    expect(result).toHaveLength(1);
-    expect(result[0].role).toBe('unknown');
-    expect(result[0].content).toBe('not valid json');
+    // Invalid JSON returns empty array
+    expect(result).toHaveLength(0);
   });
 
   it('handles single object JSON string', () => {
@@ -69,11 +67,11 @@ describe('parseMessages', () => {
     expect(messages[0].role).toBe('unknown');
   });
 
-  it('defaults content to empty string when missing', () => {
+  it('skips items with no content or parts', () => {
     const raw = [{ role: 'user' }];
     const messages = parseMessages(raw);
-    expect(messages).toHaveLength(1);
-    expect(messages[0].content).toBe('');
+    // Items with neither parts nor content are skipped
+    expect(messages).toHaveLength(0);
   });
 });
 
@@ -83,15 +81,13 @@ describe('extractMessagesFromDoc', () => {
       attributes: {},
       events: [
         {
-          name: 'gen_ai.content.prompt',
           attributes: {
-            'gen_ai.prompt': JSON.stringify([{ role: 'user', content: 'hi' }]),
+            'gen_ai.input.messages': JSON.stringify([{ role: 'user', content: 'hi' }]),
           },
         },
         {
-          name: 'gen_ai.content.completion',
           attributes: {
-            'gen_ai.completion': JSON.stringify([{ role: 'assistant', content: 'hello' }]),
+            'gen_ai.output.messages': JSON.stringify([{ role: 'assistant', content: 'hello' }]),
           },
         },
       ],
@@ -107,8 +103,8 @@ describe('extractMessagesFromDoc', () => {
   it('falls back to span attributes when no events', () => {
     const doc = {
       attributes: {
-        'gen_ai.prompt': JSON.stringify([{ role: 'user', content: 'from attr' }]),
-        'gen_ai.completion': JSON.stringify([{ role: 'assistant', content: 'response' }]),
+        'gen_ai.input.messages': JSON.stringify([{ role: 'user', content: 'from attr' }]),
+        'gen_ai.output.messages': JSON.stringify([{ role: 'assistant', content: 'response' }]),
       },
     };
 

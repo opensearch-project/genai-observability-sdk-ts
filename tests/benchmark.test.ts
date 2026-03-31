@@ -71,9 +71,9 @@ describe('Benchmark class', () => {
     logSpy.mockRestore();
   });
 
-  it('log records I/O when recordIo is true (default)', () => {
+  it('log records I/O when recordIo is true', () => {
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
-    const bm = new Benchmark('suite');
+    const bm = new Benchmark('suite', { recordIo: true });
     bm.log({ input: { query: 'hello' }, output: 'world', expected: 'world' });
     bm.close();
 
@@ -107,7 +107,7 @@ describe('Benchmark class', () => {
 
     const spans = getFinishedSpans();
     const caseSpan = spans.find(s => s.name.startsWith('test_case'))!;
-    expect(caseSpan.attributes['test.case.result.status']).toBe('error');
+    expect(caseSpan.attributes['test.case.result.status']).toBe('fail');
     expect(caseSpan.attributes['test.case.error']).toBe('something went wrong');
     expect(caseSpan.status.code).toBe(SpanStatusCode.ERROR);
     logSpy.mockRestore();
@@ -272,7 +272,7 @@ describe('evaluate', () => {
       scores: [],
     });
 
-    expect(result.cases[0].status).toBe('error');
+    expect(result.cases[0].status).toBe('fail');
     expect(result.cases[0].error).toBeDefined();
     expect(result.summary.errorCount).toBe(1);
     logSpy.mockRestore();
@@ -353,13 +353,14 @@ describe('evaluate', () => {
     logSpy.mockRestore();
   });
 
-  it('records I/O on case spans by default', () => {
+  it('records I/O on case spans when recordIo is true', () => {
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
     evaluate({
       name: 'io-test',
       task: () => 'output',
       data: [{ input: 'input', expected: 'output' }],
       scores: [],
+      recordIo: true,
     });
 
     const spans = getFinishedSpans();

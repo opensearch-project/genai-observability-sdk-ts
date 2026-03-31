@@ -75,18 +75,49 @@ function resolveSpanName(
   return baseName;
 }
 
+function getArgNames(fn: Function): string[] {
+  const source = fn.toString();
+  const match = source.match(/\(([^)]*)\)/);
+  if (!match) return [];
+  return match[1]
+    .split(",")
+    .map((p) =>
+      p
+        .trim()
+        .replace(/\s*=.*$/, "")    // default values
+        .replace(/\.{3}/, "")      // rest params
+        .replace(/:\s*.*$/, "")    // TS type annotations
+    )
+    .filter(Boolean);
+}
+
 function setInputAttributes(
   span: Span,
   args: unknown[],
   op: string | undefined,
+  fn: Function,
 ): void {
   if (args.length === 0) return;
-  const serialized = truncate(safeStringify(args.length === 1 ? args[0] : args));
-  if (op === Op.EXECUTE_TOOL) {
-    span.setAttribute("gen_ai.tool.call.arguments", serialized);
-  } else {
-    span.setAttribute("gen_ai.input.messages", serialized);
-  }
+  try {
+    const paramNames = getArgNames(fn);
+    let value: unknown;
+    if (paramNames.length > 0) {
+      const obj: Record<string, unknown> = {};
+      for (let i = 0; i < args.length; i++) {
+        const key = i < paramNames.length ? paramNames[i] : `arg${i}`;
+        obj[key] = args[i];
+      }
+      value = obj;
+    } else {
+      value = args.length === 1 ? args[0] : args;
+    }
+    const serialized = truncate(safeStringify(value));
+    if (op === Op.EXECUTE_TOOL) {
+      span.setAttribute("gen_ai.tool.call.arguments", serialized);
+    } else {
+      span.setAttribute("gen_ai.input.messages", serialized);
+    }
+  } catch { /* ignore */ }
 }
 
 function setOutputAttributes(
@@ -175,7 +206,7 @@ function wrapFunction<F extends (...args: any[]) => any>(
 
       return tracer.startActiveSpan(spanName, { kind }, (span: Span) => {
         setNameAttributes(span, resolvedName, op);
-        setInputAttributes(span, args, op);
+        setInputAttributes(span, args, op, fn);
 
         const gen = fn.apply(this, args) as AsyncGenerator;
         const collected: unknown[] = [];
@@ -231,7 +262,7 @@ function wrapFunction<F extends (...args: any[]) => any>(
 
       return tracer.startActiveSpan(spanName, { kind }, (span: Span) => {
         setNameAttributes(span, resolvedName, op);
-        setInputAttributes(span, args, op);
+        setInputAttributes(span, args, op, fn);
 
         const gen = fn.apply(this, args) as Generator;
         const collected: unknown[] = [];
@@ -286,7 +317,7 @@ function wrapFunction<F extends (...args: any[]) => any>(
 
     return tracer.startActiveSpan(spanName, { kind }, (span: Span) => {
       setNameAttributes(span, resolvedName, op);
-      setInputAttributes(span, args, op);
+      setInputAttributes(span, args, op, fn);
 
       try {
         const result = fn.apply(this, args);
