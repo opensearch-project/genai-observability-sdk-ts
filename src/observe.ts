@@ -181,7 +181,7 @@ function wrapFunction<F extends (...args: any[]) => any>(
         const collected: unknown[] = [];
 
         const wrapper: AsyncGenerator = {
-          async next(...nextArgs: any[]) {
+          async next(...nextArgs: [] | [any]) {
             try {
               const result = await gen.next(...nextArgs);
               if (!result.done) {
@@ -237,7 +237,7 @@ function wrapFunction<F extends (...args: any[]) => any>(
         const collected: unknown[] = [];
 
         const wrapper: Generator = {
-          next(...nextArgs: any[]) {
+          next(...nextArgs: [] | [any]) {
             try {
               const result = gen.next(...nextArgs);
               if (!result.done) {
