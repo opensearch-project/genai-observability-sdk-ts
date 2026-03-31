@@ -165,7 +165,7 @@ function computeSummary(
   cases: TestCaseResult[],
   startTime: number,
 ): BenchmarkSummary {
-  const errorCount = cases.filter(c => c.status === 'error').length;
+  const errorCount = cases.filter(c => c.status === 'fail').length;
   const durationMs = Date.now() - startTime;
 
   const scoreAcc: Record<string, { sum: number; min: number; max: number; count: number }> = {};
@@ -240,7 +240,7 @@ export class Benchmark {
   constructor(name: string, options?: { metadata?: Record<string, unknown>; recordIo?: boolean }) {
     this._name = name;
     this._metadata = safeMetadata(options?.metadata, `benchmark:${name}`);
-    this._recordIo = options?.recordIo ?? true;
+    this._recordIo = options?.recordIo ?? false;
     this._runId = makeRunId();
     this._startTime = Date.now();
 
@@ -286,7 +286,7 @@ export class Benchmark {
 
     const caseId = options.caseId ?? makeCaseId(options.input);
     const hasError = options.error !== undefined;
-    const status = hasError ? 'error' : 'pass';
+    const status = hasError ? 'fail' : 'pass';
 
     const tracer = trace.getTracer(TRACER_NAME);
 
@@ -315,7 +315,7 @@ export class Benchmark {
     if (link) links.push(link);
 
     const span = tracer.startSpan(
-      `test_case ${options.caseName ?? caseId}`,
+      "test_case",
       { attributes: spanAttrs, links },
       this._rootContext,
     );
@@ -351,7 +351,7 @@ export class Benchmark {
     }
     this._closed = true;
 
-    const errorCount = this._cases.filter(c => c.status === 'error').length;
+    const errorCount = this._cases.filter(c => c.status === 'fail').length;
     const suiteStatus = errorCount === 0 ? 'pass' : 'fail';
 
     this._rootSpan.setAttribute("test.suite.run.status", suiteStatus);
@@ -381,7 +381,7 @@ export function evaluate(options: {
   recordIo?: boolean;
 }): BenchmarkResult {
   const filteredMetadata = safeMetadata(options.metadata, `evaluate:${options.name}`);
-  const recordIo = options.recordIo ?? true;
+  const recordIo = options.recordIo ?? false;
   const runId = makeRunId();
   const startTime = Date.now();
   const cases: TestCaseResult[] = [];
@@ -415,11 +415,11 @@ export function evaluate(options: {
       output = options.task(item.input);
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
-      caseStatus = 'error';
+      caseStatus = 'fail';
     }
 
     // Run scorers
-    if (caseStatus !== 'error') {
+    if (caseStatus !== 'fail') {
       for (const scorer of options.scores) {
         try {
           const result = scorer(item.input, output, expected);
@@ -462,14 +462,14 @@ export function evaluate(options: {
     }
 
     const caseSpan = tracer.startSpan(
-      `test_case ${caseName ?? caseId}`,
+      "test_case",
       { attributes: spanAttrs },
       rootContext,
     );
 
     addScoreEvents(caseSpan, evalScores);
 
-    if (caseStatus === 'error') {
+    if (caseStatus === 'fail') {
       caseSpan.setStatus({ code: SpanStatusCode.ERROR, message: error });
     }
 
@@ -489,7 +489,7 @@ export function evaluate(options: {
   }
 
   // Finalize root span
-  const errorCount = cases.filter(c => c.status === 'error').length;
+  const errorCount = cases.filter(c => c.status === 'fail').length;
   const suiteStatus = errorCount === 0 ? 'pass' : 'fail';
   rootSpan.setAttribute("test.suite.run.status", suiteStatus);
   if (errorCount > 0) {
