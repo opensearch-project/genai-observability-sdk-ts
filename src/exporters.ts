@@ -75,7 +75,8 @@ export class AWSSigV4OTLPExporter implements SpanExporter {
     );
     const credentials = await fromNodeProviderChain()();
 
-    const aws4 = await import('aws4');
+    const aws4Module = await import('aws4');
+    const aws4 = aws4Module.default ?? aws4Module;
     const signed = aws4.sign(
       {
         service: this._service,
