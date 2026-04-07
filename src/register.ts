@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright OpenSearch Contributors
 
-import { trace } from "@opentelemetry/api";
 import { Resource } from "@opentelemetry/resources";
 import {
   BasicTracerProvider,
@@ -87,10 +86,10 @@ async function createExporter(
   return new OTLPTraceExporter({ url: endpoint, headers });
 }
 
-function tryAutoInstrument(): void {
+async function tryAutoInstrument(): Promise<void> {
   for (const pkg of INSTRUMENTOR_PACKAGES) {
     try {
-      const mod = require(pkg);
+      const mod = await import(pkg);
       if (typeof mod?.register === "function") {
         mod.register();
       } else if (typeof mod?.default?.register === "function") {
@@ -136,7 +135,7 @@ export async function register(
 
   const autoInstrument = options.autoInstrument ?? true;
   if (autoInstrument) {
-    tryAutoInstrument();
+    tryAutoInstrument().catch(() => {});
   }
 
   return provider;

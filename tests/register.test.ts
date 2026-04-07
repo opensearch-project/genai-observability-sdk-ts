@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright OpenSearch Contributors
 
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { InMemorySpanExporter, SimpleSpanProcessor } from '@opentelemetry/sdk-trace-base';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { InMemorySpanExporter } from '@opentelemetry/sdk-trace-base';
 import { register, DEFAULT_ENDPOINT } from '../src/register.js';
 
 describe('DEFAULT_ENDPOINT', () => {

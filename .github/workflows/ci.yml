@@ -79,8 +79,11 @@ jobs:
           test -f dist/index.d.cts
           echo "All expected build outputs present."
 
-      - name: Check package size
-        run: pnpm pack --dry-run 2>&1
+      - name: Check package contents
+        run: |
+          pnpm pack 2>&1
+          ls -lh *.tgz
+          tar tzf *.tgz | head -30
 
   dco-check:
     name: DCO Check

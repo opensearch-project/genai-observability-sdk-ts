@@ -3,7 +3,6 @@
 
 import {
   trace,
-  context,
   SpanKind,
   SpanStatusCode,
   type Span,
@@ -48,6 +47,9 @@ export interface ObserveOptions {
   nameFrom?: string;
 }
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type AnyFunction = (...args: any[]) => any;
+
 function truncate(value: string): string {
   if (value.length <= MAX_ATTR_LENGTH) return value;
   return value.slice(0, MAX_ATTR_LENGTH - TRUNCATION_SUFFIX.length) + TRUNCATION_SUFFIX;
@@ -75,7 +77,7 @@ function resolveSpanName(
   return baseName;
 }
 
-function getArgNames(fn: Function): string[] {
+function getArgNames(fn: AnyFunction): string[] {
   const source = fn.toString();
   const match = source.match(/\(([^)]*)\)/);
   if (!match) return [];
@@ -95,7 +97,7 @@ function setInputAttributes(
   span: Span,
   args: unknown[],
   op: string | undefined,
-  fn: Function,
+  fn: AnyFunction,
 ): void {
   if (args.length === 0) return;
   try {
@@ -165,7 +167,7 @@ function isGeneratorFunction(fn: unknown): boolean {
 
 function resolveNameFromArgs(
   nameFrom: string,
-  fn: Function,
+  fn: AnyFunction,
   args: unknown[],
 ): string | undefined {
   // Try to get parameter names from function source
@@ -187,7 +189,7 @@ function resolveNameFromArgs(
   return undefined;
 }
 
-function wrapFunction<F extends (...args: any[]) => any>(
+function wrapFunction<F extends AnyFunction>(
   fn: F,
   options: ObserveOptions,
 ): F {
@@ -197,7 +199,7 @@ function wrapFunction<F extends (...args: any[]) => any>(
   const nameFrom = options.nameFrom;
 
   if (isAsyncGeneratorFunction(fn)) {
-    const wrapped = function (this: any, ...args: any[]) {
+    const wrapped = function (this: unknown, ...args: unknown[]) {
       const resolvedName = nameFrom
         ? resolveNameFromArgs(nameFrom, fn, args) ?? baseName
         : baseName;
@@ -212,7 +214,7 @@ function wrapFunction<F extends (...args: any[]) => any>(
         const collected: unknown[] = [];
 
         const wrapper: AsyncGenerator = {
-          async next(...nextArgs: [] | [any]) {
+          async next(...nextArgs: [] | [unknown]) {
             try {
               const result = await gen.next(...nextArgs);
               if (!result.done) {
@@ -229,12 +231,12 @@ function wrapFunction<F extends (...args: any[]) => any>(
               throw error;
             }
           },
-          async return(value: any) {
+          async return(value: unknown) {
             setOutputAttributes(span, collected, op);
             span.end();
             return gen.return(value);
           },
-          async throw(error: any) {
+          async throw(error: unknown) {
             span.setStatus({ code: SpanStatusCode.ERROR, message: String(error) });
             span.recordException(error as Error);
             span.end();
@@ -245,7 +247,7 @@ function wrapFunction<F extends (...args: any[]) => any>(
           },
         };
 
-        return wrapper as any;
+        return wrapper as ReturnType<F>;
       });
     };
     Object.defineProperty(wrapped, "name", { value: fn.name });
@@ -253,7 +255,7 @@ function wrapFunction<F extends (...args: any[]) => any>(
   }
 
   if (isGeneratorFunction(fn)) {
-    const wrapped = function (this: any, ...args: any[]) {
+    const wrapped = function (this: unknown, ...args: unknown[]) {
       const resolvedName = nameFrom
         ? resolveNameFromArgs(nameFrom, fn, args) ?? baseName
         : baseName;
@@ -268,7 +270,7 @@ function wrapFunction<F extends (...args: any[]) => any>(
         const collected: unknown[] = [];
 
         const wrapper: Generator = {
-          next(...nextArgs: [] | [any]) {
+          next(...nextArgs: [] | [unknown]) {
             try {
               const result = gen.next(...nextArgs);
               if (!result.done) {
@@ -285,12 +287,12 @@ function wrapFunction<F extends (...args: any[]) => any>(
               throw error;
             }
           },
-          return(value: any) {
+          return(value: unknown) {
             setOutputAttributes(span, collected, op);
             span.end();
             return gen.return(value);
           },
-          throw(error: any) {
+          throw(error: unknown) {
             span.setStatus({ code: SpanStatusCode.ERROR, message: String(error) });
             span.recordException(error as Error);
             span.end();
@@ -301,14 +303,14 @@ function wrapFunction<F extends (...args: any[]) => any>(
           },
         };
 
-        return wrapper as any;
+        return wrapper as ReturnType<F>;
       });
     };
     Object.defineProperty(wrapped, "name", { value: fn.name });
     return wrapped as unknown as F;
   }
 
-  const wrapped = function (this: any, ...args: any[]) {
+  const wrapped = function (this: unknown, ...args: unknown[]) {
     const resolvedName = nameFrom
       ? resolveNameFromArgs(nameFrom, fn, args) ?? baseName
       : baseName;
@@ -337,7 +339,7 @@ function wrapFunction<F extends (...args: any[]) => any>(
               span.recordException(error as Error);
               span.end();
               throw error;
-            }) as any;
+            }) as ReturnType<F>;
         }
 
         setOutputAttributes(span, result, op);
@@ -358,21 +360,22 @@ function wrapFunction<F extends (...args: any[]) => any>(
   return wrapped as unknown as F;
 }
 
-// Overload signatures
-export function observe<F extends (...args: any[]) => any>(fn: F): F;
-export function observe<F extends (...args: any[]) => any>(
+// Overload signatures — `any` required here for TypeScript generic variance:
+// users pass functions with arbitrary signatures, and `unknown` would break callability.
+export function observe<F extends AnyFunction>(fn: F): F;
+export function observe<F extends AnyFunction>(
   options: ObserveOptions,
   fn: F,
 ): F;
 export function observe(
   options: ObserveOptions,
-): <F extends (...args: any[]) => any>(fn: F) => F;
+): <F extends AnyFunction>(fn: F) => F;
 
 // Implementation
 export function observe(
-  fnOrOptions: ((...args: any[]) => any) | ObserveOptions,
-  maybeFn?: (...args: any[]) => any,
-): any {
+  fnOrOptions: AnyFunction | ObserveOptions,
+  maybeFn?: AnyFunction,
+): unknown {
   // observe(fn)
   if (typeof fnOrOptions === "function") {
     return wrapFunction(fnOrOptions, {});
@@ -386,7 +389,7 @@ export function observe(
   }
 
   // observe(options) → wrapper
-  return <F extends (...args: any[]) => any>(fn: F): F => {
+  return <F extends AnyFunction>(fn: F): F => {
     return wrapFunction(fn, options);
   };
 }

@@ -123,7 +123,7 @@ describe('enrich', () => {
 
   it('passes extra kwargs as attributes', () => {
     callWithinSpan(() =>
-      enrich({ model: 'gpt-4', 'custom.metric': 0.95 } as any),
+      enrich({ model: 'gpt-4', 'custom.metric': 0.95 }),
     );
 
     const spans = getFinishedSpans();
@@ -134,7 +134,8 @@ describe('enrich', () => {
 
   it('skips undefined and null values', () => {
     callWithinSpan(() =>
-      enrich({ model: undefined, provider: null as any }),
+      // Pass null via index signature to test runtime null handling
+      enrich({ model: undefined, provider: null as unknown as string }),
     );
 
     const spans = getFinishedSpans();

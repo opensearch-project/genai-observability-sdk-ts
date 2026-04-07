@@ -2,7 +2,7 @@
 // Copyright OpenSearch Contributors
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { SpanKind, SpanStatusCode, trace, context } from '@opentelemetry/api';
+import { SpanKind, SpanStatusCode } from '@opentelemetry/api';
 import { observe, withObserve, Op } from '../src/observe.js';
 import { getFinishedSpans, clearSpans } from './setup.js';
 
@@ -406,7 +406,7 @@ describe('withObserve', () => {
   });
 
   it('accepts options with op', () => {
-    withObserve('myAgent', { op: Op.INVOKE_AGENT }, (span) => {
+    withObserve('myAgent', { op: Op.INVOKE_AGENT }, (_span) => {
       return 'ok';
     });
 
@@ -417,7 +417,7 @@ describe('withObserve', () => {
   });
 
   it('accepts options with custom kind', () => {
-    withObserve('server-block', { kind: SpanKind.SERVER }, (span) => {
+    withObserve('server-block', { kind: SpanKind.SERVER }, (_span) => {
       return 'ok';
     });
 

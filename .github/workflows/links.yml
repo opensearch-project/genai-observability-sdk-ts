@@ -21,9 +21,9 @@ jobs:
         with:
           args: >-
             --accept 200,403,429
-            --exclude-mail
             --exclude 'file:///*'
             --exclude 'localhost'
+            --exclude 'mailto:'
             '**/*.md'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
