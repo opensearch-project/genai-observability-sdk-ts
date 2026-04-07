@@ -413,6 +413,12 @@ export function evaluate(options: {
     // Run task
     try {
       output = options.task(item.input);
+      if (output instanceof Promise) {
+        throw new Error(
+          "evaluate() does not support async task functions. " +
+          "The task returned a Promise — use a synchronous task or await the async call inside a sync wrapper."
+        );
+      }
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
       caseStatus = 'fail';

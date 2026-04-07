@@ -263,6 +263,21 @@ describe('evaluate', () => {
     logSpy.mockRestore();
   });
 
+  it('rejects async task functions with a clear error', () => {
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const result = evaluate({
+      name: 'async-task-test',
+      task: async (input) => `answer: ${input}`,
+      data: [{ input: 'q1' }],
+      scores: [],
+    });
+
+    expect(result.cases[0].status).toBe('fail');
+    expect(result.cases[0].error).toContain('does not support async task functions');
+    expect(result.summary.errorCount).toBe(1);
+    logSpy.mockRestore();
+  });
+
   it('handles task errors', () => {
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
     const result = evaluate({
