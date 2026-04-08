@@ -1,0 +1,72 @@
+{
+  "name": "opensearch-genai-observability-sdk-ts",
+  "version": "0.1.0",
+  "description": "OpenSearch AI Observability SDK — OTEL-native tracing and scoring for LLM applications",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "eslint src/ tests/",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [
+    "opentelemetry",
+    "tracing",
+    "llm",
+    "ai",
+    "observability",
+    "opensearch",
+    "genai"
+  ],
+  "license": "Apache-2.0",
+  "author": "OpenSearch Contributors",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/opensearch-project/genai-observability-sdk-ts"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@opentelemetry/api": "^1.9.0",
+    "@opentelemetry/exporter-trace-otlp-grpc": "^0.57.0",
+    "@opentelemetry/exporter-trace-otlp-http": "^0.57.0",
+    "@opentelemetry/resources": "^1.30.0",
+    "@opentelemetry/sdk-trace-base": "^1.30.0"
+  },
+  "optionalDependencies": {
+    "@aws-sdk/credential-providers": "^3.700.0",
+    "@opensearch-project/opensearch": "^2.12.0",
+    "aws4": "^1.13.0"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.39.4",
+    "@opentelemetry/context-async-hooks": "^2.6.1",
+    "@types/aws4": "^1.11.6",
+    "@types/node": "^20.17.0",
+    "eslint": "^9.0.0",
+    "tsup": "^8.3.0",
+    "typescript": "^5.7.0",
+    "typescript-eslint": "^8.58.0",
+    "vitest": "^3.0.0"
+  }
+}
