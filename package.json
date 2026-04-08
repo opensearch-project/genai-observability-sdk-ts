@@ -51,7 +51,7 @@
     "@opentelemetry/exporter-trace-otlp-grpc": "^0.57.0",
     "@opentelemetry/exporter-trace-otlp-http": "^0.57.0",
     "@opentelemetry/resources": "^1.30.0",
-    "@opentelemetry/sdk-trace-base": "^1.30.0"
+    "@opentelemetry/sdk-trace-base": "^2.6.1"
   },
   "optionalDependencies": {
     "@aws-sdk/credential-providers": "^3.700.0",
