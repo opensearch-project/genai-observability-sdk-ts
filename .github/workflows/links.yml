@@ -24,6 +24,7 @@ jobs:
             --exclude 'file:///*'
             --exclude 'localhost'
             --exclude 'mailto:'
+            --exclude 'npmjs.com'
             '**/*.md'
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
