@@ -55,7 +55,7 @@
   },
   "optionalDependencies": {
     "@aws-sdk/credential-providers": "^3.700.0",
-    "@opensearch-project/opensearch": "^2.12.0",
+    "@opensearch-project/opensearch": "^3.5.1",
     "aws4": "^1.13.0"
   },
   "devDependencies": {
