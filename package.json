@@ -1,5 +1,5 @@
 {
-  "name": "opensearch-genai-observability-sdk-ts",
+  "name": "@opensearch-project/genai-observability-sdk-ts",
   "version": "0.1.1",
   "description": "OpenSearch AI Observability SDK — OTEL-native tracing and scoring for LLM applications",
   "type": "module",
