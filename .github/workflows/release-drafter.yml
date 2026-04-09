@@ -1,0 +1,55 @@
+name: Release drafter
+
+on:
+  push:
+    tags:
+      - "*"
+
+jobs:
+  draft-a-release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 1440
+    permissions:
+      id-token: write
+      contents: write
+      issues: write
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v5
+
+      - id: get_approvers
+        run: |
+          echo "approvers=$(cat .github/CODEOWNERS | grep @ | tr -d '* ' | sed 's/@/,/g' | sed 's/,//1')" >> $GITHUB_OUTPUT
+
+      - uses: trstringer/manual-approval@v1
+        with:
+          secret: ${{ github.TOKEN }}
+          approvers: ${{ steps.get_approvers.outputs.approvers }}
+          minimum-approvals: 2
+          issue-title: 'Release genai-observability-sdk-ts'
+          issue-body: "Please approve or deny the release of genai-observability-sdk-ts. **Tag**: ${{ github.ref_name }}  **Commit**: ${{ github.sha }}"
+          exclude-workflow-initiator-as-approver: false
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: pnpm
+          registry-url: 'https://registry.npmjs.org'
+
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: pnpm test
+
+      - run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Draft a release
+        uses: softprops/action-gh-release@v1
+        with:
+          draft: false
+          generate_release_notes: true
