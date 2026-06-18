@@ -68,5 +68,19 @@
     "typescript": "^5.7.0",
     "typescript-eslint": "^8.58.0",
     "vitest": "^3.0.0"
+  },
+  "pnpm": {
+    "overrides": {
+      "protobufjs": "^7.6.3",
+      "@protobufjs/utf8": "^1.1.1",
+      "@grpc/grpc-js": "^1.14.4",
+      "vite": "^7.3.5",
+      "esbuild": "^0.28.1",
+      "vitest": "^3.2.6",
+      "postcss": "^8.5.10",
+      "js-yaml": "^4.2.0",
+      "fast-xml-parser": "^5.7.0",
+      "fast-xml-builder": "^1.1.7"
+    }
   }
 }
