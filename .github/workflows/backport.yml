@@ -1,23 +1,12 @@
+---
 name: Backport
-
 on:
   pull_request_target:
     types: [closed, labeled]
 
-permissions:
-  contents: write
-  pull-requests: write
-
 jobs:
   backport:
-    if: github.event.pull_request.merged == true
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-        with:
-          fetch-depth: 0
-
-      - name: Create backport PRs
-        uses: VachaShah/backport@142d3b8a8c70dc54db515e653e5ed3c3fac64100 # v2.2.0
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
+    if: github.repository == 'opensearch-project/genai-observability-sdk-ts'
+    uses: opensearch-project/opensearch-build/.github/workflows/backport-pr.yml@main
+    secrets:
+      OPENSEARCH_CI_BOT_TOKEN: ${{ secrets.OPENSEARCH_CI_BOT_TOKEN }}
