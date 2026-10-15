@@ -3,7 +3,7 @@
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { observe } from '../src/observe.js';
-import { enrich } from '../src/enrich.js';
+import { enrich, markAgentRoot, AGENT_ROOT_ATTRIBUTE } from '../src/enrich.js';
 import { getFinishedSpans, clearSpans } from './setup.js';
 
 beforeEach(() => clearSpans());
@@ -186,5 +186,25 @@ describe('enrich', () => {
     expect(span.attributes['gen_ai.agent.id']).toBe('agent-2');
     expect(span.attributes['gen_ai.agent.description']).toBe('Smart agent');
     expect(span.attributes['gen_ai.system_instructions']).toBe('Be concise');
+  });
+});
+
+describe('markAgentRoot', () => {
+  it('marks the active span', () => {
+    const run = observe({ name: 'planner' }, () => {
+      markAgentRoot();
+      observe({ name: 'chat' }, () => undefined)();
+    });
+    run();
+
+    const spans = getFinishedSpans();
+    expect(AGENT_ROOT_ATTRIBUTE).toBe('derived.gen_ai.is_root');
+    expect(spans.find(s => s.name === 'planner')!.attributes[AGENT_ROOT_ATTRIBUTE]).toBe(true);
+    expect(spans.find(s => s.name === 'chat')!.attributes[AGENT_ROOT_ATTRIBUTE]).toBeUndefined();
+  });
+
+  it('does nothing without an active span', () => {
+    expect(() => markAgentRoot()).not.toThrow();
+    expect(getFinishedSpans()).toHaveLength(0);
   });
 });
