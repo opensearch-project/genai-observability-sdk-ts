@@ -5,7 +5,7 @@ export { register, DEFAULT_ENDPOINT } from './register.js';
 export type { RegisterOptions } from './register.js';
 export { observe, withObserve, Op } from './observe.js';
 export type { ObserveOptions } from './observe.js';
-export { enrich } from './enrich.js';
+export { enrich, markAgentRoot, AGENT_ROOT_ATTRIBUTE } from './enrich.js';
 export type { EnrichOptions } from './enrich.js';
 export { score } from './score.js';
 export type { ScoreOptions } from './score.js';

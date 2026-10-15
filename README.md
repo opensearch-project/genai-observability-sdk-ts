@@ -12,6 +12,7 @@ OTel-native tracing and scoring for LLM applications. Instrument your AI workflo
 - **`observe()`** — function wrapper that creates OTel spans with [GenAI semantic convention](https://opentelemetry.io/docs/specs/semconv/gen-ai/) attributes
 - **`withObserve()`** — block-level tracing (TypeScript equivalent of Python's context manager)
 - **`enrich()`** — add model, token usage, and other GenAI attributes to the active span from anywhere in your code
+- **`markAgentRoot()`** — mark the agent's span as the trace's agent root in OpenSearch Agent Traces
 - **Auto-instrumentation** — automatically discovers and activates installed instrumentor packages (OpenAI, etc.)
 - **Scoring** — `score()` emits evaluation metrics as OTel spans at span, trace, or standalone level
 - **Benchmarks** — `evaluate()` runs your agent against a dataset with scorers; `Benchmark` uploads results from any eval framework
@@ -300,6 +301,19 @@ const chat = observe({ name: "chat", op: Op.CHAT }, (prompt: string) => {
 | `agentDescription` | `gen_ai.agent.description` | Agent description |
 | `systemInstructions` | `gen_ai.system_instructions` | System prompt |
 | `[extra: string]` | As provided | Any additional key-value attributes |
+
+### `markAgentRoot()`
+
+Mark the active span as its trace's agent root. OpenSearch Agent Traces lists a trace by the span marked with `derived.gen_ai.is_root`. Data Prepper marks the outermost GenAI span of each trace for you (the root when it is a GenAI span, or the agent span below an HTTP handler), so you only need this to choose the span yourself. A span marked at the source wins.
+
+```typescript
+const plan = observe({ name: "planner", op: Op.INVOKE_AGENT }, async (query: string) => {
+  markAgentRoot();
+  // ...
+});
+```
+
+Without the SDK, set the span attribute `derived.gen_ai.is_root` to `true` on the agent's span.
 
 ### `score()`
 

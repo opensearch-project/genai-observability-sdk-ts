@@ -62,3 +62,27 @@ export function enrich(options: EnrichOptions): void {
     }
   }
 }
+
+/** Marks the span that OpenSearch Agent Traces lists as a trace's agent root. */
+export const AGENT_ROOT_ATTRIBUTE = "derived.gen_ai.is_root";
+
+/**
+ * Mark the active span as the agent root of its trace.
+ *
+ * OpenSearch Agent Traces lists a trace by the span marked with `derived.gen_ai.is_root`. Data
+ * Prepper marks the outermost GenAI span of each trace for you: the root when it is a GenAI span,
+ * or the agent span below it (for example when an HTTP handler runs the agent). Call this to
+ * choose the span yourself. A span marked at the source wins, and Data Prepper then marks nothing
+ * else in that part of the trace.
+ *
+ * @example
+ * const plan = observe({ name: "planner", op: Op.INVOKE_AGENT }, async (query: string) => {
+ *   markAgentRoot();
+ *   // ...
+ * });
+ */
+export function markAgentRoot(): void {
+  const span = trace.getSpan(context.active());
+  if (!span || !span.isRecording()) return;
+  span.setAttribute(AGENT_ROOT_ATTRIBUTE, true);
+}
