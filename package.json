@@ -74,7 +74,7 @@
       "protobufjs": "^7.6.3",
       "@protobufjs/utf8": "^1.1.1",
       "@grpc/grpc-js": "^1.14.4",
-      "vite": "^7.3.5",
+      "vite": "^7.3.7",
       "esbuild": "^0.28.1",
       "vitest": "^3.2.6",
       "postcss": "^8.5.10",
