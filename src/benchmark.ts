@@ -330,7 +330,7 @@ interface CaseIdentity {
   runId: string;
   caseId: string;
   caseName?: string;
-  /** `gen_ai.agent.name` / `agent.version` of the agent under test, when known. */
+  /** `gen_ai.agent.name` / `gen_ai.agent.version` of the agent under test, when known. */
   agent?: Record<string, string>;
 }
 
@@ -535,7 +535,7 @@ export interface BenchmarkOptions {
   recordIo?: boolean;
   /** `gen_ai.agent.name` of the agent under test. Default: `register({ agentName })`. */
   agentName?: string;
-  /** `agent.version` of the agent under test. Default: `register({ agentVersion })`. */
+  /** `gen_ai.agent.version` of the agent under test. Default: `register({ agentVersion })`. */
   agentVersion?: string;
 }
 
@@ -694,7 +694,7 @@ export interface EvaluateOptions {
    * `register({ agentName })`.
    */
   agentName?: string;
-  /** `agent.version` of the agent under test, resolved the same way. */
+  /** `gen_ai.agent.version` of the agent under test, resolved the same way. */
   agentVersion?: string;
 }
 

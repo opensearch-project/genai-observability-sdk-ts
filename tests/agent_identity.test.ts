@@ -9,7 +9,7 @@ import { agentDefaults, resolveAgent, setAgentDefaults } from '../src/internal.j
 import { getFinishedSpans, getFinishedLogRecords, clearSpans } from './setup.js';
 
 const NAME = 'gen_ai.agent.name';
-const VERSION = 'agent.version';
+const VERSION = 'gen_ai.agent.version';
 const events = (name: string) =>
   getFinishedLogRecords()
     .filter(r => r.eventName === name)
@@ -109,7 +109,7 @@ describe('Benchmark', () => {
     expect(events(CASE)[0][VERSION]).toBe('v1');
   });
 
-  it('declared version beats a metadata agent.version', () => {
+  it('declared version beats a metadata gen_ai.agent.version', () => {
     const bm = new Benchmark('suite', { metadata: { [VERSION]: 'meta' }, agentVersion: 'v5' });
     bm.close();
     expect(events(RUN)[0][VERSION]).toBe('v5');

@@ -143,7 +143,7 @@ await register({
 
 #### Agent identity
 
-`agentName` / `agentVersion` are stamped as `gen_ai.agent.name` and `agent.version` on every evaluation, test case and test suite run event the SDK emits. OpenSearch Dashboards uses them to scope the Evaluations page to one agent and to compare runs version to version. `agent.version` is an OpenSearch extension until OTel defines an agent version attribute.
+`agentName` / `agentVersion` are stamped as `gen_ai.agent.name` and `gen_ai.agent.version` on every evaluation, test case and test suite run event the SDK emits. OpenSearch Dashboards uses them to scope the Evaluations page to one agent and to compare runs version to version. Both are OpenTelemetry GenAI attributes (`gen_ai.agent.name`, `gen_ai.agent.version`).
 
 Per field, the SDK uses the first of:
 
@@ -430,7 +430,7 @@ The instrumentation scope of the event is always set: the evaluator (`evaluator`
 | `assessment` | `"pass" \| "fail" \| boolean` | `opensearch.evaluation.assessment` | Explicit verdict. Invalid values are dropped with a warning |
 | `conversationId` | `string` | `gen_ai.conversation.id` | Session id for session-scoped evaluations |
 | `agentName` | `string` | `gen_ai.agent.name` | Evaluated agent. Default: the active span's, else `register({ agentName })` |
-| `agentVersion` | `string` | `agent.version` | Its version. Default: the active span's, else `register({ agentVersion })` |
+| `agentVersion` | `string` | `gen_ai.agent.version` | Its version. Default: the active span's, else `register({ agentVersion })` |
 | `errorType` | `string` | `error.type` | Set when the evaluator failed |
 | `judgeTraceId` | `string` | `opensearch.evaluation.judge.trace_id` | The judge's own trace |
 | `attributes` | `Record<string, unknown>` | | Extra string, number, or boolean attributes |

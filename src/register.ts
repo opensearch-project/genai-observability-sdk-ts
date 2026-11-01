@@ -64,7 +64,7 @@ export interface RegisterOptions {
    * call names its own agent or the evaluated span carries one.
    */
   agentName?: string;
-  /** Version of that agent (`agent.version`), stamped the same way. */
+  /** Version of that agent (`gen_ai.agent.version`), stamped the same way. */
   agentVersion?: string;
 }
 

@@ -65,7 +65,7 @@ export function normalizeSpanId(value: string): string | null {
 
 export const AGENT_NAME_KEY = "gen_ai.agent.name";
 /** Our extension until OTel defines an agent version attribute. */
-export const AGENT_VERSION_KEY = "agent.version";
+export const AGENT_VERSION_KEY = "gen_ai.agent.version";
 
 let agentDefaultName: string | undefined;
 let agentDefaultVersion: string | undefined;
@@ -82,7 +82,7 @@ export function agentDefaults(): [string | undefined, string | undefined] {
 }
 
 /**
- * @internal `[gen_ai.agent.name, agent.version]` read from an SDK span (best
+ * @internal `[gen_ai.agent.name, gen_ai.agent.version]` read from an SDK span (best
  * effort: only spans that expose their attributes are read).
  */
 export function spanAgent(span: unknown): [string | undefined, string | undefined] {

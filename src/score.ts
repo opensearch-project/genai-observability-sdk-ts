@@ -87,7 +87,7 @@ export interface ScoreOptions {
    * `gen_ai.agent.name` (inline scoring), else `register({ agentName })`.
    */
   agentName?: string;
-  /** `agent.version` of the evaluated agent, resolved the same way. */
+  /** `gen_ai.agent.version` of the evaluated agent, resolved the same way. */
   agentVersion?: string;
   /** `error.type` when the evaluator failed. */
   errorType?: string;
