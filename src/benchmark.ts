@@ -27,7 +27,15 @@ import {
 } from '@opentelemetry/api';
 import { SeverityNumber } from '@opentelemetry/api-logs';
 import { createHash, randomUUID } from 'crypto';
-import { RESERVED_KEYS, normalizeSpanId, normalizeTraceId, validateMetadataKeys } from './internal.js';
+import {
+  AGENT_NAME_KEY,
+  AGENT_VERSION_KEY,
+  RESERVED_KEYS,
+  normalizeSpanId,
+  normalizeTraceId,
+  resolveAgent,
+  validateMetadataKeys,
+} from './internal.js';
 import { getEventLogger } from './logs.js';
 import {
   score,
@@ -322,6 +330,24 @@ interface CaseIdentity {
   runId: string;
   caseId: string;
   caseName?: string;
+  /** `gen_ai.agent.name` / `agent.version` of the agent under test, when known. */
+  agent?: Record<string, string>;
+}
+
+/** The run's agent: the declared one, else the one every case agreed on. */
+function runAgent(
+  agents: Array<Record<string, string>>,
+  declared: Record<string, string>,
+): Record<string, string> {
+  const out = { ...declared };
+  for (const key of [AGENT_NAME_KEY, AGENT_VERSION_KEY]) {
+    if (out[key] !== undefined) continue;
+    const values = agents.map(a => a[key]);
+    if (values.length > 0 && values.every(v => v !== undefined && v === values[0])) {
+      out[key] = values[0];
+    }
+  }
+  return out;
 }
 
 function identityAttributes(identity: CaseIdentity): Record<string, string> {
@@ -331,7 +357,7 @@ function identityAttributes(identity: CaseIdentity): Record<string, string> {
     "test.case.id": identity.caseId,
   };
   if (identity.caseName) attrs["test.case.name"] = identity.caseName;
-  return attrs;
+  return { ...attrs, ...(identity.agent ?? {}) };
 }
 
 /**
@@ -362,6 +388,8 @@ function emitCaseScores(
       evaluator: extra.evaluator,
       evaluatorType: extra.evaluatorType,
       errorType: extra.errorType,
+      agentName: identity.agent?.[AGENT_NAME_KEY],
+      agentVersion: identity.agent?.[AGENT_VERSION_KEY],
       attributes: { ...metadata, ...testAttrs },
       traceId: target.traceId,
       spanId: target.traceId ? target.spanId : undefined,
@@ -417,9 +445,14 @@ function emitCaseEvent(options: {
   emitEvent(TEST_CASE_RESULT_EVENT, attrs, options.parent);
 }
 
-function emitRunEvent(summary: BenchmarkSummary, metadata: Attributes): void {
+function emitRunEvent(
+  summary: BenchmarkSummary,
+  metadata: Attributes,
+  agent: Record<string, string> = {},
+): void {
   emitEvent(TEST_SUITE_RUN_RESULT_EVENT, {
     ...metadata,
+    ...agent,
     "test.suite.name": summary.benchmarkName,
     "test.suite.run.id": summary.runId,
     "test.suite.run.status": summary.errorCount === 0 ? 'success' : 'failure',
@@ -500,6 +533,10 @@ function formatSummary(summary: BenchmarkSummary): string {
 export interface BenchmarkOptions {
   metadata?: Record<string, unknown>;
   recordIo?: boolean;
+  /** `gen_ai.agent.name` of the agent under test. Default: `register({ agentName })`. */
+  agentName?: string;
+  /** `agent.version` of the agent under test. Default: `register({ agentVersion })`. */
+  agentVersion?: string;
 }
 
 /**
@@ -515,9 +552,12 @@ export class Benchmark {
   private _start: number;
   private _cases: TestCaseResult[] = [];
   private _closed = false;
+  private _agent: Record<string, string>;
 
   constructor(name: string, options?: BenchmarkOptions) {
     this._name = name;
+    // Declared agent, else the register() default (never invented).
+    this._agent = resolveAgent(options?.agentName, options?.agentVersion);
     this._metadata = safeMetadata(options?.metadata, `benchmark:${name}`);
     this._recordIo = options?.recordIo ?? false;
     this._runId = makeRunId();
@@ -569,6 +609,7 @@ export class Benchmark {
       runId: this._runId,
       caseId,
       caseName: options.caseName,
+      agent: this._agent,
     };
     if (options.status !== undefined && !CASE_STATUSES.includes(options.status)) {
       throw new Error(`status must be one of ${CASE_STATUSES.join(', ')}; got "${options.status}"`);
@@ -628,7 +669,7 @@ export class Benchmark {
     this._closed = true;
 
     const summary = computeSummary(this._name, this._runId, this._cases, elapsedMs(this._start));
-    emitRunEvent(summary, toAttributes(this._metadata));
+    emitRunEvent(summary, toAttributes(this._metadata), this._agent);
     console.log(formatSummary(summary));
     return summary;
   }
@@ -646,6 +687,15 @@ export interface EvaluateOptions {
   scores: Array<ScorerFn | Scorer>;
   metadata?: Record<string, unknown>;
   recordIo?: boolean;
+  /**
+   * `gen_ai.agent.name` of the agent under test. Stamped on the agent root spans
+   * that name none themselves and on every evaluation, case and run event.
+   * When omitted, each case uses the agent its root span names, else
+   * `register({ agentName })`.
+   */
+  agentName?: string;
+  /** `agent.version` of the agent under test, resolved the same way. */
+  agentVersion?: string;
 }
 
 /**
@@ -671,6 +721,8 @@ export function evaluate(options: EvaluateOptions): BenchmarkResult {
   const runId = makeRunId();
   const runStart = performance.now();
   const cases: TestCaseResult[] = [];
+  const declaredAgent = resolveAgent(options.agentName, options.agentVersion);
+  const caseAgents: Array<Record<string, string>> = [];
 
   ensureGlobalTestCaseProcessor();
 
@@ -691,7 +743,11 @@ export function evaluate(options: EvaluateOptions): BenchmarkResult {
     const scoreGroups: Array<{ scores: EvalScore[]; spec?: ScorerSpec; errorType?: string }> = [];
     const scorerErrors: string[] = [];
 
-    const active: ActiveTestCase = { attributes: identityAttributes(identity), seen: new Set() };
+    // Root spans get the declared agent (where they name none themselves).
+    const active: ActiveTestCase = {
+      attributes: { ...identityAttributes(identity), ...declaredAgent },
+      seen: new Set(),
+    };
 
     // Run task
     try {
@@ -707,6 +763,11 @@ export function evaluate(options: EvaluateOptions): BenchmarkResult {
       error = e instanceof Error ? e.message : String(e);
       errorType = errorTypeOf(e);
     }
+
+    // The agent that ran: declared, else named on its root span, else the
+    // register() default.
+    identity.agent = resolveAgent(options.agentName, options.agentVersion, active.rootSpan);
+    caseAgents.push(identity.agent);
 
     // Run scorers (outside the case: judge spans are not the agent run)
     if (error === undefined) {
@@ -796,7 +857,14 @@ export function evaluate(options: EvaluateOptions): BenchmarkResult {
   }
 
   const summary = computeSummary(options.name, runId, cases, elapsedMs(runStart));
-  emitRunEvent(summary, filteredMetadata);
+  const explicitAgent: Record<string, string> = {};
+  if (options.agentName) explicitAgent[AGENT_NAME_KEY] = options.agentName;
+  if (options.agentVersion) explicitAgent[AGENT_VERSION_KEY] = options.agentVersion;
+  // Explicit, else the agent every case agreed on, else register() defaults.
+  emitRunEvent(summary, filteredMetadata, {
+    ...resolveAgent(),
+    ...runAgent(caseAgents, explicitAgent),
+  });
   console.log(formatSummary(summary));
 
   return { summary, cases };

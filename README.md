@@ -136,8 +136,22 @@ await register({
   serviceName: "my-app",
   batch: true,            // BatchSpanProcessor (true) or Simple (false)
   autoInstrument: true,   // discover installed instrumentor packages
+  agentName: "travel_planner", // optional: the agent this process evaluates
+  agentVersion: "v3",          // optional: its version
 });
 ```
+
+#### Agent identity
+
+`agentName` / `agentVersion` are stamped as `gen_ai.agent.name` and `agent.version` on every evaluation, test case and test suite run event the SDK emits. OpenSearch Dashboards uses them to scope the Evaluations page to one agent and to compare runs version to version. `agent.version` is an OpenSearch extension until OTel defines an agent version attribute.
+
+Per field, the SDK uses the first of:
+
+1. the explicit option (`score({ agentName, agentVersion })`, `evaluate({...})`, `new Benchmark(name, {...})`);
+2. the evaluated span's own attribute: the active span for inline `score()`, the agent root span for `evaluate()`;
+3. the `register()` default.
+
+An unknown agent is left out, never invented. `evaluate()` also stamps the agent on the agent root spans where the span names none itself, so traces can be filtered by agent version. The run event names the agent every case agreed on.
 
 **Endpoint resolution (priority order):**
 
@@ -415,7 +429,8 @@ The instrumentation scope of the event is always set: the evaluator (`evaluator`
 | `threshold` | `number` | `opensearch.evaluation.score.threshold` | Pass threshold. `direction` defaults to `maximize` (recorded) |
 | `assessment` | `"pass" \| "fail" \| boolean` | `opensearch.evaluation.assessment` | Explicit verdict. Invalid values are dropped with a warning |
 | `conversationId` | `string` | `gen_ai.conversation.id` | Session id for session-scoped evaluations |
-| `agentName` | `string` | `gen_ai.agent.name` | Evaluated agent |
+| `agentName` | `string` | `gen_ai.agent.name` | Evaluated agent. Default: the active span's, else `register({ agentName })` |
+| `agentVersion` | `string` | `agent.version` | Its version. Default: the active span's, else `register({ agentVersion })` |
 | `errorType` | `string` | `error.type` | Set when the evaluator failed |
 | `judgeTraceId` | `string` | `opensearch.evaluation.judge.trace_id` | The judge's own trace |
 | `attributes` | `Record<string, unknown>` | | Extra string, number, or boolean attributes |
@@ -532,6 +547,8 @@ import { Benchmark } from "opensearch-genai-observability-sdk-ts";
 const bench = new Benchmark("nightly-eval", {
   metadata: { model: "gpt-4" },
   recordIo: true,
+  agentName: "travel_planner",
+  agentVersion: "v3",
 });
 
 bench.log({

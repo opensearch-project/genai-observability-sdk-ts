@@ -18,6 +18,7 @@ import {
 } from "@opentelemetry/sdk-logs";
 import { AWSSigV4OTLPExporter, AWSSigV4OTLPLogExporter, sendScoresAsDouble } from "./exporters.js";
 import { installTestCaseProcessor } from "./testcase.js";
+import { setAgentDefaults } from "./internal.js";
 import { hasGlobalLoggerProvider, getSdkLoggerProvider, setSdkLoggerProvider } from "./logs.js";
 
 export const DEFAULT_ENDPOINT =
@@ -57,6 +58,14 @@ export interface RegisterOptions {
    * is created for the logs endpoint.
    */
   logExporter?: LogRecordExporter;
+  /**
+   * Name of the agent this process evaluates. Stamped as `gen_ai.agent.name` on
+   * every evaluation, test case and test suite run event the SDK emits, unless a
+   * call names its own agent or the evaluated span carries one.
+   */
+  agentName?: string;
+  /** Version of that agent (`agent.version`), stamped the same way. */
+  agentVersion?: string;
 }
 
 const INSTRUMENTOR_PACKAGES = [
@@ -354,6 +363,7 @@ async function tryAutoInstrument(): Promise<void> {
 export async function register(
   options: RegisterOptions = {},
 ): Promise<BasicTracerProvider> {
+  setAgentDefaults(options.agentName, options.agentVersion);
   const endpoint = resolveEndpoint(options);
   const protocol = resolveProtocol(options, endpoint);
 

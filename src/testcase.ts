@@ -3,6 +3,7 @@
 
 import { trace, type Context, type SpanContext } from '@opentelemetry/api';
 import type { ReadableSpan, Span, SpanProcessor } from '@opentelemetry/sdk-trace-base';
+import { AGENT_NAME_KEY, AGENT_VERSION_KEY } from './internal.js';
 
 /**
  * The test case evaluate() is running right now.
@@ -16,11 +17,15 @@ export interface ActiveTestCase {
   attributes: Record<string, string>;
   /** First root span started while the case ran: the agent run's root span. */
   root?: SpanContext;
+  /** That root span itself: its final attributes name the agent that ran. */
+  rootSpan?: Span;
   /** Span ids started while the case ran, to tell roots from their children. */
   readonly seen: Set<string>;
 }
 
 let activeCase: ActiveTestCase | undefined;
+
+const AGENT_KEYS: ReadonlySet<string> = new Set([AGENT_NAME_KEY, AGENT_VERSION_KEY]);
 
 /** @internal Run `fn` with `testCase` as the current case (restores the previous one). */
 export function runInTestCase<T>(testCase: ActiveTestCase, fn: () => T): T {
@@ -64,9 +69,15 @@ export class TestCaseSpanProcessor implements SpanProcessor {
     testCase.seen.add(ctx.spanId);
     if (!isRoot) return;
 
-    span.setAttributes(testCase.attributes);
+    const existing = (span as unknown as { attributes?: Record<string, unknown> }).attributes ?? {};
+    for (const [key, value] of Object.entries(testCase.attributes)) {
+      // The agent's own identity on its span wins over the declared one.
+      if (AGENT_KEYS.has(key) && existing[key] !== undefined) continue;
+      span.setAttribute(key, value);
+    }
     if (!testCase.root) {
       testCase.root = { traceId: ctx.traceId, spanId: ctx.spanId, traceFlags: ctx.traceFlags };
+      testCase.rootSpan = span;
     }
   }
 

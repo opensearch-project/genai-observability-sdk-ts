@@ -58,3 +58,56 @@ export function normalizeSpanId(value: string): string | null {
   const clean = value.replace(/^0[xX]/, "").padStart(16, "0").toLowerCase();
   return /^[0-9a-f]{16}$/.test(clean) && !/^0+$/.test(clean) ? clean : null;
 }
+
+// ---------------------------------------------------------------------------
+// Agent identity on evaluation, test case and test suite run events
+// ---------------------------------------------------------------------------
+
+export const AGENT_NAME_KEY = "gen_ai.agent.name";
+/** Our extension until OTel defines an agent version attribute. */
+export const AGENT_VERSION_KEY = "agent.version";
+
+let agentDefaultName: string | undefined;
+let agentDefaultVersion: string | undefined;
+
+/** @internal Process-wide agent identity, set by `register({ agentName, agentVersion })`. */
+export function setAgentDefaults(name?: string, version?: string): void {
+  agentDefaultName = name || undefined;
+  agentDefaultVersion = version || undefined;
+}
+
+/** @internal The process-wide `[agent name, agent version]`. */
+export function agentDefaults(): [string | undefined, string | undefined] {
+  return [agentDefaultName, agentDefaultVersion];
+}
+
+/**
+ * @internal `[gen_ai.agent.name, agent.version]` read from an SDK span (best
+ * effort: only spans that expose their attributes are read).
+ */
+export function spanAgent(span: unknown): [string | undefined, string | undefined] {
+  const attrs = (span as { attributes?: Record<string, unknown> } | undefined)?.attributes;
+  if (!attrs) return [undefined, undefined];
+  const name = attrs[AGENT_NAME_KEY];
+  const version = attrs[AGENT_VERSION_KEY];
+  return [name ? String(name) : undefined, version ? String(version) : undefined];
+}
+
+/**
+ * @internal Agent identity attributes for an SDK event (only the keys known).
+ * Per field: the explicit argument, then the evaluated span's own attribute
+ * (the agent that actually ran), then the register() default. Never invented.
+ */
+export function resolveAgent(
+  name?: string,
+  version?: string,
+  span?: unknown,
+): Record<string, string> {
+  const [spanName, spanVersion] = span ? spanAgent(span) : [undefined, undefined];
+  const resolvedName = name || spanName || agentDefaultName;
+  const resolvedVersion = version || spanVersion || agentDefaultVersion;
+  const out: Record<string, string> = {};
+  if (resolvedName) out[AGENT_NAME_KEY] = resolvedName;
+  if (resolvedVersion) out[AGENT_VERSION_KEY] = resolvedVersion;
+  return out;
+}

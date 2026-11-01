@@ -10,7 +10,13 @@ import {
   type Attributes,
 } from '@opentelemetry/api';
 import { SeverityNumber } from '@opentelemetry/api-logs';
-import { normalizeSpanId, normalizeTraceId } from './internal.js';
+import {
+  AGENT_NAME_KEY,
+  AGENT_VERSION_KEY,
+  normalizeSpanId,
+  normalizeTraceId,
+  resolveAgent,
+} from './internal.js';
 import { getEventLogger } from './logs.js';
 
 /** OTel event name of an evaluation result (semantic-conventions-genai). */
@@ -76,8 +82,13 @@ export interface ScoreOptions {
   assessment?: Assessment | boolean;
   /** `gen_ai.conversation.id` (session-scoped evaluations). */
   conversationId?: string;
-  /** `gen_ai.agent.name` of the evaluated agent. */
+  /**
+   * `gen_ai.agent.name` of the evaluated agent. Default: the active span's own
+   * `gen_ai.agent.name` (inline scoring), else `register({ agentName })`.
+   */
   agentName?: string;
+  /** `agent.version` of the evaluated agent, resolved the same way. */
+  agentVersion?: string;
   /** `error.type` when the evaluator failed. */
   errorType?: string;
   /** `opensearch.evaluation.judge.trace_id`: the judge's own trace. */
@@ -183,7 +194,8 @@ function buildAttributes(options: ScoreOptions, target: Target): Attributes {
   if (options.responseId) attrs["gen_ai.response.id"] = options.responseId;
   if (options.errorType) attrs["error.type"] = options.errorType;
   if (options.conversationId) attrs["gen_ai.conversation.id"] = options.conversationId;
-  if (options.agentName) attrs["gen_ai.agent.name"] = options.agentName;
+  if (options.agentName) attrs[AGENT_NAME_KEY] = options.agentName;
+  if (options.agentVersion) attrs[AGENT_VERSION_KEY] = options.agentVersion;
 
   const level = options.level ?? (target.traceOnlyId ? "trace" : undefined);
   if (level) attrs["opensearch.evaluation.level"] = level;
@@ -243,5 +255,14 @@ function emitEvent(options: ScoreOptions, target: Target, attributes: Attributes
  */
 export function score(options: ScoreOptions): void {
   const target = resolveTarget(options.traceId, options.spanId);
-  emitEvent(options, target, buildAttributes(options, target));
+  // Inline scoring reads the agent from the active span itself; a stored span
+  // (traceId + spanId) is not looked up.
+  const activeSpan = options.traceId ? undefined : trace.getSpan(target.context);
+  const agent = resolveAgent(options.agentName, options.agentVersion, activeSpan);
+  const resolved: ScoreOptions = {
+    ...options,
+    agentName: agent[AGENT_NAME_KEY],
+    agentVersion: agent[AGENT_VERSION_KEY],
+  };
+  emitEvent(resolved, target, buildAttributes(resolved, target));
 }
