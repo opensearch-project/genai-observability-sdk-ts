@@ -27,9 +27,9 @@ const EXPLANATION_LIMIT = 500;
 export type EvaluationLevel = "span" | "trace" | "session" | "tool_call";
 export type EvaluatorType = "llm_judge" | "code" | "human" | "external";
 export type ScoreDirection = "maximize" | "minimize";
-/** An explicit verdict, recorded as `gen_ai.evaluation.score.label`. */
-export type Assessment = "pass" | "fail";
-const ASSESSMENTS: readonly Assessment[] = ["pass", "fail"];
+/** A verdict, recorded as `gen_ai.evaluation.score.label`. */
+export type Verdict = "pass" | "fail";
+const VERDICTS: readonly Verdict[] = ["pass", "fail"];
 
 export interface ScoreOptions {
   /** `gen_ai.evaluation.name` (required), for example `"relevance"`. */
@@ -43,7 +43,10 @@ export interface ScoreOptions {
   traceId?: string;
   /** Evaluated span. Requires `traceId`. */
   spanId?: string;
-  /** `gen_ai.evaluation.score.label`, low cardinality (for example `"pass"`). */
+  /**
+   * `gen_ai.evaluation.score.label`, low cardinality. `"pass"` / `"fail"` (any
+   * case) is the verdict; without a label, `value` plus `threshold` records one.
+   */
   label?: string;
   /** `gen_ai.evaluation.explanation` (truncated to 500 chars). */
   explanation?: string;
@@ -73,13 +76,6 @@ export interface ScoreOptions {
    * `value <= threshold` (`"minimize"`).
    */
   threshold?: number;
-  /**
-   * Explicit verdict, `"pass"` or `"fail"` (`true` / `false` accepted),
-   * recorded as `gen_ai.evaluation.score.label` (replacing `label`). Wins over
-   * `threshold`. Without it and without `label`, a `value` plus `threshold`
-   * computes and records the verdict. Invalid values are dropped with a warning.
-   */
-  assessment?: Assessment | boolean;
   /** `gen_ai.conversation.id` (session-scoped evaluations). */
   conversationId?: string;
   /**
@@ -139,37 +135,25 @@ function resolveTarget(traceId?: string, spanId?: string): Target {
   };
 }
 
-/**
- * Normalize an assessment: `"pass"` / `"fail"` (any case, trimmed) or a boolean.
- * Returns undefined, with a warning, for anything else.
- */
-export function normalizeAssessment(assessment: unknown): Assessment | undefined {
-  if (assessment === undefined || assessment === null) return undefined;
-  if (typeof assessment === 'boolean') return assessment ? 'pass' : 'fail';
-  if (typeof assessment === 'string') {
-    const normalized = assessment.trim().toLowerCase();
-    if ((ASSESSMENTS as readonly string[]).includes(normalized)) return normalized as Assessment;
-  }
-  console.warn(
-    `score(): assessment ${JSON.stringify(assessment)} is not one of ${ASSESSMENTS.join(', ')}; not recording it`,
-  );
-  return undefined;
+/** The verdict a label carries: `"pass"` / `"fail"` (any case, trimmed), else undefined. */
+export function labelVerdict(label: string | undefined): Verdict | undefined {
+  const normalized = label?.trim().toLowerCase();
+  return normalized && (VERDICTS as readonly string[]).includes(normalized)
+    ? (normalized as Verdict)
+    : undefined;
 }
 
 /**
- * Verdict of one result: a valid explicit `assessment` wins; else with both
- * `value` and `threshold`, `pass` when `value >= threshold` (`maximize`, the
- * default) or `value <= threshold` (`minimize`), else `fail`; else undefined
- * (no declared rule: readers show the result as neutral).
+ * Verdict of a threshold rule: with both `value` and `threshold`, `pass` when
+ * `value >= threshold` (`maximize`, the default) or `value <= threshold`
+ * (`minimize`), else `fail`; else undefined (no declared rule: readers show
+ * the result as neutral).
  */
-export function resolveAssessment(options: {
+export function thresholdVerdict(options: {
   value?: number;
-  assessment?: unknown;
   threshold?: number;
   direction?: ScoreDirection;
-}): Assessment | undefined {
-  const explicit = normalizeAssessment(options.assessment);
-  if (explicit) return explicit;
+}): Verdict | undefined {
   if (options.value === undefined || options.threshold === undefined) return undefined;
   if (options.direction === 'minimize') return options.value <= options.threshold ? 'pass' : 'fail';
   return options.value >= options.threshold ? 'pass' : 'fail';
@@ -211,22 +195,11 @@ function buildAttributes(options: ScoreOptions, target: Target): Attributes {
   if (options.threshold !== undefined) {
     attrs["opensearch.evaluation.score.threshold"] = options.threshold;
   }
-  const verdict = resolveAssessment({
-    value: options.value,
-    assessment: options.assessment,
-    threshold: options.threshold,
-    direction,
-  });
-  // The verdict is the label (OTel examples "pass" / "fail"). An explicit verdict wins
-  // over a label; a verdict computed from the threshold yields to one (readers
-  // recompute it from threshold + direction).
-  const explicitVerdict = options.assessment !== undefined ? verdict : undefined;
-  if (options.label && explicitVerdict && options.label.toLowerCase() !== explicitVerdict) {
-    console.warn(
-      `score(): assessment "${explicitVerdict}" replaces label "${options.label}" for ${JSON.stringify(options.name)} (the verdict is the label)`,
-    );
-  }
-  const label = explicitVerdict || options.label || verdict;
+  // The verdict is the label (OTel examples "pass" / "fail"). A label you set is
+  // kept; without one, a threshold rule records its computed verdict.
+  const label =
+    options.label ||
+    thresholdVerdict({ value: options.value, threshold: options.threshold, direction });
   if (label) attrs["gen_ai.evaluation.score.label"] = label;
   if (options.judgeTraceId) attrs["opensearch.evaluation.judge.trace_id"] = options.judgeTraceId;
   return attrs;
@@ -261,9 +234,10 @@ let warnedTraceOnly = false;
  * - Trace-level: pass only `traceId`. The event carries it as its own trace id,
  *   with no span id, and `opensearch.evaluation.level=trace`.
  *
- * Verdict: readers show pass/fail only for a declared rule. Pass `assessment`
- * (explicit) or `threshold` (+ `direction`); with `value` and `threshold` the
- * SDK also records the computed verdict as `gen_ai.evaluation.score.label`.
+ * Verdict: readers show pass/fail only for a declared rule. Pass
+ * `label: "pass" | "fail"` (explicit) or `threshold` (+ `direction`); with
+ * `value` and `threshold` and no `label` the SDK records the computed verdict
+ * as `gen_ai.evaluation.score.label`.
  */
 export function score(options: ScoreOptions): void {
   const target = resolveTarget(options.traceId, options.spanId);

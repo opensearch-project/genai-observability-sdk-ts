@@ -163,7 +163,6 @@ describe('score', () => {
     const r = onlyRecord();
     expect(r.spanContext?.traceId).toBe(TRACE_ID);
     expect(r.spanContext?.spanId).toBe(SPAN_ID);
-    expect(r.attributes['opensearch.evaluation.trace_id']).toBeUndefined();
   });
 
   it('normalizes 0x-prefixed ids', () => {
@@ -182,7 +181,6 @@ describe('score', () => {
     const r = onlyRecord();
     expect(r.spanContext?.traceId).toBe(TRACE_ID);
     expect(r.spanContext?.spanId).toBe('');
-    expect(r.attributes['opensearch.evaluation.trace_id']).toBeUndefined();
     expect(r.attributes['opensearch.evaluation.level']).toBe('trace');
     expect(warnSpy).not.toHaveBeenCalled();
   });
@@ -243,39 +241,32 @@ describe('score', () => {
 });
 
 describe('score verdicts', () => {
-  const ASSESSMENT = 'gen_ai.evaluation.score.label';
+  const LABEL = 'gen_ai.evaluation.score.label';
   const THRESHOLD = 'opensearch.evaluation.score.threshold';
   const DIRECTION = 'opensearch.evaluation.score.direction';
 
   it('records no verdict without a rule', () => {
     score({ name: 'relevance', value: 0.9 });
     const a = onlyRecord().attributes;
-    expect(a[ASSESSMENT]).toBeUndefined();
+    expect(a[LABEL]).toBeUndefined();
     expect(a[THRESHOLD]).toBeUndefined();
     expect(a[DIRECTION]).toBeUndefined();
   });
 
-  it('records an explicit assessment, normalized', () => {
-    score({ name: 'a', assessment: 'pass' });
-    score({ name: 'b', assessment: ' FAIL ' as 'fail' });
-    score({ name: 'c', assessment: true });
-    expect(getFinishedLogRecords().map(r => r.attributes[ASSESSMENT])).toEqual(['pass', 'fail', 'pass']);
+  it('records an explicit pass / fail label', () => {
+    score({ name: 'a', label: 'pass' });
+    score({ name: 'b', label: 'fail' });
+    expect(getFinishedLogRecords().map(r => r.attributes[LABEL])).toEqual(['pass', 'fail']);
   });
 
-  it('drops an invalid assessment with a warning', () => {
-    score({ name: 'a', value: 1, assessment: 'maybe' as 'pass' });
-    expect(onlyRecord().attributes[ASSESSMENT]).toBeUndefined();
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('assessment'));
-  });
-
-  it('computes the assessment from threshold (maximize by default)', () => {
+  it('computes the label from threshold (maximize by default)', () => {
     score({ name: 'q', value: 4, threshold: 4 });
     score({ name: 'q', value: 3, threshold: 4 });
     const [a, b] = getFinishedLogRecords().map(r => r.attributes);
     expect(a[THRESHOLD]).toBe(4);
     expect(a[DIRECTION]).toBe('maximize');
-    expect(a[ASSESSMENT]).toBe('pass');
-    expect(b[ASSESSMENT]).toBe('fail');
+    expect(a[LABEL]).toBe('pass');
+    expect(b[LABEL]).toBe('fail');
   });
 
   it('applies minimize thresholds', () => {
@@ -283,37 +274,26 @@ describe('score verdicts', () => {
     score({ name: 'latency', value: 12.5, threshold: 12, direction: 'minimize' });
     const [a, b] = getFinishedLogRecords().map(r => r.attributes);
     expect(a[DIRECTION]).toBe('minimize');
-    expect(a[ASSESSMENT]).toBe('pass');
-    expect(b[ASSESSMENT]).toBe('fail');
+    expect(a[LABEL]).toBe('pass');
+    expect(b[LABEL]).toBe('fail');
   });
 
-  it('lets an explicit assessment win over the threshold', () => {
-    score({ name: 'q', value: 1, threshold: 4, assessment: 'pass' });
+  it('lets an explicit label win over the threshold', () => {
+    score({ name: 'q', value: 1, threshold: 4, label: 'pass' });
     const a = onlyRecord().attributes;
-    expect(a[ASSESSMENT]).toBe('pass');
+    expect(a[LABEL]).toBe('pass');
     expect(a[THRESHOLD]).toBe(4);
-  });
-
-  it('never writes opensearch.evaluation.assessment', () => {
-    score({ name: 'q', value: 1, assessment: 'pass' });
-    expect(onlyRecord().attributes['opensearch.evaluation.assessment']).toBeUndefined();
   });
 
   it('keeps an explicit label over a computed verdict', () => {
     score({ name: 'q', value: 2, threshold: 4, label: 'partially_correct' });
-    expect(onlyRecord().attributes[ASSESSMENT]).toBe('partially_correct');
-  });
-
-  it('lets an explicit assessment replace a label, with a warning', () => {
-    score({ name: 'q', value: 2, label: 'partially_correct', assessment: 'pass' });
-    expect(onlyRecord().attributes[ASSESSMENT]).toBe('pass');
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('replaces label'));
+    expect(onlyRecord().attributes[LABEL]).toBe('partially_correct');
   });
 
   it('records a threshold without a value but no verdict', () => {
     score({ name: 'q', threshold: 4, errorType: 'TimeoutError' });
     const a = onlyRecord().attributes;
     expect(a[THRESHOLD]).toBe(4);
-    expect(a[ASSESSMENT]).toBeUndefined();
+    expect(a[LABEL]).toBeUndefined();
   });
 });

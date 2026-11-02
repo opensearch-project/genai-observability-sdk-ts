@@ -40,9 +40,9 @@ import { getEventLogger } from './logs.js';
 import { ciPipelineAttributes } from './cicd.js';
 import {
   score,
-  normalizeAssessment,
-  resolveAssessment,
-  type Assessment,
+  labelVerdict,
+  thresholdVerdict,
+  type Verdict,
   type EvaluatorType,
   type ScoreDirection,
 } from './score.js';
@@ -68,18 +68,18 @@ export const TEST_SUITE_RUN_RESULT_EVENT = "opensearch.test_suite_run.result";
  * One score from a scorer (or passed to `Benchmark.log({ scores: [...] })`).
  *
  * Verdict fields are optional; unset ones fall back to the scorer's
- * `defineScorer()` declaration. `assessment` (or `passed`) is an explicit
- * verdict and wins; otherwise `threshold` + `direction` is applied to `value`.
+ * `defineScorer()` declaration. A `"pass"` / `"fail"` `label` (or `passed`) is
+ * an explicit verdict and wins; otherwise `threshold` + `direction` is applied
+ * to `value`.
  */
 export interface EvalScore {
   name: string;
   /** Numeric score. May be omitted for a verdict-only result. */
   value?: number;
+  /** `gen_ai.evaluation.score.label`; `"pass"` / `"fail"` is the verdict and wins over `passed`. */
   label?: string;
   explanation?: string;
   metadata?: Record<string, unknown>;
-  /** Explicit verdict (recorded as `gen_ai.evaluation.score.label`). Wins over `passed`. */
-  assessment?: Assessment;
   /** Explicit verdict as a boolean. */
   passed?: boolean;
   /** `opensearch.evaluation.score.threshold`. */
@@ -175,20 +175,16 @@ function applySpec(s: EvalScore, spec?: ScorerSpec): EvalScore {
   };
 }
 
-/** Verdict of a score: explicit `assessment` / `passed`, else threshold rule. */
-function verdictOf(s: EvalScore): Assessment | undefined {
-  let explicit = s.assessment !== undefined ? normalizeAssessment(s.assessment) : undefined;
-  if (explicit === undefined && s.passed !== undefined) explicit = normalizeAssessment(Boolean(s.passed));
-  return resolveAssessment({
-    value: s.value,
-    assessment: explicit,
-    threshold: s.threshold,
-    direction: s.direction,
-  });
+/** Verdict of a score: a `pass` / `fail` label, else `passed`, else the threshold rule. */
+function verdictOf(s: EvalScore): Verdict | undefined {
+  const fromLabel = labelVerdict(s.label);
+  if (fromLabel) return fromLabel;
+  if (s.passed !== undefined) return s.passed ? 'pass' : 'fail';
+  return thresholdVerdict({ value: s.value, threshold: s.threshold, direction: s.direction });
 }
 
-function assessmentsOf(scores: EvalScore[]): Record<string, Assessment> {
-  const out: Record<string, Assessment> = {};
+function verdictsOf(scores: EvalScore[]): Record<string, Verdict> {
+  const out: Record<string, Verdict> = {};
   for (const s of scores) {
     const v = verdictOf(s);
     if (v) out[s.name] = v;
@@ -196,8 +192,8 @@ function assessmentsOf(scores: EvalScore[]): Record<string, Assessment> {
   return out;
 }
 
-function hasFailVerdict(assessments: Record<string, Assessment>): boolean {
-  return Object.values(assessments).includes('fail');
+function hasFailVerdict(verdicts: Record<string, Verdict>): boolean {
+  return Object.values(verdicts).includes('fail');
 }
 
 export interface ScoreSummary {
@@ -232,7 +228,7 @@ export interface TestCaseResult {
   expected: unknown;
   scores: Record<string, number>;
   error?: string;
-  /** Legacy status: `"pass"`, or `"fail"` when the case errored or a score failed its verdict. */
+  /** `"pass"`, or `"fail"` when the case errored or a score failed its verdict. */
   status: string;
   /** `test.case.result.status` emitted on the case event. */
   resultStatus: TestCaseStatus;
@@ -244,7 +240,7 @@ export interface TestCaseResult {
   spanId?: string;
   scorerErrors?: string[];
   /** Evaluation name to declared verdict, for scores that have one. */
-  assessments?: Record<string, Assessment>;
+  verdicts?: Record<string, Verdict>;
 }
 
 export interface BenchmarkResult {
@@ -381,13 +377,12 @@ function emitCaseScores(
     const options = {
       name: s.name,
       value: s.value,
-      label: s.label,
+      label: s.label || verdictOf(s),
       explanation: s.explanation,
       direction: s.direction,
       scoreMin: s.scoreMin,
       scoreMax: s.scoreMax,
       threshold: s.threshold,
-      assessment: verdictOf(s),
       evaluator: extra.evaluator,
       evaluatorType: extra.evaluatorType,
       errorType: extra.errorType,
@@ -588,7 +583,7 @@ export class Benchmark {
     input?: unknown;
     output?: unknown;
     expected?: unknown;
-    /** `{ name: value }`, or `EvalScore[]` to declare verdicts (assessment / threshold) and bounds. */
+    /** `{ name: value }`, or `EvalScore[]` to declare verdicts (label / threshold) and bounds. */
     scores?: Record<string, number> | EvalScore[];
     metadata?: Record<string, unknown>;
     /** Error message. The case event status becomes `error` (`status` stays `fail`). */
@@ -630,12 +625,12 @@ export class Benchmark {
     const evalScores: EvalScore[] = Array.isArray(options.scores)
       ? options.scores
       : Object.entries(options.scores ?? {}).map(([name, value]) => ({ name, value }));
-    const assessments = assessmentsOf(evalScores);
-    const failed = hasFailVerdict(assessments);
+    const verdicts = verdictsOf(evalScores);
+    const failed = hasFailVerdict(verdicts);
     const hasError = options.error !== undefined;
     const resultStatus: TestCaseStatus =
       options.status ?? (hasError || options.errorType ? 'error' : failed ? 'fail' : 'pass');
-    const legacyStatus = options.status ?? (hasError || failed ? 'fail' : 'pass');
+    const status = options.status ?? (hasError || failed ? 'fail' : 'pass');
     const errorType = options.errorType;
     const caseMeta = toAttributes(safeMetadata(options.metadata, `case:${caseId}`));
     const evaluated = spanContextFrom(options.traceId, options.spanId);
@@ -665,13 +660,13 @@ export class Benchmark {
       expected: options.expected,
       scores: scoreValues(evalScores),
       error: options.error,
-      status: legacyStatus,
+      status,
       resultStatus,
       errorType,
       durationMs: options.durationMs,
       traceId: evaluated?.traceId,
       spanId: evaluated?.spanId,
-      assessments: Object.keys(assessments).length > 0 ? assessments : undefined,
+      verdicts: Object.keys(verdicts).length > 0 ? verdicts : undefined,
     });
   }
 
@@ -728,7 +723,7 @@ export interface EvaluateOptions {
  * active OTel context.
  *
  * Case status (`test.case.result.status`): `error` if the task or a scorer
- * threw; else `fail` if any score has a `fail` verdict (explicit `assessment`
+ * threw; else `fail` if any score has a `fail` verdict (a `pass` / `fail` `label`
  * / `passed`, or `threshold` + `direction` from the score or its
  * `defineScorer()` declaration); else `pass`. Scores without a declared rule
  * never fail a case. A scorer that throws emits a grade with `error.type`,
@@ -829,12 +824,12 @@ export function evaluate(options: EvaluateOptions): BenchmarkResult {
       }
     }
 
-    const assessments = assessmentsOf(
+    const verdicts = verdictsOf(
       scoreGroups.filter(g => !g.errorType).flatMap(g => g.scores),
     );
-    const failed = hasFailVerdict(assessments);
+    const failed = hasFailVerdict(verdicts);
     const resultStatus: TestCaseStatus = errorType ? 'error' : failed ? 'fail' : 'pass';
-    const legacyStatus = resultStatus === 'pass' ? 'pass' : 'fail';
+    const status = resultStatus === 'pass' ? 'pass' : 'fail';
     const root = active.root;
     for (const group of scoreGroups) {
       emitCaseScores(group.scores, identity, { traceId: root?.traceId, spanId: root?.spanId }, {
@@ -866,14 +861,14 @@ export function evaluate(options: EvaluateOptions): BenchmarkResult {
       expected,
       scores: caseScores,
       error,
-      status: legacyStatus,
+      status,
       resultStatus,
       errorType,
       durationMs,
       traceId: root?.traceId,
       spanId: root?.spanId,
       scorerErrors: scorerErrors.length > 0 ? scorerErrors : undefined,
-      assessments: Object.keys(assessments).length > 0 ? assessments : undefined,
+      verdicts: Object.keys(verdicts).length > 0 ? verdicts : undefined,
     });
   }
 

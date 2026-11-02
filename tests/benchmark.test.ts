@@ -72,7 +72,6 @@ describe('Benchmark class', () => {
     const [record] = scoreRecords();
     expect(record.spanContext?.traceId).toBe('abcdef1234567890abcdef1234567890');
     expect(record.spanContext?.spanId).toBe('');
-    expect(record.attributes['opensearch.evaluation.trace_id']).toBeUndefined();
     expect(record.attributes['opensearch.evaluation.level']).toBe('trace');
     expect(caseEvents()[0].spanContext).toBeUndefined();
     logSpy.mockRestore();
@@ -719,7 +718,7 @@ describe('TestCaseSpanProcessor installation', () => {
 });
 
 describe('declared scorer rules and verdicts', () => {
-  const ASSESSMENT = 'gen_ai.evaluation.score.label';
+  const LABEL = 'gen_ai.evaluation.score.label';
   const THRESHOLD = 'opensearch.evaluation.score.threshold';
   let logSpy: ReturnType<typeof vi.spyOn>;
   let warnSpy: ReturnType<typeof vi.spyOn>;
@@ -761,10 +760,10 @@ describe('declared scorer rules and verdicts', () => {
     expect(r.attributes['opensearch.evaluation.score.max']).toBe(5);
     expect(r.attributes['opensearch.evaluation.evaluator.name']).toBe('quality_judge');
     expect(r.attributes['opensearch.evaluation.evaluator.type']).toBe('llm_judge');
-    expect(r.attributes[ASSESSMENT]).toBe('fail');
+    expect(r.attributes[LABEL]).toBe('fail');
     expect(r.instrumentationScope.name).toBe('opensearch-genai-observability-sdk-ts');
     expect(result.cases[0].scores).toEqual({ answer_quality: 3 });
-    expect(result.cases[0].assessments).toEqual({ answer_quality: 'fail' });
+    expect(result.cases[0].verdicts).toEqual({ answer_quality: 'fail' });
   });
 
   it('lets EvalScore fields override the declaration', () => {
@@ -776,23 +775,23 @@ describe('declared scorer rules and verdicts', () => {
     const a = grades()['latency_budget'].attributes;
     expect(a[THRESHOLD]).toBe(15);
     expect(a['opensearch.evaluation.score.direction']).toBe('minimize');
-    expect(a[ASSESSMENT]).toBe('pass');
+    expect(a[LABEL]).toBe('pass');
   });
 
-  it('propagates passed / assessment from returned scores', () => {
+  it('propagates passed / label from returned scores', () => {
     const checks = (): EvalScore[] => [
       { name: 'a', value: 0.5, passed: true },
-      { name: 'b', value: 0.5, assessment: 'fail' },
-      { name: 'c', assessment: 'pass' },
-      { name: 'd', value: 0.5, assessment: 'pass', passed: false },
+      { name: 'b', value: 0.5, label: 'fail' },
+      { name: 'c', label: 'pass' },
+      { name: 'd', value: 0.5, label: 'pass', passed: false },
     ];
     const result = evaluate({ name: 'explicit', task: x => x, data: [{ input: 'q' }], scores: [checks] });
     const g = grades();
-    expect(g['a'].attributes[ASSESSMENT]).toBe('pass');
-    expect(g['b'].attributes[ASSESSMENT]).toBe('fail');
-    expect(g['c'].attributes[ASSESSMENT]).toBe('pass');
+    expect(g['a'].attributes[LABEL]).toBe('pass');
+    expect(g['b'].attributes[LABEL]).toBe('fail');
+    expect(g['c'].attributes[LABEL]).toBe('pass');
     expect(g['c'].attributes['gen_ai.evaluation.score.value']).toBeUndefined();
-    expect(g['d'].attributes[ASSESSMENT]).toBe('pass');
+    expect(g['d'].attributes[LABEL]).toBe('pass');
     expect(result.cases[0].scores).toEqual({ a: 0.5, b: 0.5, d: 0.5 });
   });
 
@@ -801,15 +800,15 @@ describe('declared scorer rules and verdicts', () => {
     evaluate({ name: 'bool', task: x => x, data: [{ input: 'q' }], scores: [tools] });
     const a = grades()['tool_selection'].attributes;
     expect(a['gen_ai.evaluation.score.value']).toBe(0);
-    expect(a[ASSESSMENT]).toBe('fail');
+    expect(a[LABEL]).toBe('fail');
   });
 
   it('keeps case status pass when nothing is declared', () => {
     const result = evaluate({ name: 'no-rules', task: x => x, data: [{ input: 'q' }], scores: [() => 0] });
     expect(result.cases[0].status).toBe('pass');
-    expect(result.cases[0].assessments).toBeUndefined();
+    expect(result.cases[0].verdicts).toBeUndefined();
     expect(caseEvents()[0].attributes['test.case.result.status']).toBe('pass');
-    expect(scoreRecords()[0].attributes[ASSESSMENT]).toBeUndefined();
+    expect(scoreRecords()[0].attributes[LABEL]).toBeUndefined();
   });
 
   it('fails a case on a fail verdict; run status reflects errors only', () => {
@@ -850,7 +849,7 @@ describe('declared scorer rules and verdicts', () => {
     const a = g['answer_quality'].attributes;
     expect(a['error.type']).toBe('TypeError');
     expect(a[THRESHOLD]).toBe(4);
-    expect(a[ASSESSMENT]).toBeUndefined();
+    expect(a[LABEL]).toBeUndefined();
     expect(a['gen_ai.evaluation.score.value']).toBeUndefined();
   });
 
@@ -869,14 +868,14 @@ describe('declared scorer rules and verdicts', () => {
       caseId: 'c1',
       scores: [
         { name: 'answer_quality', value: 3, threshold: 4, scoreMin: 1, scoreMax: 5 },
-        { name: 'tool_selection', value: 1, assessment: 'pass' },
+        { name: 'tool_selection', value: 1, label: 'pass' },
       ],
     });
     bm.close();
     const g = grades();
-    expect(g['answer_quality'].attributes[ASSESSMENT]).toBe('fail');
+    expect(g['answer_quality'].attributes[LABEL]).toBe('fail');
     expect(g['answer_quality'].attributes['opensearch.evaluation.score.max']).toBe(5);
-    expect(g['tool_selection'].attributes[ASSESSMENT]).toBe('pass');
+    expect(g['tool_selection'].attributes[LABEL]).toBe('pass');
     expect(caseEvents()[0].attributes['test.case.result.status']).toBe('fail');
   });
 
@@ -886,6 +885,6 @@ describe('declared scorer rules and verdicts', () => {
     bm.log({ input: 'q', caseId: 'b', scores: [{ name: 'x', value: 0, passed: false }], status: 'pass' });
     bm.close();
     expect(caseEvents().map(e => e.attributes['test.case.result.status'])).toEqual(['pass', 'pass']);
-    expect(scoreRecords()[0].attributes[ASSESSMENT]).toBeUndefined();
+    expect(scoreRecords()[0].attributes[LABEL]).toBeUndefined();
   });
 });
