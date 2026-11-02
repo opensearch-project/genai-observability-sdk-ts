@@ -15,8 +15,6 @@ const events = (name: string) =>
     .filter(r => r.eventName === name)
     .map(r => r.attributes);
 const EVAL = 'gen_ai.evaluation.result';
-const CASE = 'opensearch.test_case.result';
-const RUN = 'opensearch.test_suite_run.result';
 
 let logSpy: ReturnType<typeof vi.spyOn>;
 beforeEach(() => {
@@ -90,29 +88,28 @@ describe('score()', () => {
 });
 
 describe('Benchmark', () => {
-  it('stamps the declared agent on score, case and run events', () => {
+  it('stamps the declared agent on score events', () => {
     const bm = new Benchmark('suite', { agentName: 'travel_planner', agentVersion: 'v3' });
     bm.log({ input: 'q', output: 'a', scores: { accuracy: 1 } });
     bm.close();
-    for (const name of [EVAL, CASE, RUN]) {
-      expect(events(name)[0][NAME], name).toBe('travel_planner');
-      expect(events(name)[0][VERSION], name).toBe('v3');
-    }
+    expect(events(EVAL)[0][NAME]).toBe('travel_planner');
+    expect(events(EVAL)[0][VERSION]).toBe('v3');
   });
 
   it('uses the register() default', () => {
     setAgentDefaults('support_bot', 'v1');
     const bm = new Benchmark('suite');
-    bm.log({ input: 'q', output: 'a' });
+    bm.log({ input: 'q', output: 'a', scores: { accuracy: 1 } });
     bm.close();
-    expect(events(RUN)[0][NAME]).toBe('support_bot');
-    expect(events(CASE)[0][VERSION]).toBe('v1');
+    expect(events(EVAL)[0][NAME]).toBe('support_bot');
+    expect(events(EVAL)[0][VERSION]).toBe('v1');
   });
 
   it('declared version beats a metadata gen_ai.agent.version', () => {
     const bm = new Benchmark('suite', { metadata: { [VERSION]: 'meta' }, agentVersion: 'v5' });
+    bm.log({ input: 'q', scores: { accuracy: 1 } });
     bm.close();
-    expect(events(RUN)[0][VERSION]).toBe('v5');
+    expect(events(EVAL)[0][VERSION]).toBe('v5');
   });
 });
 
@@ -142,11 +139,10 @@ describe('evaluate()', () => {
       expect(span.attributes[VERSION]).toBe('v3');
       expect(span.attributes['test.suite.name']).toBe('suite');
     }
-    for (const name of [EVAL, CASE, RUN]) {
-      for (const a of events(name)) {
-        expect(a[NAME], name).toBe('travel_planner');
-        expect(a[VERSION], name).toBe('v3');
-      }
+    expect(events(EVAL)).toHaveLength(2);
+    for (const a of events(EVAL)) {
+      expect(a[NAME]).toBe('travel_planner');
+      expect(a[VERSION]).toBe('v3');
     }
   });
 
@@ -156,12 +152,10 @@ describe('evaluate()', () => {
     const root = getFinishedSpans().find(s => s.name === 'invoke_agent');
     expect(root?.attributes[NAME]).toBe('support_bot');
     expect(root?.attributes[VERSION]).toBe('v1');
-    expect(events(CASE)[0][NAME]).toBe('support_bot');
     expect(events(EVAL)[0][NAME]).toBe('support_bot');
-    expect(events(RUN)[0][NAME]).toBe('support_bot');
   });
 
-  it('names no run agent when cases disagree', () => {
+  it('names each case after the agent that ran it', () => {
     const tracer = trace.getTracer('agent');
     const names = ['a1', 'a2'];
     let i = 0;
@@ -172,14 +166,13 @@ describe('evaluate()', () => {
         return input;
       },
       data: [{ input: 'x' }, { input: 'y' }],
-      scores: [],
+      scores: [() => 1],
     });
-    expect(new Set(events(CASE).map(a => a[NAME]))).toEqual(new Set(['a1', 'a2']));
-    expect(events(RUN)[0][NAME]).toBeUndefined();
+    expect(events(EVAL).map(a => a[NAME])).toEqual(['a1', 'a2']);
   });
 
   it('leaves an unknown agent out', () => {
     evaluate({ name: 'suite', task: q => q, data: [{ input: 'x' }], scores: [() => 1] });
-    for (const name of [EVAL, CASE, RUN]) expect(events(name)[0][NAME]).toBeUndefined();
+    expect(events(EVAL)[0][NAME]).toBeUndefined();
   });
 });

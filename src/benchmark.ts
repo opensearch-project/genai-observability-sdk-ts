@@ -9,23 +9,19 @@
  * ```
  * trace (one per test case)       the agent run, exactly like production
  *   root span                     + test.suite.name, test.suite.run.id, test.case.id, test.case.name
- *   LogRecord gen_ai.evaluation.result      one per score, parented to the root span, test.* copied
- *   LogRecord opensearch.test_case.result   one per case, parented to the root span
- * LogRecord opensearch.test_suite_run.result   one per run, no trace context
+ *   LogRecord gen_ai.evaluation.result   one per score, parented to the root span, test.* copied
  * ```
  *
  * The SDK creates no spans of its own for a run.
  */
 
 import {
-  trace,
   context as otelContext,
   ROOT_CONTEXT,
   TraceFlags,
   type SpanContext,
   type Attributes,
 } from '@opentelemetry/api';
-import { SeverityNumber } from '@opentelemetry/api-logs';
 import { createHash, randomUUID } from 'crypto';
 import {
   AGENT_NAME_KEY,
@@ -36,7 +32,6 @@ import {
   resolveAgent,
   validateMetadataKeys,
 } from './internal.js';
-import { getEventLogger } from './logs.js';
 import { ciPipelineAttributes } from './cicd.js';
 import {
   score,
@@ -51,14 +46,6 @@ import {
   runInTestCase,
   type ActiveTestCase,
 } from './testcase.js';
-
-const IO_TRUNCATION_LIMIT = 10_000;
-const TRUNCATION_MARKER = "...[truncated]";
-
-/** OTel event name of one test case result. */
-export const TEST_CASE_RESULT_EVENT = "opensearch.test_case.result";
-/** OTel event name of one test suite run result. */
-export const TEST_SUITE_RUN_RESULT_EVENT = "opensearch.test_suite_run.result";
 
 // ---------------------------------------------------------------------------
 // Public interfaces
@@ -204,7 +191,10 @@ export interface ScoreSummary {
   count: number;
 }
 
-/** `test.case.result.status` of a case event. */
+/**
+ * Local status of a test case: `error` if the task raised or a result errored,
+ * else `fail` if a result has a `fail` verdict, else `pass`.
+ */
 export type TestCaseStatus = "pass" | "fail" | "error";
 const CASE_STATUSES: readonly TestCaseStatus[] = ["pass", "fail", "error"];
 
@@ -212,7 +202,7 @@ export interface BenchmarkSummary {
   benchmarkName: string;
   runId: string;
   totalCases: number;
-  /** Cases whose task or a scorer raised (status `error`). */
+  /** Cases whose task raised or a result errored (status `error`). */
   errorCount: number;
   passCount: number;
   failCount: number;
@@ -230,7 +220,7 @@ export interface TestCaseResult {
   error?: string;
   /** `"pass"`, or `"fail"` when the case errored or a score failed its verdict. */
   status: string;
-  /** `test.case.result.status` emitted on the case event. */
+  /** `pass` | `fail` | `error` (see `TestCaseStatus`). */
   resultStatus: TestCaseStatus;
   /** `error.type` (exception class name) when the case errored. */
   errorType?: string;
@@ -252,7 +242,13 @@ export interface BenchmarkResult {
 // Helper functions
 // ---------------------------------------------------------------------------
 
-function makeRunId(): string {
+function makeRunId(runId?: string): string {
+  if (runId !== undefined) {
+    if (typeof runId !== 'string' || runId.trim() === '') {
+      throw new Error('runId must be a non-empty string');
+    }
+    return runId;
+  }
   const now = new Date();
   const ts = [
     now.getFullYear(),
@@ -270,12 +266,6 @@ function makeRunId(): string {
 function makeCaseId(input: unknown): string {
   const serialized = JSON.stringify(input ?? '');
   return createHash('sha256').update(serialized).digest('hex').slice(0, 16);
-}
-
-function truncateIo(value: unknown): string {
-  const s = typeof value === 'string' ? value : JSON.stringify(value ?? '');
-  if (s.length <= IO_TRUNCATION_LIMIT) return s;
-  return s.slice(0, IO_TRUNCATION_LIMIT - TRUNCATION_MARKER.length) + TRUNCATION_MARKER;
 }
 
 function toAttributes(record: Record<string, unknown>): Attributes {
@@ -333,22 +323,6 @@ interface CaseIdentity {
   ci?: Record<string, string>;
 }
 
-/** The run's agent: the declared one, else the one every case agreed on. */
-function runAgent(
-  agents: Array<Record<string, string>>,
-  declared: Record<string, string>,
-): Record<string, string> {
-  const out = { ...declared };
-  for (const key of [AGENT_NAME_KEY, AGENT_VERSION_KEY]) {
-    if (out[key] !== undefined) continue;
-    const values = agents.map(a => a[key]);
-    if (values.length > 0 && values.every(v => v !== undefined && v === values[0])) {
-      out[key] = values[0];
-    }
-  }
-  return out;
-}
-
 function identityAttributes(identity: CaseIdentity): Record<string, string> {
   const attrs: Record<string, string> = {
     "test.suite.name": identity.suiteName,
@@ -361,23 +335,27 @@ function identityAttributes(identity: CaseIdentity): Record<string, string> {
 
 /**
  * Emit one gen_ai.evaluation.result event per score, with the suite and case
- * identity copied. `target` is the evaluated span (the agent run's root span
- * or a caller-supplied span). With only a trace id
- * the score is trace-level; with neither the event has no trace context.
+ * identity and the run / case `metadata` copied. `target` is the evaluated
+ * span (the agent run's root span or a caller-supplied span). With only a
+ * trace id the score is trace-level; with neither the event has no trace
+ * context. With `extra.errorType` every score is an evaluator error result:
+ * `error.type`, no value and no label.
  */
 function emitCaseScores(
   scores: EvalScore[],
   identity: CaseIdentity,
   target: { traceId?: string; spanId?: string },
+  metadata: Attributes,
   extra: { evaluator?: string; evaluatorType?: EvaluatorType; errorType?: string } = {},
 ): void {
   const testAttrs = identityAttributes(identity);
+  const errored = extra.errorType !== undefined;
   for (const s of scores) {
-    const metadata = s.metadata ? toAttributes(safeMetadata(s.metadata, `score:${s.name}`)) : {};
+    const scoreMeta = s.metadata ? toAttributes(safeMetadata(s.metadata, `score:${s.name}`)) : {};
     const options = {
       name: s.name,
-      value: s.value,
-      label: s.label || verdictOf(s),
+      value: errored ? undefined : s.value,
+      label: errored ? undefined : s.label || verdictOf(s),
       explanation: s.explanation,
       direction: s.direction,
       scoreMin: s.scoreMin,
@@ -388,7 +366,7 @@ function emitCaseScores(
       errorType: extra.errorType,
       agentName: identity.agent?.[AGENT_NAME_KEY],
       agentVersion: identity.agent?.[AGENT_VERSION_KEY],
-      attributes: { ...metadata, ...testAttrs },
+      attributes: { ...metadata, ...scoreMeta, ...testAttrs },
       traceId: target.traceId,
       spanId: target.traceId ? target.spanId : undefined,
     };
@@ -401,67 +379,6 @@ function scoreValues(scores: EvalScore[]): Record<string, number> {
   const out: Record<string, number> = {};
   for (const s of scores) if (s.value !== undefined) out[s.name] = s.value;
   return out;
-}
-
-function emitEvent(eventName: string, attributes: Attributes, parent?: SpanContext | null): void {
-  const ctx = parent
-    ? trace.setSpanContext(ROOT_CONTEXT, { ...parent, isRemote: true })
-    : ROOT_CONTEXT;
-  getEventLogger().emit({
-    eventName,
-    timestamp: Date.now(),
-    severityNumber: SeverityNumber.INFO,
-    attributes,
-    context: ctx,
-  });
-}
-
-function emitCaseEvent(options: {
-  identity: CaseIdentity;
-  status: TestCaseStatus;
-  errorType?: string;
-  recordIo: boolean;
-  input?: unknown;
-  output?: unknown;
-  expected?: unknown;
-  durationMs?: number;
-  metadata: Attributes;
-  parent?: SpanContext | null;
-}): void {
-  const attrs: Attributes = {
-    ...options.metadata,
-    ...identityAttributes(options.identity),
-    "test.case.result.status": options.status,
-  };
-  if (options.errorType) attrs["error.type"] = options.errorType;
-  if (options.recordIo) {
-    if (options.input !== undefined) attrs["opensearch.test_case.input"] = truncateIo(options.input);
-    if (options.expected !== undefined) attrs["opensearch.test_case.expected"] = truncateIo(options.expected);
-    if (options.output !== undefined) attrs["opensearch.test_case.output"] = truncateIo(options.output);
-  }
-  if (options.durationMs !== undefined) attrs["opensearch.test_case.duration_ms"] = options.durationMs;
-  emitEvent(TEST_CASE_RESULT_EVENT, attrs, options.parent);
-}
-
-function emitRunEvent(
-  summary: BenchmarkSummary,
-  metadata: Attributes,
-  agent: Record<string, string> = {},
-  ci: Record<string, string> = {},
-): void {
-  emitEvent(TEST_SUITE_RUN_RESULT_EVENT, {
-    ...metadata,
-    ...ci,
-    ...agent,
-    "test.suite.name": summary.benchmarkName,
-    "test.suite.run.id": summary.runId,
-    "test.suite.run.status": summary.errorCount === 0 ? 'success' : 'failure',
-    "opensearch.test_suite_run.case_count": summary.totalCases,
-    "opensearch.test_suite_run.pass_count": summary.passCount,
-    "opensearch.test_suite_run.fail_count": summary.failCount,
-    "opensearch.test_suite_run.error_count": summary.errorCount,
-    "opensearch.test_suite_run.duration_ms": summary.durationMs,
-  });
 }
 
 function computeSummary(
@@ -530,9 +447,21 @@ function formatSummary(summary: BenchmarkSummary): string {
 // Benchmark class
 // ---------------------------------------------------------------------------
 
+
 export interface BenchmarkOptions {
+  /**
+   * Run metadata, stamped on every `gen_ai.evaluation.result` event of the run
+   * (reserved keys are dropped; the score's own metadata and the SDK
+   * attributes win).
+   */
   metadata?: Record<string, unknown>;
-  recordIo?: boolean;
+  /**
+   * `test.suite.run.id` of the run. Default: a generated id. Pass the same id
+   * from every CI shard so they report into one run, or the id of an existing
+   * run to re-score it (send the new results with the same run id). Must not
+   * be empty or whitespace.
+   */
+  runId?: string;
   /** `gen_ai.agent.name` of the agent under test. Default: `register({ agentName })`. */
   agentName?: string;
   /** `gen_ai.agent.version` of the agent under test. Default: `register({ agentVersion })`. */
@@ -545,14 +474,13 @@ export interface BenchmarkOptions {
 }
 
 /**
- * Upload results of cases you ran yourself. Each `log()` emits score events
- * and one `opensearch.test_case.result` event, parented to the evaluated span
- * when `traceId` + `spanId` are given. `close()` emits the run event.
+ * Upload results of cases you ran yourself. Each `log()` emits one
+ * `gen_ai.evaluation.result` event per score, parented to the evaluated span
+ * when `traceId` + `spanId` are given. `close()` returns the local summary.
  */
 export class Benchmark {
   private _name: string;
   private _metadata: Record<string, unknown>;
-  private _recordIo: boolean;
   private _runId: string;
   private _start: number;
   private _cases: TestCaseResult[] = [];
@@ -562,12 +490,11 @@ export class Benchmark {
 
   constructor(name: string, options?: BenchmarkOptions) {
     this._name = name;
+    this._runId = makeRunId(options?.runId);
     // Declared agent, else the register() default (never invented).
     this._agent = resolveAgent(options?.agentName, options?.agentVersion);
     this._metadata = safeMetadata(options?.metadata, `benchmark:${name}`);
-    this._recordIo = options?.recordIo ?? false;
     this._ci = ciPipelineAttributes(options?.ciPipeline);
-    this._runId = makeRunId();
     this._start = performance.now();
   }
 
@@ -585,22 +512,28 @@ export class Benchmark {
     expected?: unknown;
     /** `{ name: value }`, or `EvalScore[]` to declare verdicts (label / threshold) and bounds. */
     scores?: Record<string, number> | EvalScore[];
+    /**
+     * Case metadata, stamped on the case's `gen_ai.evaluation.result` events
+     * (over the run metadata; reserved keys are dropped).
+     */
     metadata?: Record<string, unknown>;
-    /** Error message. The case event status becomes `error` (`status` stays `fail`). */
+    /** Error message, kept on the local result. The local status becomes `error`. */
     error?: string;
-    /** `error.type` for an errored case (exception class name or similar). */
+    /**
+     * `error.type` for an errored case (exception class name or similar). Every
+     * score in `scores` is then emitted as an evaluator error result: `error.type`
+     * set, no score value and no label.
+     */
     errorType?: string;
     /**
-     * Explicit case status. Default `error` when `error` or `errorType` is given,
-     * else `fail` when a score has a `fail` verdict, else `pass`.
+     * Explicit local case status. Default `error` when `error` or `errorType` is
+     * given, else `fail` when a score has a `fail` verdict, else `pass`.
      */
     status?: TestCaseStatus;
     caseId?: string;
     caseName?: string;
     traceId?: string;
     spanId?: string;
-    /** `opensearch.test_case.duration_ms`, if you measured it. */
-    durationMs?: number;
   }): void {
     if (this._closed) {
       throw new Error('Benchmark is already closed');
@@ -625,32 +558,25 @@ export class Benchmark {
     const evalScores: EvalScore[] = Array.isArray(options.scores)
       ? options.scores
       : Object.entries(options.scores ?? {}).map(([name, value]) => ({ name, value }));
-    const verdicts = verdictsOf(evalScores);
+    const errorType = options.errorType;
+    const verdicts = errorType ? {} : verdictsOf(evalScores);
     const failed = hasFailVerdict(verdicts);
     const hasError = options.error !== undefined;
     const resultStatus: TestCaseStatus =
-      options.status ?? (hasError || options.errorType ? 'error' : failed ? 'fail' : 'pass');
+      options.status ?? (hasError || errorType ? 'error' : failed ? 'fail' : 'pass');
     const status = options.status ?? (hasError || failed ? 'fail' : 'pass');
-    const errorType = options.errorType;
     const caseMeta = toAttributes(safeMetadata(options.metadata, `case:${caseId}`));
     const evaluated = spanContextFrom(options.traceId, options.spanId);
 
     if (evalScores.length > 0) {
-      emitCaseScores(evalScores, identity, { traceId: options.traceId, spanId: options.spanId });
+      emitCaseScores(
+        evalScores,
+        identity,
+        { traceId: options.traceId, spanId: options.spanId },
+        { ...toAttributes(this._metadata), ...caseMeta },
+        { errorType },
+      );
     }
-
-    emitCaseEvent({
-      identity,
-      status: resultStatus,
-      errorType,
-      recordIo: this._recordIo,
-      input: options.input,
-      output: options.output,
-      expected: options.expected,
-      durationMs: options.durationMs,
-      metadata: { ...toAttributes(this._metadata), ...caseMeta },
-      parent: evaluated,
-    });
 
     this._cases.push({
       caseId,
@@ -658,12 +584,11 @@ export class Benchmark {
       input: options.input,
       output: options.output,
       expected: options.expected,
-      scores: scoreValues(evalScores),
+      scores: errorType ? {} : scoreValues(evalScores),
       error: options.error,
       status,
       resultStatus,
       errorType,
-      durationMs: options.durationMs,
       traceId: evaluated?.traceId,
       spanId: evaluated?.spanId,
       verdicts: Object.keys(verdicts).length > 0 ? verdicts : undefined,
@@ -677,7 +602,6 @@ export class Benchmark {
     this._closed = true;
 
     const summary = computeSummary(this._name, this._runId, this._cases, elapsedMs(this._start));
-    emitRunEvent(summary, toAttributes(this._metadata), this._agent, this._ci);
     console.log(formatSummary(summary));
     return summary;
   }
@@ -693,11 +617,22 @@ export interface EvaluateOptions {
   data: Array<{ input: unknown; expected?: unknown; caseId?: string; caseName?: string }>;
   /** Scorer functions, optionally wrapped with `defineScorer()` to declare name and rule. */
   scores: Array<ScorerFn | Scorer>;
+  /**
+   * Run metadata, stamped on every `gen_ai.evaluation.result` event of the run
+   * (reserved keys are dropped; the score's own metadata and the SDK
+   * attributes win).
+   */
   metadata?: Record<string, unknown>;
-  recordIo?: boolean;
+  /**
+   * `test.suite.run.id` of the run. Default: a generated id. Pass the same id
+   * from every CI shard so they report into one run, or the id of an existing
+   * run to re-score it (send the new results with the same run id). Must not
+   * be empty or whitespace.
+   */
+  runId?: string;
   /**
    * `gen_ai.agent.name` of the agent under test. Stamped on the agent root spans
-   * that name none themselves and on every evaluation, case and run event.
+   * that name none themselves and on every evaluation result.
    * When omitted, each case uses the agent its root span names, else
    * `register({ agentName })`.
    */
@@ -706,37 +641,37 @@ export interface EvaluateOptions {
   agentVersion?: string;
   /**
    * Sets or overrides the OTel `cicd.pipeline.name` / `.run.id` / `.run.url.full`
-   * read from GitHub Actions, GitLab CI or Jenkins. In CI they go on the run,
-   * case and score events and the agent root spans; nothing is added outside CI.
+   * read from GitHub Actions, GitLab CI or Jenkins. In CI they go on the
+   * evaluation results and the agent root spans; nothing is added outside CI.
    */
   ciPipeline?: Record<string, string>;
 }
 
 /**
- * Run `task` on each data item, score it and record the run.
+ * Run `task` on each data item, score it and record the results.
  *
  * Cases run one at a time and `task` must be synchronous. While a case runs,
  * the SDK's TestCaseSpanProcessor stamps `test.*` ids on the root span(s) the
- * task starts and remembers the first one, so score events and the case event
- * are parented to the agent run's own trace. The TypeScript SDK has no default
- * context manager, so this uses a module-level "current case" instead of the
- * active OTel context.
+ * task starts and remembers the first one, so score events are parented to the
+ * agent run's own trace. The TypeScript SDK has no default context manager, so
+ * this uses a module-level "current case" instead of the active OTel context.
  *
- * Case status (`test.case.result.status`): `error` if the task or a scorer
- * threw; else `fail` if any score has a `fail` verdict (a `pass` / `fail` `label`
- * / `passed`, or `threshold` + `direction` from the score or its
- * `defineScorer()` declaration); else `pass`. Scores without a declared rule
- * never fail a case. A scorer that throws emits a grade with `error.type`,
- * named after its declared `name` (else the function name).
+ * A scorer that throws emits an evaluator error result (`error.type`, no
+ * value) named after its declared `name` (else the function name). When the
+ * task throws, the scorers are not run and every scorer emits such an error
+ * result with the task's `error.type`.
+ *
+ * Local case status: `error` if the task threw or a result errored; else
+ * `fail` if any score has a `fail` verdict (a `pass` / `fail` `label` /
+ * `passed`, or `threshold` + `direction` from the score or its `defineScorer()`
+ * declaration); else `pass`. Scores without a declared rule never fail a case.
  */
 export function evaluate(options: EvaluateOptions): BenchmarkResult {
+  const runId = makeRunId(options.runId);
   const filteredMetadata = toAttributes(safeMetadata(options.metadata, `evaluate:${options.name}`));
-  const recordIo = options.recordIo ?? false;
-  const runId = makeRunId();
   const runStart = performance.now();
   const cases: TestCaseResult[] = [];
   const declaredAgent = resolveAgent(options.agentName, options.agentVersion);
-  const caseAgents: Array<Record<string, string>> = [];
   const ci = ciPipelineAttributes(options.ciPipeline);
 
   ensureGlobalTestCaseProcessor();
@@ -772,7 +707,7 @@ export function evaluate(options: EvaluateOptions): BenchmarkResult {
         output.catch(() => {});
         throw new Error(
           "evaluate() does not support async task functions. " +
-          "The task returned a Promise — use a synchronous task or await the async call inside a sync wrapper."
+          "The task returned a Promise: use a synchronous task or await the async call inside a sync wrapper."
         );
       }
     } catch (e) {
@@ -783,44 +718,46 @@ export function evaluate(options: EvaluateOptions): BenchmarkResult {
     // The agent that ran: declared, else named on its root span, else the
     // register() default.
     identity.agent = resolveAgent(options.agentName, options.agentVersion, active.rootSpan);
-    caseAgents.push(identity.agent);
 
     // Run scorers (outside the case: judge spans are not the agent run)
-    if (error === undefined) {
-      for (const scorer of options.scores) {
-        const spec = specOf(scorer);
-        // Evaluation name of number/boolean results and of the error grade.
-        const evalName = spec?.name || scorer.name || 'score';
-        try {
-          const result = scorer(item.input, output, expected);
-          let produced: EvalScore[];
-          if (typeof result === 'boolean') {
-            produced = [{ name: evalName, value: result ? 1 : 0, passed: result }];
-          } else if (typeof result === 'number') {
-            produced = [{ name: evalName, value: result }];
-          } else if (Array.isArray(result)) {
-            produced = result;
-          } else {
-            produced = [result];
-          }
-          produced = produced.map(s => applySpec(s, spec));
-          for (const es of produced) {
-            if (es.value !== undefined) caseScores[es.name] = es.value;
-          }
-          scoreGroups.push({ scores: produced, spec });
-        } catch (e) {
-          const msg = e instanceof Error ? e.message : String(e);
-          scorerErrors.push(msg);
-          const scorerErrorType = errorTypeOf(e);
-          errorType ??= scorerErrorType;
-          // Error grade (error.type, no value) under the evaluation name the
-          // scorer would have produced, so it is not a separate evaluation.
-          scoreGroups.push({
-            scores: [applySpec({ name: evalName, explanation: msg }, spec)],
-            spec,
-            errorType: scorerErrorType,
-          });
+    for (const scorer of options.scores) {
+      const spec = specOf(scorer);
+      // Evaluation name of number/boolean results and of the error result.
+      const evalName = spec?.name || scorer.name || 'score';
+      if (error !== undefined) {
+        // The task threw: one error result per scorer, without the exception message.
+        scoreGroups.push({ scores: [applySpec({ name: evalName }, spec)], spec, errorType });
+        continue;
+      }
+      try {
+        const result = scorer(item.input, output, expected);
+        let produced: EvalScore[];
+        if (typeof result === 'boolean') {
+          produced = [{ name: evalName, value: result ? 1 : 0, passed: result }];
+        } else if (typeof result === 'number') {
+          produced = [{ name: evalName, value: result }];
+        } else if (Array.isArray(result)) {
+          produced = result;
+        } else {
+          produced = [result];
         }
+        produced = produced.map(s => applySpec(s, spec));
+        for (const es of produced) {
+          if (es.value !== undefined) caseScores[es.name] = es.value;
+        }
+        scoreGroups.push({ scores: produced, spec });
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        scorerErrors.push(msg);
+        const scorerErrorType = errorTypeOf(e);
+        errorType ??= scorerErrorType;
+        // Error result (error.type, no value) under the evaluation name the
+        // scorer would have produced, so it is not a separate evaluation.
+        scoreGroups.push({
+          scores: [applySpec({ name: evalName, explanation: msg }, spec)],
+          spec,
+          errorType: scorerErrorType,
+        });
       }
     }
 
@@ -832,26 +769,18 @@ export function evaluate(options: EvaluateOptions): BenchmarkResult {
     const status = resultStatus === 'pass' ? 'pass' : 'fail';
     const root = active.root;
     for (const group of scoreGroups) {
-      emitCaseScores(group.scores, identity, { traceId: root?.traceId, spanId: root?.spanId }, {
-        evaluator: group.spec?.evaluator,
-        evaluatorType: group.spec?.evaluatorType,
-        errorType: group.errorType,
-      });
+      emitCaseScores(
+        group.scores,
+        identity,
+        { traceId: root?.traceId, spanId: root?.spanId },
+        filteredMetadata,
+        {
+          evaluator: group.spec?.evaluator,
+          evaluatorType: group.spec?.evaluatorType,
+          errorType: group.errorType,
+        },
+      );
     }
-
-    const durationMs = elapsedMs(caseStart);
-    emitCaseEvent({
-      identity,
-      status: resultStatus,
-      errorType,
-      recordIo,
-      input: item.input,
-      output,
-      expected,
-      durationMs,
-      metadata: filteredMetadata,
-      parent: root,
-    });
 
     cases.push({
       caseId: identity.caseId,
@@ -864,7 +793,7 @@ export function evaluate(options: EvaluateOptions): BenchmarkResult {
       status,
       resultStatus,
       errorType,
-      durationMs,
+      durationMs: elapsedMs(caseStart),
       traceId: root?.traceId,
       spanId: root?.spanId,
       scorerErrors: scorerErrors.length > 0 ? scorerErrors : undefined,
@@ -873,14 +802,6 @@ export function evaluate(options: EvaluateOptions): BenchmarkResult {
   }
 
   const summary = computeSummary(options.name, runId, cases, elapsedMs(runStart));
-  const explicitAgent: Record<string, string> = {};
-  if (options.agentName) explicitAgent[AGENT_NAME_KEY] = options.agentName;
-  if (options.agentVersion) explicitAgent[AGENT_VERSION_KEY] = options.agentVersion;
-  // Explicit, else the agent every case agreed on, else register() defaults.
-  emitRunEvent(summary, filteredMetadata, {
-    ...resolveAgent(),
-    ...runAgent(caseAgents, explicitAgent),
-  }, ci);
   console.log(formatSummary(summary));
 
   return { summary, cases };

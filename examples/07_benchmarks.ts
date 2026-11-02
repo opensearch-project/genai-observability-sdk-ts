@@ -9,9 +9,8 @@
  *
  * Each case's agent run is its own trace; its root span is stamped with
  * test.suite.name, test.suite.run.id, test.case.id and test.case.name. Each
- * score is a `gen_ai.evaluation.result` log event parented to that root span,
- * each case is one `opensearch.test_case.result` event and each run one
- * `opensearch.test_suite_run.result` event.
+ * score is a `gen_ai.evaluation.result` log event parented to that root span.
+ * The run summary is computed locally.
  */
 
 import { Benchmark, Op, evaluate, register, withObserve } from '../src/index.js';
@@ -26,7 +25,6 @@ const provider = await register({
 // 1. Manual benchmarking with Benchmark class
 const bench = new Benchmark('translation-quality', {
   metadata: { 'eval.language_pair': 'en-fr' },
-  recordIo: true,
 });
 
 // Log individual test cases
@@ -49,7 +47,10 @@ bench.log({
 bench.log({
   input: 'Complex sentence with idioms.',
   output: 'Error: translation failed',
+  // The evaluator failed: each score is sent as an error result (error.type, no value).
+  scores: [{ name: 'bleu' }, { name: 'semantic_similarity' }],
   error: 'Translation service timeout',
+  errorType: 'TimeoutError',
   caseName: 'error-case',
 });
 
@@ -66,11 +67,10 @@ bench2.log({
   input: 'What is OpenSearch?',
   output: 'OpenSearch is a search and analytics engine.',
   scores: { relevance: 0.9 },
-  // The production span that generated this output: the score and case
-  // events are parented to it.
+  // The production span that generated this output: the score events are
+  // parented to it.
   traceId: 'abcdef1234567890abcdef1234567890',
   spanId: 'abcdef1234567890',
-  durationMs: 840,
 });
 
 bench2.close();

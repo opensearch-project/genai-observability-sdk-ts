@@ -65,7 +65,7 @@ export interface RegisterOptions {
   logExporter?: LogRecordExporter;
   /**
    * Name of the agent this process evaluates. Stamped as `gen_ai.agent.name` on
-   * every evaluation, test case and test suite run event the SDK emits, unless a
+   * every evaluation result event the SDK emits, unless a
    * call names its own agent or the evaluated span carries one.
    */
   agentName?: string;

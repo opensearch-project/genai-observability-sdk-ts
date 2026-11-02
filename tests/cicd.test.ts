@@ -80,15 +80,11 @@ describe('cicd on evaluation runs', () => {
       return input;
     });
 
-  it('stamps the run, case and score events and the root span in CI', () => {
+  it('stamps the evaluation results and the root span in CI', () => {
     Object.assign(process.env, GITHUB);
     evaluate({ name: 'ci', task: agent, data: [{ input: 'q1' }], scores: [() => 1] });
     const records = getFinishedLogRecords();
-    expect(records.map(r => r.eventName).sort()).toEqual([
-      'gen_ai.evaluation.result',
-      'opensearch.test_case.result',
-      'opensearch.test_suite_run.result',
-    ]);
+    expect(records.map(r => r.eventName)).toEqual(['gen_ai.evaluation.result']);
     for (const r of records) {
       expect(r.attributes['cicd.pipeline.run.id']).toBe('120912');
       expect(r.attributes['cicd.pipeline.name']).toBe('agent-evals');

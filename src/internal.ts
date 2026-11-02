@@ -4,24 +4,12 @@
 export const RESERVED_KEYS: ReadonlySet<string> = new Set([
   "test.suite.name",
   "test.suite.run.id",
-  "test.suite.run.status",
   "test.case.id",
   "test.case.name",
-  "test.case.result.status",
   "test.case.error",
   "test.case.input",
   "test.case.output",
   "test.case.expected",
-  "opensearch.test_case.input",
-  "opensearch.test_case.output",
-  "opensearch.test_case.expected",
-  "opensearch.test_case.error",
-  "opensearch.test_case.duration_ms",
-  "opensearch.test_suite_run.case_count",
-  "opensearch.test_suite_run.pass_count",
-  "opensearch.test_suite_run.fail_count",
-  "opensearch.test_suite_run.error_count",
-  "opensearch.test_suite_run.duration_ms",
   "error.type",
   "gen_ai.operation.name",
   "cicd.pipeline.name",
@@ -63,7 +51,7 @@ export function normalizeSpanId(value: string): string | null {
 }
 
 // ---------------------------------------------------------------------------
-// Agent identity on evaluation, test case and test suite run events
+// Agent identity on evaluation result events
 // ---------------------------------------------------------------------------
 
 export const AGENT_NAME_KEY = "gen_ai.agent.name";

@@ -8,10 +8,8 @@ describe('RESERVED_KEYS', () => {
   it('contains expected keys', () => {
     expect(RESERVED_KEYS.has('test.suite.name')).toBe(true);
     expect(RESERVED_KEYS.has('test.suite.run.id')).toBe(true);
-    expect(RESERVED_KEYS.has('test.suite.run.status')).toBe(true);
     expect(RESERVED_KEYS.has('test.case.id')).toBe(true);
     expect(RESERVED_KEYS.has('test.case.name')).toBe(true);
-    expect(RESERVED_KEYS.has('test.case.result.status')).toBe(true);
     expect(RESERVED_KEYS.has('test.case.error')).toBe(true);
     expect(RESERVED_KEYS.has('test.case.input')).toBe(true);
     expect(RESERVED_KEYS.has('test.case.output')).toBe(true);

@@ -15,13 +15,7 @@ export type {
   EvaluatorType,
   ScoreDirection,
 } from './score.js';
-export {
-  Benchmark,
-  evaluate,
-  defineScorer,
-  TEST_CASE_RESULT_EVENT,
-  TEST_SUITE_RUN_RESULT_EVENT,
-} from './benchmark.js';
+export { Benchmark, evaluate, defineScorer } from './benchmark.js';
 export { TestCaseSpanProcessor } from './testcase.js';
 export { TraceOnlyContextProcessor } from './logs.js';
 export {

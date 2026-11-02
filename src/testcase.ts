@@ -47,7 +47,7 @@ function parentSpanId(span: Span): string | undefined {
  * Span processor that stamps `test.suite.name`, `test.suite.run.id`,
  * `test.case.id` and `test.case.name` on the root span(s) of each test case
  * while evaluate() runs it, and remembers the first root span so the case's
- * `opensearch.test_case.result` event and score events are parented to it.
+ * score events are parented to it.
  *
  * A span is a case root when it has no parent, or when its parent was not
  * started inside the same case (for example a remote parent). Without a context manager every span is a root,
@@ -128,6 +128,6 @@ export function ensureGlobalTestCaseProcessor(): void {
   console.warn(
     "[opensearch-genai-observability-sdk-ts] evaluate(): could not add TestCaseSpanProcessor to " +
       "the global tracer provider, so agent root spans are not stamped with test.* attributes " +
-      "and case events have no trace context. Add new TestCaseSpanProcessor() to your provider.",
+      "and score events have no trace context. Add new TestCaseSpanProcessor() to your provider.",
   );
 }

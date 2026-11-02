@@ -15,9 +15,6 @@ const scoreRecords = () =>
 beforeEach(() => clearSpans());
 afterEach(() => clearSpans());
 
-const runEvents = () => getFinishedLogRecords().filter(r => r.eventName === 'opensearch.test_suite_run.result');
-const caseEvents = () => getFinishedLogRecords().filter(r => r.eventName === 'opensearch.test_case.result');
-
 describe('Benchmark class', () => {
   it('creates no spans of its own', () => {
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
@@ -73,20 +70,6 @@ describe('Benchmark class', () => {
     expect(record.spanContext?.traceId).toBe('abcdef1234567890abcdef1234567890');
     expect(record.spanContext?.spanId).toBe('');
     expect(record.attributes['opensearch.evaluation.level']).toBe('trace');
-    expect(caseEvents()[0].spanContext).toBeUndefined();
-    logSpy.mockRestore();
-  });
-
-  it('log does not record I/O when recordIo is false', () => {
-    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
-    const bm = new Benchmark('suite', { recordIo: false });
-    bm.log({ input: 'q', output: 'a', expected: 'a' });
-    bm.close();
-
-    const [c] = caseEvents();
-    expect(c.attributes['opensearch.test_case.input']).toBeUndefined();
-    expect(c.attributes['opensearch.test_case.output']).toBeUndefined();
-    expect(c.attributes['opensearch.test_case.expected']).toBeUndefined();
     logSpy.mockRestore();
   });
 
@@ -104,7 +87,6 @@ describe('Benchmark class', () => {
     expect(summary.scores['accuracy'].min).toBe(0.8);
     expect(summary.scores['accuracy'].max).toBe(1.0);
     expect(summary.scores['accuracy'].count).toBe(2);
-    expect(runEvents()[0].attributes['test.suite.run.status']).toBe('success');
     logSpy.mockRestore();
   });
 
@@ -130,11 +112,12 @@ describe('Benchmark class', () => {
     const bm = new Benchmark('suite', {
       metadata: { 'custom.key': 'val', 'test.suite.name': 'override' },
     });
+    bm.log({ input: 'q', scores: { accuracy: 1 } });
     bm.close();
 
-    const [run] = runEvents();
-    expect(run.attributes['custom.key']).toBe('val');
-    expect(run.attributes['test.suite.name']).toBe('suite');
+    const [r] = scoreRecords();
+    expect(r.attributes['custom.key']).toBe('val');
+    expect(r.attributes['test.suite.name']).toBe('suite');
     warnSpy.mockRestore();
     logSpy.mockRestore();
   });
@@ -142,10 +125,10 @@ describe('Benchmark class', () => {
   it('auto-generates caseId from input hash', () => {
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
     const bm = new Benchmark('suite');
-    bm.log({ input: { query: 'test' } });
+    bm.log({ input: { query: 'test' }, scores: { accuracy: 1 } });
     bm.close();
 
-    const caseId = caseEvents()[0].attributes['test.case.id'] as string;
+    const caseId = scoreRecords()[0].attributes['test.case.id'] as string;
     expect(caseId.length).toBe(16); // sha256 hex prefix
     logSpy.mockRestore();
   });
@@ -153,10 +136,10 @@ describe('Benchmark class', () => {
   it('uses custom caseId when provided', () => {
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
     const bm = new Benchmark('suite');
-    bm.log({ input: 'q', caseId: 'my-case-id' });
+    bm.log({ input: 'q', caseId: 'my-case-id', scores: { accuracy: 1 } });
     bm.close();
 
-    expect(caseEvents()[0].attributes['test.case.id']).toBe('my-case-id');
+    expect(scoreRecords()[0].attributes['test.case.id']).toBe('my-case-id');
     logSpy.mockRestore();
   });
 });
@@ -267,22 +250,6 @@ describe('evaluate', () => {
     logSpy.mockRestore();
   });
 
-  it('does not record I/O when recordIo is false', () => {
-    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
-    evaluate({
-      name: 'no-io-test',
-      task: () => 'output',
-      data: [{ input: 'input', expected: 'output' }],
-      scores: [],
-      recordIo: false,
-    });
-
-    const [c] = caseEvents();
-    expect(c.attributes['opensearch.test_case.input']).toBeUndefined();
-    expect(c.attributes['opensearch.test_case.output']).toBeUndefined();
-    logSpy.mockRestore();
-  });
-
   it('emits score log events with label, explanation and suite identity', () => {
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
     const result = evaluate({
@@ -330,7 +297,7 @@ function exact(_i: unknown, output: unknown, expected: unknown) {
 }
 
 describe('evaluate (default: events, no harness spans)', () => {
-  it('creates no test_suite_run / test_case spans and one trace per case', () => {
+  it('creates no spans of its own and one trace per case', () => {
     const spy = quiet();
     evaluate({
       name: 'shape',
@@ -339,9 +306,9 @@ describe('evaluate (default: events, no harness spans)', () => {
       scores: [exact],
     });
     const spans = getFinishedSpans();
-    expect(spans.filter(s => s.name.startsWith('test_suite_run') || s.name.startsWith('test_case'))).toHaveLength(0);
     const roots = spans.filter(s => s.name === 'invoke_agent mock');
     expect(roots).toHaveLength(2);
+    expect(spans).toHaveLength(4);
     expect(roots[0].spanContext().traceId).not.toBe(roots[1].spanContext().traceId);
     for (const r of roots) expect(r.parentSpanId).toBeUndefined();
     spy.mockRestore();
@@ -398,7 +365,7 @@ describe('evaluate (default: events, no harness spans)', () => {
     spy.mockRestore();
   });
 
-  it('emits one opensearch.test_case.result event per case, parented to the root span', () => {
+  it('stamps run metadata on every evaluation result, with the SDK scope', () => {
     const spy = quiet();
     const result = evaluate({
       name: 'cases',
@@ -407,7 +374,7 @@ describe('evaluate (default: events, no harness spans)', () => {
       scores: [exact],
       metadata: { 'model.version': 'v1' },
     });
-    const events = eventsNamed('opensearch.test_case.result');
+    const events = eventsNamed('gen_ai.evaluation.result');
     expect(events).toHaveLength(2);
     const roots = getFinishedSpans().filter(s => s.name === 'invoke_agent mock');
     const e = events[0];
@@ -419,34 +386,17 @@ describe('evaluate (default: events, no harness spans)', () => {
     expect(e.attributes['test.suite.run.id']).toBe(result.summary.runId);
     expect(e.attributes['test.case.id']).toBe('c1');
     expect(e.attributes['test.case.name']).toBe('first');
-    expect(e.attributes['test.case.result.status']).toBe('pass');
     expect(e.attributes['error.type']).toBeUndefined();
-    expect(typeof e.attributes['opensearch.test_case.duration_ms']).toBe('number');
-    expect(e.attributes['model.version']).toBe('v1');
-    // recordIo defaults to false
-    expect(e.attributes['opensearch.test_case.input']).toBeUndefined();
-    expect(e.attributes['opensearch.test_case.output']).toBeUndefined();
+    for (const ev of events) expect(ev.attributes['model.version']).toBe('v1');
     spy.mockRestore();
   });
 
-  it('records input / expected / output on the case event when recordIo is true', () => {
+  it('a crashing case gets one error result per scorer and the run continues', () => {
     const spy = quiet();
-    evaluate({
-      name: 'io',
-      task: tracedTask,
-      data: [{ input: { q: 'a' }, expected: 'answer:x' }],
-      scores: [],
-      recordIo: true,
-    });
-    const [e] = eventsNamed('opensearch.test_case.result');
-    expect(e.attributes['opensearch.test_case.input']).toBe('{"q":"a"}');
-    expect(e.attributes['opensearch.test_case.expected']).toBe('answer:x');
-    expect(e.attributes['opensearch.test_case.output']).toBe('answer:[object Object]');
-    spy.mockRestore();
-  });
-
-  it('a crashing case gets an error case event and the run continues', () => {
-    const spy = quiet();
+    const quality = defineScorer(
+      { name: 'answer_quality', threshold: 4, scoreMin: 1, scoreMax: 5, evaluator: 'judge', evaluatorType: 'llm_judge' },
+      () => 5,
+    );
     const result = evaluate({
       name: 'crash',
       task: (input) => {
@@ -459,23 +409,57 @@ describe('evaluate (default: events, no harness spans)', () => {
         return tracedTask(input);
       },
       data: [{ input: 'boom', caseId: 'bad' }, { input: 'ok', caseId: 'good' }],
-      scores: [exact],
+      scores: [exact, quality],
+      agentName: 'crasher',
+      metadata: { 'model.version': 'v1' },
     });
     expect(result.cases).toHaveLength(2);
     expect(result.cases[0].resultStatus).toBe('error');
     expect(result.cases[0].status).toBe('fail');
     expect(result.cases[0].errorType).toBe('TypeError');
+    expect(result.cases[0].scores).toEqual({});
     expect(result.cases[1].resultStatus).toBe('pass');
 
-    const events = eventsNamed('opensearch.test_case.result');
-    expect(events).toHaveLength(2);
-    const bad = events.find(e => e.attributes['test.case.id'] === 'bad')!;
-    expect(bad.attributes['test.case.result.status']).toBe('error');
-    expect(bad.attributes['error.type']).toBe('TypeError');
+    const events = eventsNamed('gen_ai.evaluation.result');
+    expect(events).toHaveLength(4);
+    const bad = events.filter(e => e.attributes['test.case.id'] === 'bad');
+    expect(bad.map(e => e.attributes['gen_ai.evaluation.name'])).toEqual(['exact', 'answer_quality']);
     const crashingRoot = getFinishedSpans().find(s => s.name === 'invoke_agent crashing')!;
-    expect(bad.spanContext?.spanId).toBe(crashingRoot.spanContext().spanId);
-    // Scorers do not run for a crashed task.
-    expect(eventsNamed('gen_ai.evaluation.result')).toHaveLength(1);
+    for (const e of bad) {
+      expect(e.attributes['error.type']).toBe('TypeError');
+      expect(e.attributes['gen_ai.evaluation.score.value']).toBeUndefined();
+      expect(e.attributes['gen_ai.evaluation.score.label']).toBeUndefined();
+      expect(e.attributes['gen_ai.evaluation.explanation']).toBeUndefined();
+      expect(e.attributes['test.suite.name']).toBe('crash');
+      expect(e.attributes['test.suite.run.id']).toBe(result.summary.runId);
+      expect(e.attributes['gen_ai.agent.name']).toBe('crasher');
+      expect(e.attributes['model.version']).toBe('v1');
+      expect(e.spanContext?.spanId).toBe(crashingRoot.spanContext().spanId);
+    }
+    const q = bad[1].attributes;
+    expect(q['opensearch.evaluation.evaluator.name']).toBe('judge');
+    expect(q['opensearch.evaluation.evaluator.type']).toBe('llm_judge');
+    expect(q['opensearch.evaluation.score.threshold']).toBe(4);
+    expect(q['opensearch.evaluation.score.direction']).toBe('maximize');
+    expect(q['opensearch.evaluation.score.min']).toBe(1);
+    expect(q['opensearch.evaluation.score.max']).toBe(5);
+    spy.mockRestore();
+  });
+
+  it('a crashing task without a span emits error results without trace context', () => {
+    const spy = quiet();
+    evaluate({
+      name: 'crash-untraced',
+      task: () => { throw new RangeError('no agent'); },
+      data: [{ input: 'q' }],
+      scores: [function relevance() { return 1; }],
+    });
+    const events = getFinishedLogRecords();
+    expect(events).toHaveLength(1);
+    expect(events[0].eventName).toBe('gen_ai.evaluation.result');
+    expect(events[0].attributes['gen_ai.evaluation.name']).toBe('relevance');
+    expect(events[0].attributes['error.type']).toBe('RangeError');
+    expect(events[0].spanContext).toBeUndefined();
     spy.mockRestore();
   });
 
@@ -488,9 +472,10 @@ describe('evaluate (default: events, no harness spans)', () => {
       scores: [function bad() { throw new RangeError('judge down'); }],
     });
     expect(result.cases[0].resultStatus).toBe('error');
-    const [e] = eventsNamed('opensearch.test_case.result');
-    expect(e.attributes['test.case.result.status']).toBe('error');
+    expect(result.cases[0].errorType).toBe('RangeError');
+    const [e] = eventsNamed('gen_ai.evaluation.result');
     expect(e.attributes['error.type']).toBe('RangeError');
+    expect(e.attributes['gen_ai.evaluation.score.value']).toBeUndefined();
     spy.mockRestore();
   });
 
@@ -502,53 +487,70 @@ describe('evaluate (default: events, no harness spans)', () => {
       data: [{ input: 'a', expected: 'answer:a' }],
       scores: [exact],
     });
-    const [e] = eventsNamed('opensearch.test_case.result');
-    expect(e.spanContext).toBeUndefined();
-    expect(e.attributes['test.case.result.status']).toBe('pass');
+    expect(result.cases[0].resultStatus).toBe('pass');
     const [s] = eventsNamed('gen_ai.evaluation.result');
     expect(s.spanContext).toBeUndefined();
     expect(result.cases[0].traceId).toBeUndefined();
     spy.mockRestore();
   });
 
-  it('emits one opensearch.test_suite_run.result event with counts', () => {
+  it('emits only gen_ai.evaluation.result events', () => {
     const spy = quiet();
-    const result = evaluate({
-      name: 'run',
+    evaluate({
+      name: 'only-results',
       task: (input) => {
         if (input === 'x') throw new Error('nope');
         return tracedTask(input);
       },
-      data: [{ input: 'a' }, { input: 'b' }, { input: 'x' }],
-      scores: [],
-      metadata: { 'model.version': 'v2' },
+      data: [{ input: 'a' }, { input: 'x' }],
+      scores: [exact, function bad() { throw new Error('judge down'); }],
     });
-    const runs = eventsNamed('opensearch.test_suite_run.result');
-    expect(runs).toHaveLength(1);
-    const r = runs[0];
-    expect(r.spanContext).toBeUndefined();
-    expect(r.attributes['test.suite.name']).toBe('run');
-    expect(r.attributes['test.suite.run.id']).toBe(result.summary.runId);
-    expect(r.attributes['test.suite.run.status']).toBe('failure');
-    expect(r.attributes['opensearch.test_suite_run.case_count']).toBe(3);
-    expect(r.attributes['opensearch.test_suite_run.pass_count']).toBe(2);
-    expect(r.attributes['opensearch.test_suite_run.fail_count']).toBe(0);
-    expect(r.attributes['opensearch.test_suite_run.error_count']).toBe(1);
-    expect(typeof r.attributes['opensearch.test_suite_run.duration_ms']).toBe('number');
-    expect(r.attributes['model.version']).toBe('v2');
-    expect(result.summary.passCount).toBe(2);
-    expect(result.summary.errorCount).toBe(1);
-    // Run event is the last record.
-    expect(getFinishedLogRecords().at(-1)!.eventName).toBe('opensearch.test_suite_run.result');
+    const records = getFinishedLogRecords();
+    expect(records).toHaveLength(4);
+    expect(new Set(records.map(r => r.eventName))).toEqual(new Set(['gen_ai.evaluation.result']));
     spy.mockRestore();
   });
 
-  it('run status is success when no case errored', () => {
+  it('computes the local case status: error, else fail, else pass', () => {
     const spy = quiet();
-    evaluate({ name: 'ok', task: tracedTask, data: [{ input: 'a' }], scores: [] });
-    const [r] = eventsNamed('opensearch.test_suite_run.result');
-    expect(r.attributes['test.suite.run.status']).toBe('success');
+    const quality = defineScorer({ name: 'quality', threshold: 4 }, (input) => {
+      if (input === 'judge-error') throw new Error('judge down');
+      return input === 'good' ? 5 : 2;
+    });
+    const result = evaluate({
+      name: 'statuses',
+      task: (input) => {
+        if (input === 'task-error') throw new Error('nope');
+        return input;
+      },
+      data: [{ input: 'good' }, { input: 'bad' }, { input: 'task-error' }, { input: 'judge-error' }],
+      scores: [quality],
+    });
+    expect(result.cases.map(c => c.resultStatus)).toEqual(['pass', 'fail', 'error', 'error']);
+    expect(result.cases.map(c => c.status)).toEqual(['pass', 'fail', 'fail', 'fail']);
+    expect(result.summary.passCount).toBe(1);
+    expect(result.summary.failCount).toBe(1);
+    expect(result.summary.errorCount).toBe(2);
     spy.mockRestore();
+  });
+
+  it('uses the given runId', () => {
+    const spy = quiet();
+    const result = evaluate({ name: 'rid', runId: 'ci-run-42', task: tracedTask, data: [{ input: 'a' }], scores: [exact] });
+    expect(result.summary.runId).toBe('ci-run-42');
+    expect(eventsNamed('gen_ai.evaluation.result')[0].attributes['test.suite.run.id']).toBe('ci-run-42');
+    const root = getFinishedSpans().find(s => s.name === 'invoke_agent mock')!;
+    expect(root.attributes['test.suite.run.id']).toBe('ci-run-42');
+    spy.mockRestore();
+  });
+
+  it('rejects an empty or whitespace-only runId', () => {
+    for (const runId of ['', '   ']) {
+      expect(() => evaluate({ name: 'rid', runId, task: x => x, data: [{ input: 'a' }], scores: [] })).toThrow(
+        'runId must be a non-empty string',
+      );
+    }
+    expect(getFinishedLogRecords()).toHaveLength(0);
   });
 
   it('stamps and parents correctly without a global context manager', () => {
@@ -574,7 +576,6 @@ describe('evaluate (default: events, no harness spans)', () => {
     const child = getFinishedSpans().find(s => s.name === 'chat manual')!;
     expect(root.attributes['test.case.id']).toBe('c1');
     expect(child.attributes['test.case.id']).toBeUndefined();
-    expect(eventsNamed('opensearch.test_case.result')[0].spanContext?.spanId).toBe(root.spanContext().spanId);
     expect(eventsNamed('gen_ai.evaluation.result')[0].spanContext?.spanId).toBe(root.spanContext().spanId);
     spy.mockRestore();
   });
@@ -599,36 +600,49 @@ describe('evaluate (default: events, no harness spans)', () => {
 });
 
 describe('Benchmark (default: events, no harness spans)', () => {
-  it('log emits a case event parented to the evaluated span and no spans', () => {
+  it('log emits score events parented to the evaluated span with run and case metadata', () => {
     const spy = quiet();
-    const bm = new Benchmark('upload', { recordIo: true, metadata: { 'model.version': 'v1' } });
+    const bm = new Benchmark('upload', { metadata: { 'model.version': 'v1', shared: 'run' } });
     bm.log({
       input: 'q',
       output: 'a',
       expected: 'a',
-      scores: { accuracy: 1 },
+      scores: [
+        { name: 'accuracy', value: 1 },
+        { name: 'judge', value: 0.5, metadata: { shared: 'score' } },
+      ],
       caseId: 'c1',
       caseName: 'first',
       traceId: 'abcdef1234567890abcdef1234567890',
       spanId: '1234567890abcdef',
-      durationMs: 12.5,
-      metadata: { 'case.tag': 'x' },
+      metadata: { 'case.tag': 'x', shared: 'case' },
     });
     bm.close();
     expect(getFinishedSpans()).toHaveLength(0);
 
-    const [s] = eventsNamed('gen_ai.evaluation.result');
+    const [s, j] = eventsNamed('gen_ai.evaluation.result');
+    expect(s.spanContext?.traceId).toBe('abcdef1234567890abcdef1234567890');
     expect(s.spanContext?.spanId).toBe('1234567890abcdef');
-    const [c] = eventsNamed('opensearch.test_case.result');
-    expect(c.spanContext?.traceId).toBe('abcdef1234567890abcdef1234567890');
-    expect(c.spanContext?.spanId).toBe('1234567890abcdef');
-    expect(c.attributes['test.case.id']).toBe('c1');
-    expect(c.attributes['test.case.name']).toBe('first');
-    expect(c.attributes['test.case.result.status']).toBe('pass');
-    expect(c.attributes['opensearch.test_case.input']).toBe('q');
-    expect(c.attributes['opensearch.test_case.duration_ms']).toBe(12.5);
-    expect(c.attributes['model.version']).toBe('v1');
-    expect(c.attributes['case.tag']).toBe('x');
+    expect(s.attributes['test.case.id']).toBe('c1');
+    expect(s.attributes['test.case.name']).toBe('first');
+    expect(s.attributes['model.version']).toBe('v1');
+    expect(s.attributes['case.tag']).toBe('x');
+    // case metadata over run metadata, score metadata over both
+    expect(s.attributes['shared']).toBe('case');
+    expect(j.attributes['shared']).toBe('score');
+    spy.mockRestore();
+  });
+
+  it('SDK attributes win over user metadata', () => {
+    const spy = quiet();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const bm = new Benchmark('upload', { metadata: { 'gen_ai.evaluation.name': 'run-meta' } });
+    bm.log({ input: 'q', caseId: 'c1', scores: { accuracy: 1 }, metadata: { 'test.case.id': 'spoofed' } });
+    bm.close();
+    const [s] = eventsNamed('gen_ai.evaluation.result');
+    expect(s.attributes['gen_ai.evaluation.name']).toBe('accuracy');
+    expect(s.attributes['test.case.id']).toBe('c1');
+    warn.mockRestore();
     spy.mockRestore();
   });
 
@@ -638,11 +652,10 @@ describe('Benchmark (default: events, no harness spans)', () => {
     bm.log({ input: 'q', scores: { accuracy: 1 } });
     bm.close();
     expect(eventsNamed('gen_ai.evaluation.result')[0].spanContext).toBeUndefined();
-    expect(eventsNamed('opensearch.test_case.result')[0].spanContext).toBeUndefined();
     spy.mockRestore();
   });
 
-  it('an errored case is status error and close emits the run event', () => {
+  it('computes the local case status and sends nothing for cases without scores', () => {
     const spy = quiet();
     const bm = new Benchmark('upload');
     bm.log({ input: 'q1', caseId: 'bad', error: 'timeout', errorType: 'TimeoutError' });
@@ -650,20 +663,72 @@ describe('Benchmark (default: events, no harness spans)', () => {
     bm.log({ input: 'q3', caseId: 'good' });
     bm.log({ input: 'q4', caseId: 'wrong', status: 'fail' });
     const summary = bm.close();
-    const cases = eventsNamed('opensearch.test_case.result');
-    expect(cases.map(e => e.attributes['test.case.result.status'])).toEqual(['error', 'error', 'pass', 'fail']);
-    expect(cases[0].attributes['error.type']).toBe('TimeoutError');
-    expect(cases[1].attributes['error.type']).toBeUndefined();
-    const [run] = eventsNamed('opensearch.test_suite_run.result');
-    expect(run.attributes['test.suite.run.id']).toBe(bm.runId);
-    expect(run.attributes['test.suite.run.status']).toBe('failure');
-    expect(run.attributes['opensearch.test_suite_run.case_count']).toBe(4);
-    expect(run.attributes['opensearch.test_suite_run.error_count']).toBe(2);
-    expect(run.attributes['opensearch.test_suite_run.pass_count']).toBe(1);
-    expect(run.attributes['opensearch.test_suite_run.fail_count']).toBe(1);
+    expect(getFinishedLogRecords()).toHaveLength(0);
+    expect(summary.totalCases).toBe(4);
     expect(summary.errorCount).toBe(2);
+    expect(summary.passCount).toBe(1);
     expect(summary.failCount).toBe(1);
     spy.mockRestore();
+  });
+
+  it('emits only gen_ai.evaluation.result events', () => {
+    const spy = quiet();
+    const bm = new Benchmark('upload');
+    bm.log({ input: 'q1', scores: { accuracy: 1 } });
+    bm.log({ input: 'q2', scores: [{ name: 'accuracy' }], errorType: 'TimeoutError' });
+    bm.log({ input: 'q3', error: 'oops' });
+    bm.close();
+    const records = getFinishedLogRecords();
+    expect(records).toHaveLength(2);
+    expect(records.every(r => r.eventName === 'gen_ai.evaluation.result')).toBe(true);
+    spy.mockRestore();
+  });
+
+  it('log with errorType emits every score as an evaluator error result', () => {
+    const spy = quiet();
+    const bm = new Benchmark('upload', { agentName: 'agent-x' });
+    bm.log({
+      input: 'q',
+      caseId: 'c1',
+      scores: [
+        { name: 'answer_quality', value: 3, threshold: 4, scoreMin: 1, scoreMax: 5 },
+        { name: 'tool_selection', value: 1, label: 'pass' },
+      ],
+      error: 'judge timed out',
+      errorType: 'TimeoutError',
+      traceId: 'abcdef1234567890abcdef1234567890',
+      spanId: '1234567890abcdef',
+    });
+    const summary = bm.close();
+    const events = eventsNamed('gen_ai.evaluation.result');
+    expect(events.map(e => e.attributes['gen_ai.evaluation.name'])).toEqual(['answer_quality', 'tool_selection']);
+    for (const e of events) {
+      expect(e.attributes['error.type']).toBe('TimeoutError');
+      expect(e.attributes['gen_ai.evaluation.score.value']).toBeUndefined();
+      expect(e.attributes['gen_ai.evaluation.score.label']).toBeUndefined();
+      expect(e.attributes['test.case.id']).toBe('c1');
+      expect(e.attributes['gen_ai.agent.name']).toBe('agent-x');
+      expect(e.spanContext?.spanId).toBe('1234567890abcdef');
+    }
+    expect(events[0].attributes['opensearch.evaluation.score.threshold']).toBe(4);
+    expect(summary.errorCount).toBe(1);
+    expect(summary.scores).toEqual({});
+    spy.mockRestore();
+  });
+
+  it('uses the given runId', () => {
+    const spy = quiet();
+    const bm = new Benchmark('upload', { runId: 'ci-run-42' });
+    expect(bm.runId).toBe('ci-run-42');
+    bm.log({ input: 'q', scores: { accuracy: 1 } });
+    expect(bm.close().runId).toBe('ci-run-42');
+    expect(eventsNamed('gen_ai.evaluation.result')[0].attributes['test.suite.run.id']).toBe('ci-run-42');
+    spy.mockRestore();
+  });
+
+  it('rejects an empty or whitespace-only runId', () => {
+    expect(() => new Benchmark('upload', { runId: '' })).toThrow('runId must be a non-empty string');
+    expect(() => new Benchmark('upload', { runId: ' \t ' })).toThrow('runId must be a non-empty string');
   });
 
   it('rejects an unknown status', () => {
@@ -675,13 +740,15 @@ describe('Benchmark (default: events, no harness spans)', () => {
   });
 });
 
-describe('case and run event scope', () => {
+describe('evaluation result scope', () => {
   it('uses the SDK scope with no scope attributes', () => {
     const spy = quiet();
     const bm = new Benchmark('scope');
-    bm.log({ input: 'q' });
+    bm.log({ input: 'q', scores: { accuracy: 1 } });
     bm.close();
-    for (const r of [...caseEvents(), ...runEvents()]) {
+    const records = scoreRecords();
+    expect(records).toHaveLength(1);
+    for (const r of records) {
       expect(r.instrumentationScope.name).toBe('opensearch-genai-observability-sdk-ts');
       expect(r.instrumentationScope.attributes ?? {}).toEqual({});
     }
@@ -807,11 +874,11 @@ describe('declared scorer rules and verdicts', () => {
     const result = evaluate({ name: 'no-rules', task: x => x, data: [{ input: 'q' }], scores: [() => 0] });
     expect(result.cases[0].status).toBe('pass');
     expect(result.cases[0].verdicts).toBeUndefined();
-    expect(caseEvents()[0].attributes['test.case.result.status']).toBe('pass');
+    expect(result.cases[0].resultStatus).toBe('pass');
     expect(scoreRecords()[0].attributes[LABEL]).toBeUndefined();
   });
 
-  it('fails a case on a fail verdict; run status reflects errors only', () => {
+  it('fails a case on a fail verdict', () => {
     const quality = defineScorer({ name: 'answer_quality', threshold: 4 }, (input) => (input === 'good' ? 5 : 2));
     const result = evaluate({
       name: 'verdicts',
@@ -821,21 +888,20 @@ describe('declared scorer rules and verdicts', () => {
     });
     expect(result.cases.map(c => c.status)).toEqual(['pass', 'fail']);
     expect(result.cases.map(c => c.resultStatus)).toEqual(['pass', 'fail']);
-    const run = runEvents()[0].attributes;
-    expect(run['opensearch.test_suite_run.pass_count']).toBe(1);
-    expect(run['opensearch.test_suite_run.fail_count']).toBe(1);
-    expect(run['test.suite.run.status']).toBe('success');
+    expect(result.summary.passCount).toBe(1);
+    expect(result.summary.failCount).toBe(1);
+    expect(result.summary.errorCount).toBe(0);
   });
 
   it('error beats a fail verdict', () => {
     const bad = () => { throw new Error('judge down'); };
-    evaluate({
+    const result = evaluate({
       name: 'err-first',
       task: x => x,
       data: [{ input: 'q' }],
       scores: [() => ({ name: 'x', value: 0, passed: false }), bad],
     });
-    expect(caseEvents()[0].attributes['test.case.result.status']).toBe('error');
+    expect(result.cases[0].resultStatus).toBe('error');
   });
 
   it('names the error grade after the declared evaluation name', () => {
@@ -871,20 +937,20 @@ describe('declared scorer rules and verdicts', () => {
         { name: 'tool_selection', value: 1, label: 'pass' },
       ],
     });
-    bm.close();
+    const summary = bm.close();
     const g = grades();
     expect(g['answer_quality'].attributes[LABEL]).toBe('fail');
     expect(g['answer_quality'].attributes['opensearch.evaluation.score.max']).toBe(5);
     expect(g['tool_selection'].attributes[LABEL]).toBe('pass');
-    expect(caseEvents()[0].attributes['test.case.result.status']).toBe('fail');
+    expect(summary.failCount).toBe(1);
   });
 
   it('Benchmark.log keeps dict scores neutral and explicit status wins', () => {
     const bm = new Benchmark('bench-dict');
     bm.log({ input: 'q', caseId: 'a', scores: { accuracy: 0 } });
     bm.log({ input: 'q', caseId: 'b', scores: [{ name: 'x', value: 0, passed: false }], status: 'pass' });
-    bm.close();
-    expect(caseEvents().map(e => e.attributes['test.case.result.status'])).toEqual(['pass', 'pass']);
+    const summary = bm.close();
+    expect(summary.passCount).toBe(2);
     expect(scoreRecords()[0].attributes[LABEL]).toBeUndefined();
   });
 });

@@ -52,7 +52,6 @@ const result = evaluate({
     { input: { query: 'everything' }, expected: 'The answer to "everything" is 42.' },
   ],
   scores: [exactMatch, containsKeyword],
-  recordIo: true,
 });
 
 console.log('\nEvaluation Results:');

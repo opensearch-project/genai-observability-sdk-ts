@@ -183,8 +183,6 @@ const DOUBLE_ATTRIBUTES: ReadonlySet<string> = new Set([
   "opensearch.evaluation.score.min",
   "opensearch.evaluation.score.max",
   "opensearch.evaluation.score.threshold",
-  "opensearch.test_case.duration_ms",
-  "opensearch.test_suite_run.duration_ms",
 ]);
 
 interface OtlpKeyValue {
