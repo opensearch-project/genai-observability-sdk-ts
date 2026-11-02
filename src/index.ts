@@ -23,6 +23,13 @@ export {
   TEST_SUITE_RUN_RESULT_EVENT,
 } from './benchmark.js';
 export { TestCaseSpanProcessor } from './testcase.js';
+export { TraceOnlyContextProcessor } from './logs.js';
+export {
+  ciPipelineAttributes,
+  CICD_PIPELINE_NAME_KEY,
+  CICD_PIPELINE_RUN_ID_KEY,
+  CICD_PIPELINE_RUN_URL_KEY,
+} from './cicd.js';
 export type {
   EvalScore,
   Scorer,

@@ -70,8 +70,9 @@ describe('Benchmark class', () => {
     bm.close();
 
     const [record] = scoreRecords();
-    expect(record.spanContext).toBeUndefined();
-    expect(record.attributes['opensearch.evaluation.trace_id']).toBe('abcdef1234567890abcdef1234567890');
+    expect(record.spanContext?.traceId).toBe('abcdef1234567890abcdef1234567890');
+    expect(record.spanContext?.spanId).toBe('');
+    expect(record.attributes['opensearch.evaluation.trace_id']).toBeUndefined();
     expect(record.attributes['opensearch.evaluation.level']).toBe('trace');
     expect(caseEvents()[0].spanContext).toBeUndefined();
     logSpy.mockRestore();
@@ -676,17 +677,14 @@ describe('Benchmark (default: events, no harness spans)', () => {
 });
 
 describe('case and run event scope', () => {
-  it('uses the SDK scope with SDK scope attributes', () => {
+  it('uses the SDK scope with no scope attributes', () => {
     const spy = quiet();
     const bm = new Benchmark('scope');
     bm.log({ input: 'q' });
     bm.close();
     for (const r of [...caseEvents(), ...runEvents()]) {
       expect(r.instrumentationScope.name).toBe('opensearch-genai-observability-sdk-ts');
-      expect(r.instrumentationScope.attributes?.['opensearch.genai.sdk.name']).toBe(
-        'opensearch-genai-observability-sdk-ts',
-      );
-      expect(r.instrumentationScope.attributes?.['opensearch.genai.sdk.version']).toBeDefined();
+      expect(r.instrumentationScope.attributes ?? {}).toEqual({});
     }
     spy.mockRestore();
   });
@@ -721,7 +719,7 @@ describe('TestCaseSpanProcessor installation', () => {
 });
 
 describe('declared scorer rules and verdicts', () => {
-  const ASSESSMENT = 'opensearch.evaluation.assessment';
+  const ASSESSMENT = 'gen_ai.evaluation.score.label';
   const THRESHOLD = 'opensearch.evaluation.score.threshold';
   let logSpy: ReturnType<typeof vi.spyOn>;
   let warnSpy: ReturnType<typeof vi.spyOn>;
@@ -764,7 +762,7 @@ describe('declared scorer rules and verdicts', () => {
     expect(r.attributes['opensearch.evaluation.evaluator.name']).toBe('quality_judge');
     expect(r.attributes['opensearch.evaluation.evaluator.type']).toBe('llm_judge');
     expect(r.attributes[ASSESSMENT]).toBe('fail');
-    expect(r.instrumentationScope.name).toBe('quality_judge');
+    expect(r.instrumentationScope.name).toBe('opensearch-genai-observability-sdk-ts');
     expect(result.cases[0].scores).toEqual({ answer_quality: 3 });
     expect(result.cases[0].assessments).toEqual({ answer_quality: 'fail' });
   });

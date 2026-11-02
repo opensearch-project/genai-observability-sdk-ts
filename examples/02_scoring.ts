@@ -50,8 +50,8 @@ score({
   responseId: 'resp-123',
 });
 
-// 3. Trace-level: only the trace id is known. The event has no span context and
-//    carries opensearch.evaluation.trace_id + opensearch.evaluation.level=trace.
+// 3. Trace-level: only the trace id is known. The event carries it as its own
+//    trace id (no span id) and opensearch.evaluation.level=trace.
 score({ name: 'overall-satisfaction', value: 0.9, traceId: ids.traceId });
 
 // 4. Session-scoped human feedback with custom attributes

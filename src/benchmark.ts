@@ -37,6 +37,7 @@ import {
   validateMetadataKeys,
 } from './internal.js';
 import { getEventLogger } from './logs.js';
+import { ciPipelineAttributes } from './cicd.js';
 import {
   score,
   normalizeAssessment,
@@ -77,7 +78,7 @@ export interface EvalScore {
   label?: string;
   explanation?: string;
   metadata?: Record<string, unknown>;
-  /** Explicit verdict (`opensearch.evaluation.assessment`). Wins over `passed`. */
+  /** Explicit verdict (recorded as `gen_ai.evaluation.score.label`). Wins over `passed`. */
   assessment?: Assessment;
   /** Explicit verdict as a boolean. */
   passed?: boolean;
@@ -332,6 +333,8 @@ interface CaseIdentity {
   caseName?: string;
   /** `gen_ai.agent.name` / `gen_ai.agent.version` of the agent under test, when known. */
   agent?: Record<string, string>;
+  /** OTel `cicd.pipeline.*` of the CI run, when in CI. */
+  ci?: Record<string, string>;
 }
 
 /** The run's agent: the declared one, else the one every case agreed on. */
@@ -357,7 +360,7 @@ function identityAttributes(identity: CaseIdentity): Record<string, string> {
     "test.case.id": identity.caseId,
   };
   if (identity.caseName) attrs["test.case.name"] = identity.caseName;
-  return { ...attrs, ...(identity.agent ?? {}) };
+  return { ...attrs, ...(identity.ci ?? {}), ...(identity.agent ?? {}) };
 }
 
 /**
@@ -449,9 +452,11 @@ function emitRunEvent(
   summary: BenchmarkSummary,
   metadata: Attributes,
   agent: Record<string, string> = {},
+  ci: Record<string, string> = {},
 ): void {
   emitEvent(TEST_SUITE_RUN_RESULT_EVENT, {
     ...metadata,
+    ...ci,
     ...agent,
     "test.suite.name": summary.benchmarkName,
     "test.suite.run.id": summary.runId,
@@ -537,6 +542,11 @@ export interface BenchmarkOptions {
   agentName?: string;
   /** `gen_ai.agent.version` of the agent under test. Default: `register({ agentVersion })`. */
   agentVersion?: string;
+  /**
+   * Sets or overrides the OTel `cicd.pipeline.name` / `.run.id` / `.run.url.full`
+   * read from GitHub Actions, GitLab CI or Jenkins. Nothing is added outside CI.
+   */
+  ciPipeline?: Record<string, string>;
 }
 
 /**
@@ -553,6 +563,7 @@ export class Benchmark {
   private _cases: TestCaseResult[] = [];
   private _closed = false;
   private _agent: Record<string, string>;
+  private _ci: Record<string, string>;
 
   constructor(name: string, options?: BenchmarkOptions) {
     this._name = name;
@@ -560,6 +571,7 @@ export class Benchmark {
     this._agent = resolveAgent(options?.agentName, options?.agentVersion);
     this._metadata = safeMetadata(options?.metadata, `benchmark:${name}`);
     this._recordIo = options?.recordIo ?? false;
+    this._ci = ciPipelineAttributes(options?.ciPipeline);
     this._runId = makeRunId();
     this._start = performance.now();
   }
@@ -610,6 +622,7 @@ export class Benchmark {
       caseId,
       caseName: options.caseName,
       agent: this._agent,
+      ci: this._ci,
     };
     if (options.status !== undefined && !CASE_STATUSES.includes(options.status)) {
       throw new Error(`status must be one of ${CASE_STATUSES.join(', ')}; got "${options.status}"`);
@@ -669,7 +682,7 @@ export class Benchmark {
     this._closed = true;
 
     const summary = computeSummary(this._name, this._runId, this._cases, elapsedMs(this._start));
-    emitRunEvent(summary, toAttributes(this._metadata), this._agent);
+    emitRunEvent(summary, toAttributes(this._metadata), this._agent, this._ci);
     console.log(formatSummary(summary));
     return summary;
   }
@@ -696,6 +709,12 @@ export interface EvaluateOptions {
   agentName?: string;
   /** `gen_ai.agent.version` of the agent under test, resolved the same way. */
   agentVersion?: string;
+  /**
+   * Sets or overrides the OTel `cicd.pipeline.name` / `.run.id` / `.run.url.full`
+   * read from GitHub Actions, GitLab CI or Jenkins. In CI they go on the run,
+   * case and score events and the agent root spans; nothing is added outside CI.
+   */
+  ciPipeline?: Record<string, string>;
 }
 
 /**
@@ -723,6 +742,7 @@ export function evaluate(options: EvaluateOptions): BenchmarkResult {
   const cases: TestCaseResult[] = [];
   const declaredAgent = resolveAgent(options.agentName, options.agentVersion);
   const caseAgents: Array<Record<string, string>> = [];
+  const ci = ciPipelineAttributes(options.ciPipeline);
 
   ensureGlobalTestCaseProcessor();
 
@@ -733,6 +753,7 @@ export function evaluate(options: EvaluateOptions): BenchmarkResult {
       runId,
       caseId: item.caseId ?? makeCaseId(item.input),
       caseName: item.caseName,
+      ci,
     };
     const expected = item.expected;
 
@@ -864,7 +885,7 @@ export function evaluate(options: EvaluateOptions): BenchmarkResult {
   emitRunEvent(summary, filteredMetadata, {
     ...resolveAgent(),
     ...runAgent(caseAgents, explicitAgent),
-  });
+  }, ci);
   console.log(formatSummary(summary));
 
   return { summary, cases };

@@ -24,6 +24,9 @@ export const RESERVED_KEYS: ReadonlySet<string> = new Set([
   "opensearch.test_suite_run.duration_ms",
   "error.type",
   "gen_ai.operation.name",
+  "cicd.pipeline.name",
+  "cicd.pipeline.run.id",
+  "cicd.pipeline.run.url.full",
 ]);
 
 export function parseHex(value: string): number | null {

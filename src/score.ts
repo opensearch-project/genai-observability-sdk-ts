@@ -17,7 +17,7 @@ import {
   normalizeTraceId,
   resolveAgent,
 } from './internal.js';
-import { getEventLogger } from './logs.js';
+import { getEventLogger, takeTraceOnlyHandled, traceOnlyContext } from './logs.js';
 
 /** OTel event name of an evaluation result (semantic-conventions-genai). */
 export const EVALUATION_RESULT_EVENT = "gen_ai.evaluation.result";
@@ -27,7 +27,7 @@ const EXPLANATION_LIMIT = 500;
 export type EvaluationLevel = "span" | "trace" | "session" | "tool_call";
 export type EvaluatorType = "llm_judge" | "code" | "human" | "external";
 export type ScoreDirection = "maximize" | "minimize";
-/** `opensearch.evaluation.assessment`: an explicit verdict. */
+/** An explicit verdict, recorded as `gen_ai.evaluation.score.label`. */
 export type Assessment = "pass" | "fail";
 const ASSESSMENTS: readonly Assessment[] = ["pass", "fail"];
 
@@ -74,10 +74,10 @@ export interface ScoreOptions {
    */
   threshold?: number;
   /**
-   * `opensearch.evaluation.assessment`: explicit verdict, `"pass"` or `"fail"`
-   * (`true` / `false` accepted). Wins over `threshold`. Without it, a `value`
-   * plus `threshold` computes and records the assessment. Invalid values are
-   * dropped with a warning.
+   * Explicit verdict, `"pass"` or `"fail"` (`true` / `false` accepted),
+   * recorded as `gen_ai.evaluation.score.label` (replacing `label`). Wins over
+   * `threshold`. Without it and without `label`, a `value` plus `threshold`
+   * computes and records the verdict. Invalid values are dropped with a warning.
    */
   assessment?: Assessment | boolean;
   /** `gen_ai.conversation.id` (session-scoped evaluations). */
@@ -120,13 +120,13 @@ function resolveTarget(traceId?: string, spanId?: string): Target {
   }
   if (!spanId) {
     // Trace-level score: no span context. Never derive a span id from the trace id.
-    return { context: ROOT_CONTEXT, traceOnlyId: cleanTraceId };
+    return { context: traceOnlyContext(cleanTraceId), traceOnlyId: cleanTraceId };
   }
 
   const cleanSpanId = normalizeSpanId(spanId);
   if (!cleanSpanId) {
     console.warn(`score(): ignoring invalid spanId "${spanId}", scoring at trace level`);
-    return { context: ROOT_CONTEXT, traceOnlyId: cleanTraceId };
+    return { context: traceOnlyContext(cleanTraceId), traceOnlyId: cleanTraceId };
   }
 
   return {
@@ -187,7 +187,6 @@ function buildAttributes(options: ScoreOptions, target: Target): Attributes {
 
   attrs["gen_ai.evaluation.name"] = options.name;
   if (options.value !== undefined) attrs["gen_ai.evaluation.score.value"] = options.value;
-  if (options.label) attrs["gen_ai.evaluation.score.label"] = options.label;
   if (options.explanation) {
     attrs["gen_ai.evaluation.explanation"] = options.explanation.slice(0, EXPLANATION_LIMIT);
   }
@@ -199,7 +198,6 @@ function buildAttributes(options: ScoreOptions, target: Target): Attributes {
 
   const level = options.level ?? (target.traceOnlyId ? "trace" : undefined);
   if (level) attrs["opensearch.evaluation.level"] = level;
-  if (target.traceOnlyId) attrs["opensearch.evaluation.trace_id"] = target.traceOnlyId;
   if (options.evaluator) attrs["opensearch.evaluation.evaluator.name"] = options.evaluator;
   if (options.evaluatorVersion) {
     attrs["opensearch.evaluation.evaluator.version"] = options.evaluatorVersion;
@@ -219,26 +217,40 @@ function buildAttributes(options: ScoreOptions, target: Target): Attributes {
     threshold: options.threshold,
     direction,
   });
-  if (verdict) attrs["opensearch.evaluation.assessment"] = verdict;
+  // The verdict is the label (OTel examples "pass" / "fail"). An explicit verdict wins
+  // over a label; a verdict computed from the threshold yields to one (readers
+  // recompute it from threshold + direction).
+  const explicitVerdict = options.assessment !== undefined ? verdict : undefined;
+  if (options.label && explicitVerdict && options.label.toLowerCase() !== explicitVerdict) {
+    console.warn(
+      `score(): assessment "${explicitVerdict}" replaces label "${options.label}" for ${JSON.stringify(options.name)} (the verdict is the label)`,
+    );
+  }
+  const label = explicitVerdict || options.label || verdict;
+  if (label) attrs["gen_ai.evaluation.score.label"] = label;
   if (options.judgeTraceId) attrs["opensearch.evaluation.judge.trace_id"] = options.judgeTraceId;
   return attrs;
 }
 
 function emitEvent(options: ScoreOptions, target: Target, attributes: Attributes): void {
-  // Evaluator identity goes in the instrumentation scope (standard mechanism).
-  // The scope is always set: the evaluator, else the SDK scope and version.
-  // Scope attributes opensearch.genai.sdk.name / .version are always set.
-  const logger = options.evaluator
-    ? getEventLogger(options.evaluator, options.evaluatorVersion)
-    : getEventLogger();
-  logger.emit({
+  // The scope is the SDK (the instrumentation library); the evaluator is an attribute.
+  getEventLogger().emit({
     eventName: EVALUATION_RESULT_EVENT,
     timestamp: Date.now(),
     severityNumber: SeverityNumber.INFO,
     attributes,
     context: target.context,
   });
+  if (target.traceOnlyId && !takeTraceOnlyHandled() && !warnedTraceOnly) {
+    warnedTraceOnly = true;
+    console.warn(
+      "score(): a trace-level result was emitted without its trace id: add " +
+        "TraceOnlyContextProcessor to your LoggerProvider (register() does this)",
+    );
+  }
 }
+
+let warnedTraceOnly = false;
 
 /**
  * Record an evaluation result as an OTel `gen_ai.evaluation.result` log event,
@@ -246,12 +258,12 @@ function emitEvent(options: ScoreOptions, target: Target, attributes: Attributes
  *
  * - Inline: call while the evaluated span is active.
  * - Offline: pass `traceId` + `spanId` of the evaluated span.
- * - Trace-level: pass only `traceId`. The event has no span context and carries
- *   `opensearch.evaluation.trace_id` and `opensearch.evaluation.level=trace`.
+ * - Trace-level: pass only `traceId`. The event carries it as its own trace id,
+ *   with no span id, and `opensearch.evaluation.level=trace`.
  *
  * Verdict: readers show pass/fail only for a declared rule. Pass `assessment`
  * (explicit) or `threshold` (+ `direction`); with `value` and `threshold` the
- * SDK also records the computed `opensearch.evaluation.assessment`.
+ * SDK also records the computed verdict as `gen_ai.evaluation.score.label`.
  */
 export function score(options: ScoreOptions): void {
   const target = resolveTarget(options.traceId, options.spanId);

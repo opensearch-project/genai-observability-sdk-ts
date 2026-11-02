@@ -19,7 +19,12 @@ import {
 import { AWSSigV4OTLPExporter, AWSSigV4OTLPLogExporter, sendScoresAsDouble } from "./exporters.js";
 import { installTestCaseProcessor } from "./testcase.js";
 import { setAgentDefaults } from "./internal.js";
-import { hasGlobalLoggerProvider, getSdkLoggerProvider, setSdkLoggerProvider } from "./logs.js";
+import {
+  hasGlobalLoggerProvider,
+  getSdkLoggerProvider,
+  setSdkLoggerProvider,
+  TraceOnlyContextProcessor,
+} from "./logs.js";
 
 export const DEFAULT_ENDPOINT =
   "http://localhost:21890/opentelemetry/v1/traces";
@@ -309,7 +314,8 @@ async function setupLogs(
       : new BatchLogRecordProcessor({ exporter });
   const loggerProvider = new LoggerProvider({
     resource: logsResource(resourceAttrs),
-    processors: [processor],
+    // TraceOnlyContextProcessor first: trace-level events carry their trace id.
+    processors: [new TraceOnlyContextProcessor(), processor],
   });
 
   // Replace a provider left over from a previous register() call.

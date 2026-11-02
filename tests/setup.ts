@@ -10,6 +10,7 @@ import {
   InMemorySpanExporter,
 } from '@opentelemetry/sdk-trace-base';
 import { logs } from '@opentelemetry/api-logs';
+import { TraceOnlyContextProcessor } from '../src/logs.js';
 import {
   LoggerProvider,
   SimpleLogRecordProcessor,
@@ -29,7 +30,7 @@ provider.register();
 
 export const logExporter = new InMemoryLogRecordExporter();
 export const loggerProvider = new LoggerProvider({
-  processors: [new SimpleLogRecordProcessor({ exporter: logExporter })],
+  processors: [new TraceOnlyContextProcessor(), new SimpleLogRecordProcessor({ exporter: logExporter })],
 });
 logs.setGlobalLoggerProvider(loggerProvider);
 

@@ -58,11 +58,11 @@ describe('score', () => {
     expect(r.attributes['opensearch.evaluation.evaluator.name']).toBeUndefined();
   });
 
-  it('uses the evaluator as instrumentation scope and attribute', () => {
+  it('records the evaluator as attributes; the scope stays the SDK', () => {
     score({ name: 'relevance', value: 0.9, evaluator: 'helpfulness_judge', evaluatorVersion: '3.1.0' });
     const r = onlyRecord();
-    expect(r.instrumentationScope.name).toBe('helpfulness_judge');
-    expect(r.instrumentationScope.version).toBe('3.1.0');
+    expect(r.instrumentationScope.name).toBe(SDK_SCOPE_NAME);
+    expect(r.instrumentationScope.version).toBe(SDK_VERSION);
     expect(r.attributes['opensearch.evaluation.evaluator.name']).toBe('helpfulness_judge');
     expect(r.attributes['opensearch.evaluation.evaluator.version']).toBe('3.1.0');
   });
@@ -173,16 +173,18 @@ describe('score', () => {
     expect(r.spanContext?.spanId).toBe(SPAN_ID);
   });
 
-  it('trace-level score: no span context, no derived span id, trace_id + level=trace', () => {
+  it('trace-level score: the record trace id, no span id, level=trace', () => {
     const tracer = trace.getTracer('test');
     tracer.startActiveSpan('unrelated', (span) => {
       score({ name: 'task_success', value: 1, traceId: TRACE_ID });
       span.end();
     });
     const r = onlyRecord();
-    expect(r.spanContext).toBeUndefined();
-    expect(r.attributes['opensearch.evaluation.trace_id']).toBe(TRACE_ID);
+    expect(r.spanContext?.traceId).toBe(TRACE_ID);
+    expect(r.spanContext?.spanId).toBe('');
+    expect(r.attributes['opensearch.evaluation.trace_id']).toBeUndefined();
     expect(r.attributes['opensearch.evaluation.level']).toBe('trace');
+    expect(warnSpy).not.toHaveBeenCalled();
   });
 
   it('trace-level score keeps an explicit level', () => {
@@ -222,18 +224,14 @@ describe('score', () => {
     expect(getFinishedSpans()).toHaveLength(0);
   });
 
-  it('sets SDK scope attributes on every logger, evaluator-named or not', () => {
+  it('uses the SDK scope with no scope attributes, evaluator-named or not', () => {
     score({ name: 'a', value: 1 });
     score({ name: 'b', value: 1, evaluator: 'judge', evaluatorVersion: '2' });
-    const [plain, judged] = getFinishedLogRecords();
-    for (const r of [plain, judged]) {
-      expect(r.instrumentationScope.attributes).toEqual({
-        'opensearch.genai.sdk.name': 'opensearch-genai-observability-sdk-ts',
-        'opensearch.genai.sdk.version': SDK_VERSION,
-      });
+    for (const r of getFinishedLogRecords()) {
+      expect(r.instrumentationScope.name).toBe(SDK_SCOPE_NAME);
+      expect(r.instrumentationScope.version).toBe(SDK_VERSION);
+      expect(r.instrumentationScope.attributes ?? {}).toEqual({});
     }
-    expect(judged.instrumentationScope.name).toBe('judge');
-    expect(judged.instrumentationScope.version).toBe('2');
   });
 
   it('uses the SDK version, not evaluatorVersion, when no evaluator is named', () => {
@@ -245,7 +243,7 @@ describe('score', () => {
 });
 
 describe('score verdicts', () => {
-  const ASSESSMENT = 'opensearch.evaluation.assessment';
+  const ASSESSMENT = 'gen_ai.evaluation.score.label';
   const THRESHOLD = 'opensearch.evaluation.score.threshold';
   const DIRECTION = 'opensearch.evaluation.score.direction';
 
@@ -294,6 +292,22 @@ describe('score verdicts', () => {
     const a = onlyRecord().attributes;
     expect(a[ASSESSMENT]).toBe('pass');
     expect(a[THRESHOLD]).toBe(4);
+  });
+
+  it('never writes opensearch.evaluation.assessment', () => {
+    score({ name: 'q', value: 1, assessment: 'pass' });
+    expect(onlyRecord().attributes['opensearch.evaluation.assessment']).toBeUndefined();
+  });
+
+  it('keeps an explicit label over a computed verdict', () => {
+    score({ name: 'q', value: 2, threshold: 4, label: 'partially_correct' });
+    expect(onlyRecord().attributes[ASSESSMENT]).toBe('partially_correct');
+  });
+
+  it('lets an explicit assessment replace a label, with a warning', () => {
+    score({ name: 'q', value: 2, label: 'partially_correct', assessment: 'pass' });
+    expect(onlyRecord().attributes[ASSESSMENT]).toBe('pass');
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('replaces label'));
   });
 
   it('records a threshold without a value but no verdict', () => {
