@@ -64,6 +64,8 @@ Attributes (each is set only when it has a value):
 npm install @opensearch-project/genai-observability-sdk-ts
 ```
 
+This guide needs a release newer than 0.1.1. Version 0.1.1 and earlier (the latest on npm) record scores as span events instead of `gen_ai.evaluation.result` log events, and have no `logsEndpoint`, `tracesEndpoint` or `sigv4` options. Until the next release ships, build the package from source.
+
 Call `register()` once at startup. It sets up the OTLP traces pipeline and the OTLP logs pipeline that carries the evaluation events. `agentName` and `agentVersion` become `gen_ai.agent.name` and `gen_ai.agent.version` on every result, unless a call names another agent or the evaluated span names its own.
 
 ```typescript
