@@ -1,7 +1,7 @@
 # OpenSearch GenAI Observability SDK for TypeScript
 
 [![CI](https://github.com/opensearch-project/genai-observability-sdk-ts/actions/workflows/ci.yml/badge.svg)](https://github.com/opensearch-project/genai-observability-sdk-ts/actions/workflows/ci.yml)
-[![npm version](https://img.shields.io/npm/v/opensearch-genai-observability-sdk-ts.svg)](https://www.npmjs.com/package/opensearch-genai-observability-sdk-ts)
+[![npm version](https://img.shields.io/npm/v/@opensearch-project/genai-observability-sdk-ts.svg)](https://www.npmjs.com/package/@opensearch-project/genai-observability-sdk-ts)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
 OTel-native tracing and scoring for LLM applications. Instrument your AI workflows with standard OpenTelemetry spans and submit evaluation scores — all routed to OpenSearch through a single OTLP pipeline.
@@ -29,11 +29,11 @@ OTel-native tracing and scoring for LLM applications. Instrument your AI workflo
 ## Installation
 
 ```bash
-npm install opensearch-genai-observability-sdk-ts
+npm install @opensearch-project/genai-observability-sdk-ts
 # or
-pnpm add opensearch-genai-observability-sdk-ts
+pnpm add @opensearch-project/genai-observability-sdk-ts
 # or
-yarn add opensearch-genai-observability-sdk-ts
+yarn add @opensearch-project/genai-observability-sdk-ts
 ```
 
 Optional peer dependencies for specific features:
@@ -49,7 +49,7 @@ npm install @aws-sdk/credential-providers aws4
 ## Quick Start
 
 ```typescript
-import { register, observe, Op, enrich, score } from "opensearch-genai-observability-sdk-ts";
+import { register, observe, Op, enrich, score } from "@opensearch-project/genai-observability-sdk-ts";
 
 // 1. Initialize tracing (one line)
 await register({ endpoint: "http://localhost:21890/opentelemetry/v1/traces" });
@@ -217,7 +217,7 @@ export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318
 **AWS OSIS: two pipelines.** An OpenSearch Ingestion traces pipeline does not accept logs. Create a separate logs pipeline (OTel logs source, routed to `otel-v1-genai-evaluation`) and pass its URL as `logsEndpoint`. When `exporter` is an `AWSSigV4OTLPExporter`, `register()` creates an `AWSSigV4OTLPLogExporter` with the same service and region for `logsEndpoint`, else `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`, else the traces URL only if it ends in `/v1/traces`. Otherwise it warns and skips logs:
 
 ```typescript
-import { register, AWSSigV4OTLPExporter } from "opensearch-genai-observability-sdk-ts";
+import { register, AWSSigV4OTLPExporter } from "@opensearch-project/genai-observability-sdk-ts";
 
 await register({
   exporter: new AWSSigV4OTLPExporter({
@@ -407,7 +407,7 @@ score({
 score({ name: "task_success", value: 1, traceId: "6ebb9835f43af1552f2cebb9f5165e39" });
 ```
 
-The instrumentation scope is the library that emitted the event: every SDK event (`gen_ai.evaluation.result`) has scope `opensearch-genai-observability-sdk-ts` with the SDK version, and no scope attributes. The evaluator is data about the result and goes in `opensearch.gen_ai.evaluation.evaluator.*`. The grade source (`attributes.derived.evaluation.source = opensearch-sdk` in the evaluation index) is derived from the scope name. The timestamp is the time `score()` is called.
+The instrumentation scope is the library that emitted the event: every SDK event (`gen_ai.evaluation.result`) has scope `opensearch-genai-observability-sdk-ts` with the SDK version, and no scope attributes. The evaluator is data about the result and goes in `opensearch.gen_ai.evaluation.evaluator.*`. The timestamp is the time `score()` is called.
 
 **Scores are doubles.** `gen_ai.evaluation.score.value` is a double in the OTel semantic conventions, but OTel JS encodes any whole JS number (for example `1`) as an OTLP `intValue`, and the logs API has no way to request a double. The SDK's own log exporters (the OTLP/HTTP exporter `register()` creates, and `AWSSigV4OTLPLogExporter`) re-encode whole-number `gen_ai.evaluation.score.value`, `opensearch.gen_ai.evaluation.score.min` / `.max` / `.threshold` as `doubleValue`. With your own `logExporter` or a global `LoggerProvider` you configured, whole numbers are sent as `intValue`. The OpenSearch evaluation index maps the field as `double`, so stored values are the same either way.
 
@@ -453,8 +453,8 @@ score({ name: "tool_selection", value: 1, label: "pass" });
 Run a task against a dataset, score outputs, and record each score as an OTel `gen_ai.evaluation.result` log event. The SDK creates no spans of its own: each case's agent run is its own trace, exactly like production.
 
 ```typescript
-import { evaluate } from "opensearch-genai-observability-sdk-ts";
-import type { EvalScore } from "opensearch-genai-observability-sdk-ts";
+import { evaluate } from "@opensearch-project/genai-observability-sdk-ts";
+import type { EvalScore } from "@opensearch-project/genai-observability-sdk-ts";
 
 function accuracy(input: unknown, output: unknown, expected: unknown): EvalScore {
   return {
@@ -497,7 +497,7 @@ A case whose task throws is not scored: each declared scorer emits one error res
 **How root spans are found.** The TypeScript SDK installs no context manager, so `evaluate()` cannot rely on the active OTel context. Cases run one at a time and `task` is synchronous, so the SDK keeps a module-level "current case" while each task runs. `TestCaseSpanProcessor` reads it in `onStart`: every span started during the case without a parent from the same case (no parent, or a remote parent) is stamped with the `test.*` ids, and the first one becomes the trace context for that case's events. Spans started by scorers (LLM judges) are outside the case and are not stamped. `register()` adds the processor to its provider, and `evaluate()` adds it to a global OTel JS 1.x `BasicTracerProvider` if missing. With a provider that only takes processors at construction (OTel JS 2.x), add it yourself:
 
 ```typescript
-import { TestCaseSpanProcessor } from "opensearch-genai-observability-sdk-ts";
+import { TestCaseSpanProcessor } from "@opensearch-project/genai-observability-sdk-ts";
 
 const provider = new BasicTracerProvider({
   spanProcessors: [new TestCaseSpanProcessor(), new BatchSpanProcessor(exporter)],
@@ -521,7 +521,7 @@ Each `TestCaseResult` has `status` (`pass`, or `fail` when the case errored or f
 **Declaring rules.** Wrap a scorer with `defineScorer(spec, fn)` to declare its evaluation name and pass rule up front. A scorer may also return a `boolean` (a verdict) or an `EvalScore` with `label` (`"pass"` / `"fail"`), `passed`, `threshold`, `direction`, `scoreMin`, `scoreMax`, `judgeTraceId` (the LLM judge's own trace, sent as `opensearch.gen_ai.evaluation.judge.trace_id`); fields set on the `EvalScore` win over the declaration.
 
 ```typescript
-import { defineScorer } from "opensearch-genai-observability-sdk-ts";
+import { defineScorer } from "@opensearch-project/genai-observability-sdk-ts";
 
 const quality = defineScorer(
   { name: "answer_quality", threshold: 4, scoreMin: 1, scoreMax: 5, evaluatorType: "llm_judge" },
@@ -549,7 +549,7 @@ Upload pre-computed evaluation results from any framework. Each `log()` emits on
 Pass `runId` to set `test.suite.run.id` (default: generated): use the same id from every CI shard so they report into one run, or an existing run's id to re-score it (send the new results with the same run id). An empty or whitespace-only `runId` throws.
 
 ```typescript
-import { Benchmark } from "opensearch-genai-observability-sdk-ts";
+import { Benchmark } from "@opensearch-project/genai-observability-sdk-ts";
 
 const bench = new Benchmark("nightly-eval", {
   metadata: { model: "gpt-4" },
@@ -597,7 +597,7 @@ const summary = bench.close();
 Retrieves GenAI trace spans from OpenSearch. Requires `@opensearch-project/opensearch` package.
 
 ```typescript
-import { OpenSearchTraceRetriever } from "opensearch-genai-observability-sdk-ts";
+import { OpenSearchTraceRetriever } from "@opensearch-project/genai-observability-sdk-ts";
 
 const retriever = new OpenSearchTraceRetriever({
   host: "https://localhost:9200",
@@ -637,7 +637,7 @@ const evaluated = await retriever.findEvaluatedTraceIds(["trace-id-1", "trace-id
 OTLP trace exporter with AWS SigV4 request signing. Use with `register()` for AWS-hosted endpoints.
 
 ```typescript
-import { AWSSigV4OTLPExporter } from "opensearch-genai-observability-sdk-ts";
+import { AWSSigV4OTLPExporter } from "@opensearch-project/genai-observability-sdk-ts";
 
 const exporter = new AWSSigV4OTLPExporter({
   endpoint: "https://pipeline.us-east-1.osis.amazonaws.com/v1/traces",

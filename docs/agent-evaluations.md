@@ -60,13 +60,13 @@ Attributes (each is set only when it has a value):
 ## Setup
 
 ```bash
-npm install opensearch-genai-observability-sdk-ts
+npm install @opensearch-project/genai-observability-sdk-ts
 ```
 
 Call `register()` once at startup. It sets up the OTLP traces pipeline and the OTLP logs pipeline that carries the evaluation events. `agentName` and `agentVersion` become `gen_ai.agent.name` and `gen_ai.agent.version` on every result, unless a call names another agent or the evaluated span names its own.
 
 ```typescript
-import { register } from "opensearch-genai-observability-sdk-ts";
+import { register } from "@opensearch-project/genai-observability-sdk-ts";
 
 const provider = await register({
   endpoint: "http://localhost:21890/opentelemetry/v1/traces",
@@ -86,7 +86,7 @@ Endpoints:
 - Amazon OpenSearch Ingestion has one pipeline per signal, so give the logs pipeline URL explicitly. The log exporter signs with SigV4 like the trace exporter:
 
 ```typescript
-import { register, AWSSigV4OTLPExporter } from "opensearch-genai-observability-sdk-ts";
+import { register, AWSSigV4OTLPExporter } from "@opensearch-project/genai-observability-sdk-ts";
 
 await register({
   exporter: new AWSSigV4OTLPExporter({
@@ -108,7 +108,7 @@ Use `score()` to grade live traffic: a judge, a code check or user feedback, run
 ### Levels
 
 ```typescript
-import { score, withObserve, Op } from "opensearch-genai-observability-sdk-ts";
+import { score, withObserve, Op } from "@opensearch-project/genai-observability-sdk-ts";
 
 // Span level: pass the ids of the evaluated span (works after the span ended).
 const ids = withObserve("travel_planner", { op: Op.INVOKE_AGENT }, (span) => span.spanContext());
@@ -137,7 +137,7 @@ Without `traceId`, `score()` evaluates the active span. `register()` installs no
 The verdict is `gen_ai.evaluation.score.label` = `pass` or `fail`. Your code decides it; OpenSearch Dashboards shows the stored label and never computes one. Two ways:
 
 ```typescript
-import { score } from "opensearch-genai-observability-sdk-ts";
+import { score } from "@opensearch-project/genai-observability-sdk-ts";
 
 const traceId = "6ebb9835f43af1552f2cebb9f5165e39";
 
@@ -161,7 +161,7 @@ A result with neither a `pass` / `fail` label nor a threshold is neutral: Dashbo
 If the judge itself is traced, pass its trace id so the result links to the judge's run:
 
 ```typescript
-import { score, withObserve, Op } from "opensearch-genai-observability-sdk-ts";
+import { score, withObserve, Op } from "@opensearch-project/genai-observability-sdk-ts";
 
 const judge = withObserve("judge relevance", { op: Op.CHAT }, (span) => ({
   value: 0.8, // call your judge model here
@@ -182,7 +182,7 @@ score({
 If the evaluator fails, record an error result: `error.type` set, no value and no label.
 
 ```typescript
-import { score } from "opensearch-genai-observability-sdk-ts";
+import { score } from "@opensearch-project/genai-observability-sdk-ts";
 
 score({
   name: "relevance",
@@ -202,7 +202,7 @@ Offline evaluation runs a dataset through the agent (`evaluate()`) or uploads re
 `evaluate()` calls your task once per case. Each call is its own trace, like production; the SDK adds no span around it and stamps the `test.*` ids on the root span the task starts. Each scorer result becomes one `gen_ai.evaluation.result` parented to that root span.
 
 ```typescript
-import { evaluate, defineScorer, observe, register, withObserve, Op, type EvalScore } from "opensearch-genai-observability-sdk-ts";
+import { evaluate, defineScorer, observe, register, withObserve, Op, type EvalScore } from "@opensearch-project/genai-observability-sdk-ts";
 
 const provider = await register({ serviceName: "travel-agent", agentName: "travel_planner", agentVersion: "v3" });
 
@@ -253,7 +253,7 @@ if (result.summary.failCount || result.summary.errorCount) process.exitCode = 1;
 Use `Benchmark` to upload results from another harness (RAGAS, DeepEval, Vitest, your own). Pass `traceId` and `spanId` of the agent run to link each result to its trace.
 
 ```typescript
-import { Benchmark } from "opensearch-genai-observability-sdk-ts";
+import { Benchmark } from "@opensearch-project/genai-observability-sdk-ts";
 
 const b = new Benchmark("travel-capitals", { agentName: "travel_planner", agentVersion: "v3" });
 b.log({
@@ -292,7 +292,7 @@ The `expected` value of an `evaluate()` case, or `Benchmark.log({ expected })`, 
 - Re-scoring: send new results with an existing run's id to add them to that run. Earlier results stay (see [Re-imports](#d-re-imports-duplicate-results)).
 
 ```typescript
-import { Benchmark } from "opensearch-genai-observability-sdk-ts";
+import { Benchmark } from "@opensearch-project/genai-observability-sdk-ts";
 
 const runId = `travel-capitals-${process.env.GITHUB_RUN_ID ?? "local"}`;
 const b = new Benchmark("travel-capitals", { runId });
@@ -386,7 +386,7 @@ genai-evaluation-pipeline:
         index_type: genai-evaluation-plain  # experimental
 ```
 
-`genai-evaluation-plain` keeps attribute keys dotted, as `log-analytics-plain` does, has no ISM policy, and writes to one index named `otel-v1-genai-evaluation` with the sink-managed template `otel-v1-genai-evaluation-index-template`. Do not combine it with your own template that matches `otel-v1-genai-evaluation`.
+`genai-evaluation-plain` stores attributes under their dotted OpenTelemetry names, has no ISM policy, and writes to one index named `otel-v1-genai-evaluation` with the sink-managed template `otel-v1-genai-evaluation-index-template`. Do not combine it with your own template that matches `otel-v1-genai-evaluation`.
 
 ### b) Amazon OpenSearch Ingestion (OSI)
 
