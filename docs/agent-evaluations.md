@@ -69,7 +69,7 @@ Call `register()` once at startup. It sets up the OTLP traces pipeline and the O
 import { register } from "@opensearch-project/genai-observability-sdk-ts";
 
 const provider = await register({
-  endpoint: "http://localhost:21890/opentelemetry/v1/traces",
+  endpoint: "http://localhost:21890/opentelemetry", // base URL for traces and logs
   serviceName: "travel-agent",
   agentName: "travel_planner",
   agentVersion: "v3",
@@ -79,21 +79,19 @@ const provider = await register({
 await provider.forceFlush();
 ```
 
-Endpoints:
+Endpoints: each signal (traces, and logs for the evaluation events) is resolved the same way, following the OTel exporter spec. See the [README](../README.md#endpoints-traces-and-evaluation-logs) for details.
 
-- Traces: `endpoint`, else `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, else `OTEL_EXPORTER_OTLP_ENDPOINT` + `/v1/traces`, else `http://localhost:21890/opentelemetry/v1/traces` (local Data Prepper).
-- Logs (evaluation events): `logsEndpoint`, else `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`, else the traces endpoint with `/v1/traces` replaced by `/v1/logs`. When none applies, `register()` warns and skips logs. See the [README](../README.md#endpoints-traces-and-evaluation-logs) for the full order.
-- Amazon OpenSearch Ingestion has one pipeline per signal, so give the logs pipeline URL explicitly. The log exporter signs with SigV4 like the trace exporter:
+- Endpoint: `tracesEndpoint` / `logsEndpoint` (full URL), else `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` / `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`, else the base URL (`endpoint`, else `OTEL_EXPORTER_OTLP_ENDPOINT`) + `/v1/traces` or `/v1/logs` over HTTP, as-is over gRPC, else the local Data Prepper base `http://localhost:21890/opentelemetry`.
+- Protocol: `protocol`, else `OTEL_EXPORTER_OTLP_<SIGNAL>_PROTOCOL`, else `OTEL_EXPORTER_OTLP_PROTOCOL`, else the URL scheme (`grpc://` / `grpcs://` mean gRPC). Over gRPC, logs go to the same host and port as traces.
+- Amazon OpenSearch Ingestion has one pipeline per signal, so pass both URLs. With `sigv4`, both exporters sign their requests:
 
 ```typescript
-import { register, AWSSigV4OTLPExporter } from "@opensearch-project/genai-observability-sdk-ts";
+import { register } from "@opensearch-project/genai-observability-sdk-ts";
 
 await register({
-  exporter: new AWSSigV4OTLPExporter({
-    endpoint: "https://traces-pipe-abc.us-east-1.osis.amazonaws.com/v1/traces",
-    service: "osis",
-  }),
+  tracesEndpoint: "https://traces-pipe-abc.us-east-1.osis.amazonaws.com/v1/traces",
   logsEndpoint: "https://logs-pipe-def.us-east-1.osis.amazonaws.com/v1/logs",
+  sigv4: { service: "osis", region: "us-east-1" },
   agentName: "travel_planner",
   agentVersion: "v3",
 });
@@ -723,7 +721,7 @@ explore.agentTraces.evaluations.enabled: true
 ## Troubleshooting
 
 - **No events at all.** `register()` was not called, or your own OTel setup has no global `LoggerProvider`. Short scripts: `await provider.forceFlush()` before the process exits.
-- **Traces arrive, results do not.** The logs endpoint is wrong or not derived (a traces URL that does not end in `/v1/traces`, gRPC traces, a custom exporter). `register()` prints "evaluation logs are NOT exported". Set `logsEndpoint` or `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`. With OSI, the logs pipeline must be a separate pipeline with an OTLP logs source.
+- **Traces arrive, results do not.** The logs endpoint points somewhere that does not accept OTLP logs (for example `tracesEndpoint` is set but the base URL is not a collector). Set `logsEndpoint` or `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`. With OSI, the logs pipeline must be a separate pipeline with an OTLP logs source.
 - **Results have no trace link.** Pass `traceId` (and `spanId`) to `score()`; inline scoring needs an OTel context manager. In `evaluate()`, the task must start a span (for example with `observe()`) and be synchronous.
 - **Results land in the logs index.** The route did not match `eventName`. Check that the route uses `/eventName == "gen_ai.evaluation.result"` and that your Data Prepper version maps the OTLP `event_name` field to `eventName` (added in opensearch-project/data-prepper#7148).
 - **Field types look wrong** (strings as `text` with `.keyword` sub-fields, `time` not a date). The index was created before the index template. Create the template, then wait for the next daily index or reindex.

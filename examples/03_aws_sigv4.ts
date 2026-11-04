@@ -2,30 +2,27 @@
 // Copyright OpenSearch Contributors
 
 /**
- * Example 03: AWS SigV4 Exporter
+ * Example 03: AWS SigV4
  *
- * Demonstrates using the AWSSigV4OTLPExporter to send traces to
- * AWS OpenSearch Ingestion (OSIS) pipelines with SigV4 authentication.
+ * Sends traces and evaluation events to AWS OpenSearch Ingestion (OSIS)
+ * pipelines with SigV4 authentication. OSIS has one pipeline per signal, so
+ * pass the traces and the logs pipeline URL; `sigv4` makes register() build a
+ * signed exporter for each.
  *
  * Prerequisites:
  * - AWS credentials configured (via env vars, profile, or IAM role)
- * - An OSIS pipeline endpoint
- * - npm install @aws-sdk/credential-providers aws4
+ * - An OSIS traces pipeline and an OSIS logs pipeline
+ * - `@aws-sdk/credential-providers` and `aws4` (optional dependencies of this
+ *   package, installed by default unless you omit optional dependencies)
  */
 
-import { AWSSigV4OTLPExporter, register, observe, Op, enrich } from '../src/index.js';
+import { register, observe, Op, enrich } from '../src/index.js';
 
-// Create SigV4-authenticated exporter
-const exporter = new AWSSigV4OTLPExporter({
-  endpoint: 'https://your-pipeline.us-east-1.osis.amazonaws.com/v1/traces',
-  region: 'us-east-1',
-  service: 'osis', // default
-});
-
-// Register with the SigV4 exporter
 await register({
   serviceName: 'my-llm-app',
-  exporter,
+  tracesEndpoint: 'https://your-traces-pipeline.us-east-1.osis.amazonaws.com/v1/traces',
+  logsEndpoint: 'https://your-logs-pipeline.us-east-1.osis.amazonaws.com/v1/logs',
+  sigv4: { service: 'osis', region: 'us-east-1' },
   autoInstrument: false,
 });
 

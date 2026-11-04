@@ -1,8 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright OpenSearch Contributors
 
-export { register, DEFAULT_ENDPOINT, DEFAULT_LOGS_ENDPOINT } from './register.js';
-export type { RegisterOptions } from './register.js';
+export {
+  register,
+  DEFAULT_BASE_ENDPOINT,
+  DEFAULT_ENDPOINT,
+  DEFAULT_LOGS_ENDPOINT,
+} from './register.js';
+export type { RegisterOptions, SigV4Options, OtlpProtocol, OtlpSignal } from './register.js';
 export { observe, withObserve, Op } from './observe.js';
 export type { ObserveOptions } from './observe.js';
 export { enrich, markAgentRoot, AGENT_ROOT_ATTRIBUTE } from './enrich.js';
