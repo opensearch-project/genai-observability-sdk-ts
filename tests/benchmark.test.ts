@@ -955,6 +955,146 @@ describe('declared scorer rules and verdicts', () => {
   });
 });
 
+describe('stored label agrees with the local case status', () => {
+  const LABEL = 'gen_ai.evaluation.score.label';
+  const JUDGE = 'opensearch.gen_ai.evaluation.judge_label';
+  let logSpy: ReturnType<typeof vi.spyOn>;
+  let warnSpy: ReturnType<typeof vi.spyOn>;
+  beforeEach(() => {
+    logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+  });
+  afterEach(() => {
+    logSpy.mockRestore();
+    warnSpy.mockRestore();
+  });
+  const grades = () =>
+    Object.fromEntries(scoreRecords().map(r => [r.attributes['gen_ai.evaluation.name'], r.attributes]));
+
+  it('a judge label with passed: false stores fail and keeps the label as judge_label', () => {
+    const bm = new Benchmark('labels-passed');
+    bm.log({ input: 'q', caseId: 'c', scores: [{ name: 'relevance_passed', value: 0.4, label: 'relevant', passed: false }] });
+    const summary = bm.close();
+    const a = grades()['relevance_passed'];
+    expect(a[LABEL]).toBe('fail');
+    expect(a[JUDGE]).toBe('relevant');
+    expect(summary.failCount).toBe(1);
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringMatching(/"relevance_passed" has label "relevant"/));
+  });
+
+  it('a judge label with a failing threshold stores fail', () => {
+    const judge = defineScorer({ name: 'relevance_threshold', threshold: 0.5 }, () => ({
+      name: 'relevance_threshold',
+      value: 0.2,
+      label: 'partially_relevant',
+    }));
+    const result = evaluate({ name: 'labels-threshold', task: x => x, data: [{ input: 'q' }], scores: [judge] });
+    const a = grades()['relevance_threshold'];
+    expect(result.cases[0].resultStatus).toBe('fail');
+    expect(a[LABEL]).toBe('fail');
+    expect(a[JUDGE]).toBe('partially_relevant');
+  });
+
+  it('a verdict label in any case is stored lowercase', () => {
+    const result = evaluate({
+      name: 'labels-case',
+      task: x => x,
+      data: [{ input: 'q' }],
+      scores: [() => ({ name: 'upper', value: 1, label: 'PASS' }), () => ({ name: 'lower_fail', label: 'Fail' })],
+    });
+    expect(grades()['upper'][LABEL]).toBe('pass');
+    expect(grades()['lower_fail'][LABEL]).toBe('fail');
+    expect(result.cases[0].verdicts).toEqual({ upper: 'pass', lower_fail: 'fail' });
+  });
+
+  it('a judge label without a verdict stays the label', () => {
+    evaluate({ name: 'labels-neutral', task: x => x, data: [{ input: 'q' }], scores: [() => ({ name: 'tone', value: 3, label: 'friendly' })] });
+    expect(grades()['tone'][LABEL]).toBe('friendly');
+    expect(grades()['tone'][JUDGE]).toBeUndefined();
+  });
+});
+
+describe('scorer return values', () => {
+  let logSpy: ReturnType<typeof vi.spyOn>;
+  let warnSpy: ReturnType<typeof vi.spyOn>;
+  beforeEach(() => {
+    logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+  });
+  afterEach(() => {
+    logSpy.mockRestore();
+    warnSpy.mockRestore();
+  });
+
+  const bad: Array<[string, unknown]> = [
+    ['undefined', undefined],
+    ['null', null],
+    ['NaN', Number.NaN],
+    ['Infinity', Number.POSITIVE_INFINITY],
+    ['bigint', BigInt(1)],
+    ['string', '0.9'],
+    ['object without name', { value: 1 }],
+    ['non-finite EvalScore value', { name: 'x', value: Number.NaN }],
+    ['string EvalScore value', { name: 'x', value: '1' }],
+    ['array with a bad item', [{ name: 'ok', value: 1 }, null]],
+  ];
+
+  for (const [label, value] of bad) {
+    it(`${label}: warns and emits an error result`, () => {
+      const scorer = defineScorer({ name: 'judge' }, (() => value) as never);
+      const result = evaluate({ name: `bad-${label}`, task: x => x, data: [{ input: 'q' }], scores: [scorer] });
+      const records = scoreRecords();
+      expect(records).toHaveLength(1);
+      const a = records[0].attributes;
+      expect(a['gen_ai.evaluation.name']).toBe('judge');
+      expect(a['error.type']).toBe('TypeError');
+      expect(a['gen_ai.evaluation.score.value']).toBeUndefined();
+      expect(a['gen_ai.evaluation.score.label']).toBeUndefined();
+      expect(result.cases[0].resultStatus).toBe('error');
+      expect(result.cases[0].scorerErrors).toHaveLength(1);
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringMatching(/scorer "judge" returned/));
+    });
+  }
+
+  it('an un-awaited Promise warns, emits an error result and is not left unhandled', async () => {
+    const asyncScorer = defineScorer({ name: 'async_judge' }, (async () => { throw new Error('later'); }) as never);
+    const result = evaluate({ name: 'bad-promise', task: x => x, data: [{ input: 'q' }], scores: [asyncScorer] });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(scoreRecords()[0].attributes['error.type']).toBe('TypeError');
+    expect(result.cases[0].resultStatus).toBe('error');
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringMatching(/returned a Promise/));
+  });
+
+  it('accepts finite numbers, booleans, EvalScore and EvalScore[]', () => {
+    const result = evaluate({
+      name: 'good-results',
+      task: x => x,
+      data: [{ input: 'q' }],
+      scores: [
+        function num() { return 0; },
+        function bool() { return true; },
+        function one(): EvalScore { return { name: 'one', value: 0.5 }; },
+        function many(): EvalScore[] { return [{ name: 'm1', value: 1 }, { name: 'm2', label: 'pass' }]; },
+      ],
+    });
+    expect(result.cases[0].resultStatus).toBe('pass');
+    expect(scoreRecords().every(r => r.attributes['error.type'] === undefined)).toBe(true);
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+
+  it('never sends the scorer exception message as the explanation', () => {
+    const leaky = defineScorer({ name: 'leaky' }, () => {
+      throw new Error('POST https://judge.example.com?key=secret failed');
+    });
+    const result = evaluate({ name: 'no-leak', task: x => x, data: [{ input: 'q' }], scores: [leaky] });
+    const a = scoreRecords()[0].attributes;
+    expect(a['error.type']).toBe('Error');
+    expect(a['gen_ai.evaluation.explanation']).toBeUndefined();
+    expect(JSON.stringify(a)).not.toContain('secret');
+    expect(result.cases[0].scorerErrors).toEqual(['POST https://judge.example.com?key=secret failed']);
+  });
+});
+
 describe('expected output on evaluation results', () => {
   const EXPECTED = 'opensearch.test.case.expected';
   const TRUNCATED = 'opensearch.test.case.expected_truncated';

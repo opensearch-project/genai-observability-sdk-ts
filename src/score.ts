@@ -22,6 +22,28 @@ import { getEventLogger, takeTraceOnlyHandled, traceOnlyContext } from './logs.j
 /** OTel event name of an evaluation result (semantic-conventions-genai). */
 export const EVALUATION_RESULT_EVENT = "gen_ai.evaluation.result";
 
+/**
+ * A judge's own non-verdict label (for example `"relevant"`) when the result
+ * also has a verdict: `gen_ai.evaluation.score.label` then carries the verdict.
+ */
+export const JUDGE_LABEL_KEY = "opensearch.gen_ai.evaluation.judge_label";
+
+/** Exact attribute keys score() owns; `attributes` cannot set them. */
+const SDK_OWNED_KEYS: ReadonlySet<string> = new Set([
+  "error.type",
+  "gen_ai.response.id",
+  "gen_ai.conversation.id",
+  AGENT_NAME_KEY,
+  AGENT_VERSION_KEY,
+]);
+/** Attribute namespaces score() owns: `gen_ai.evaluation.*` and `opensearch.gen_ai.evaluation.*`. */
+const SDK_OWNED_PREFIXES = ["gen_ai.evaluation.", "opensearch.gen_ai.evaluation."];
+
+/** True for a key score() sets itself; such keys are dropped from `attributes`. */
+export function isScoreReservedKey(key: string): boolean {
+  return SDK_OWNED_KEYS.has(key) || SDK_OWNED_PREFIXES.some((p) => key.startsWith(p));
+}
+
 const EXPLANATION_LIMIT = 500;
 
 export type EvaluationLevel = "span" | "trace" | "session" | "tool_call";
@@ -44,8 +66,11 @@ export interface ScoreOptions {
   /** Evaluated span. Requires `traceId`. */
   spanId?: string;
   /**
-   * `gen_ai.evaluation.score.label`, low cardinality. `"pass"` / `"fail"` (any
-   * case) is the verdict; without a label, `value` plus `threshold` records one.
+   * Low-cardinality label. `"pass"` / `"fail"` (any case) is the verdict and is
+   * stored lowercase as `gen_ai.evaluation.score.label`. Any other label (for
+   * example `"relevant"`) is stored there only when there is no verdict; with a
+   * `threshold` verdict the verdict wins and the label goes to
+   * `opensearch.gen_ai.evaluation.judge_label` (with a warning).
    */
   label?: string;
   /** `gen_ai.evaluation.explanation` (truncated to 500 chars). */
@@ -54,13 +79,9 @@ export interface ScoreOptions {
   responseId?: string;
   /** `opensearch.gen_ai.evaluation.level`. Defaults to `"trace"` for trace-level scores. */
   level?: EvaluationLevel;
-  /**
-   * Evaluator identity: instrumentation scope name of the event and
-   * `opensearch.gen_ai.evaluation.evaluator.name`. Without it the scope is the SDK
-   * scope (`opensearch-genai-observability-sdk-ts` + SDK version).
-   */
+  /** `opensearch.gen_ai.evaluation.evaluator.name`, for example `"relevance_judge"`. */
   evaluator?: string;
-  /** Instrumentation scope version (with `evaluator`) and `opensearch.gen_ai.evaluation.evaluator.version`. */
+  /** `opensearch.gen_ai.evaluation.evaluator.version`. */
   evaluatorVersion?: string;
   /** `opensearch.gen_ai.evaluation.evaluator.type`. */
   evaluatorType?: EvaluatorType;
@@ -89,7 +110,13 @@ export interface ScoreOptions {
   errorType?: string;
   /** `opensearch.gen_ai.evaluation.judge.trace_id`: the judge's own trace. */
   judgeTraceId?: string;
-  /** Extra attributes (string, number, boolean). Explicit options take precedence. */
+  /**
+   * Extra attributes (string, number, boolean), for example `test.*` grouping
+   * keys. Keys the SDK sets itself (`gen_ai.evaluation.*`,
+   * `opensearch.gen_ai.evaluation.*`, `error.type`, `gen_ai.response.id`,
+   * `gen_ai.conversation.id`, `gen_ai.agent.*`) are dropped with a warning:
+   * use the options instead.
+   */
   attributes?: Record<string, unknown>;
 }
 
@@ -159,15 +186,51 @@ export function thresholdVerdict(options: {
   return options.value >= options.threshold ? 'pass' : 'fail';
 }
 
-function buildAttributes(options: ScoreOptions, target: Target): Attributes {
+const warnedJudgeLabel = new Set<string>();
+
+function extraAttributes(attributes: Record<string, unknown> | undefined): Attributes {
   const attrs: Attributes = {};
-  if (options.attributes) {
-    for (const [k, v] of Object.entries(options.attributes)) {
-      if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') {
-        attrs[k] = v;
-      }
+  const dropped: string[] = [];
+  for (const [k, v] of Object.entries(attributes ?? {})) {
+    if (isScoreReservedKey(k)) {
+      dropped.push(k);
+    } else if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') {
+      attrs[k] = v;
     }
   }
+  if (dropped.length > 0) {
+    console.warn(
+      `score(): dropped attributes the SDK sets itself (${dropped.map((k) => `"${k}"`).join(', ')}); ` +
+        `use the score() options instead`,
+    );
+  }
+  return attrs;
+}
+
+/**
+ * `gen_ai.evaluation.score.label` and `opensearch.gen_ai.evaluation.judge_label`.
+ * The verdict always wins the label: a `pass` / `fail` label (normalized), else
+ * `verdict`. A non-verdict label is the label only when there is no verdict;
+ * otherwise it is kept as the judge label, with a warning.
+ */
+function labelAttributes(name: string, label: string | undefined, verdict: Verdict | undefined): Attributes {
+  const fromLabel = labelVerdict(label);
+  if (fromLabel) return { "gen_ai.evaluation.score.label": fromLabel };
+  if (!verdict) return label ? { "gen_ai.evaluation.score.label": label } : {};
+  if (!label) return { "gen_ai.evaluation.score.label": verdict };
+  if (!warnedJudgeLabel.has(name)) {
+    warnedJudgeLabel.add(name);
+    console.warn(
+      `score(): "${name}" has label "${label}" and a "${verdict}" verdict. ` +
+        `gen_ai.evaluation.score.label is the verdict; the label is kept as ${JUDGE_LABEL_KEY}`,
+    );
+  }
+  return { "gen_ai.evaluation.score.label": verdict, [JUDGE_LABEL_KEY]: label };
+}
+
+function buildAttributes(options: ScoreOptions, target: Target, verdict?: Verdict): Attributes {
+  // SDK fields are written after the extra attributes, which cannot hold SDK keys.
+  const attrs: Attributes = extraAttributes(options.attributes);
 
   attrs["gen_ai.evaluation.name"] = options.name;
   if (options.value !== undefined) attrs["gen_ai.evaluation.score.value"] = options.value;
@@ -195,12 +258,15 @@ function buildAttributes(options: ScoreOptions, target: Target): Attributes {
   if (options.threshold !== undefined) {
     attrs["opensearch.gen_ai.evaluation.score.threshold"] = options.threshold;
   }
-  // The verdict is the label (OTel examples "pass" / "fail"). A label you set is
-  // kept; without one, a threshold rule records its computed verdict.
-  const label =
-    options.label ||
-    thresholdVerdict({ value: options.value, threshold: options.threshold, direction });
-  if (label) attrs["gen_ai.evaluation.score.label"] = label;
+  // The verdict is the label (OTel examples "pass" / "fail").
+  Object.assign(
+    attrs,
+    labelAttributes(
+      options.name,
+      options.label,
+      verdict ?? thresholdVerdict({ value: options.value, threshold: options.threshold, direction }),
+    ),
+  );
   if (options.judgeTraceId) attrs["opensearch.gen_ai.evaluation.judge.trace_id"] = options.judgeTraceId;
   return attrs;
 }
@@ -235,11 +301,21 @@ let warnedTraceOnly = false;
  *   with no span id, and `opensearch.gen_ai.evaluation.level=trace`.
  *
  * Verdict: readers show pass/fail only for a declared rule. Pass
- * `label: "pass" | "fail"` (explicit) or `threshold` (+ `direction`); with
- * `value` and `threshold` and no `label` the SDK records the computed verdict
- * as `gen_ai.evaluation.score.label`.
+ * `label: "pass" | "fail"` (explicit, any case, stored lowercase) or
+ * `threshold` (+ `direction`); with `value` and `threshold` the SDK records the
+ * computed verdict as `gen_ai.evaluation.score.label`. A non-verdict `label`
+ * with a threshold verdict moves to `opensearch.gen_ai.evaluation.judge_label`.
  */
 export function score(options: ScoreOptions): void {
+  emitScore(options);
+}
+
+/**
+ * @internal score() with the verdict decided by the caller (Benchmark /
+ * evaluate(): a `passed` flag, a declared rule), so the stored label always
+ * matches the local case status. A `pass` / `fail` label still wins.
+ */
+export function emitScore(options: ScoreOptions, verdict?: Verdict): void {
   const target = resolveTarget(options.traceId, options.spanId);
   // Inline scoring reads the agent from the active span itself; a stored span
   // (traceId + spanId) is not looked up.
@@ -250,5 +326,5 @@ export function score(options: ScoreOptions): void {
     agentName: agent[AGENT_NAME_KEY],
     agentVersion: agent[AGENT_VERSION_KEY],
   };
-  emitEvent(resolved, target, buildAttributes(resolved, target));
+  emitEvent(resolved, target, buildAttributes(resolved, target, verdict));
 }

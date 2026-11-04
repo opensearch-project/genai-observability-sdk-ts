@@ -4,7 +4,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { trace } from '@opentelemetry/api';
 import { SeverityNumber } from '@opentelemetry/api-logs';
-import { score, EVALUATION_RESULT_EVENT } from '../src/score.js';
+import { score, EVALUATION_RESULT_EVENT, JUDGE_LABEL_KEY } from '../src/score.js';
 import { SDK_SCOPE_NAME, SDK_VERSION } from '../src/version.js';
 import { getFinishedSpans, getFinishedLogRecords, clearSpans } from './setup.js';
 
@@ -285,9 +285,28 @@ describe('score verdicts', () => {
     expect(a[THRESHOLD]).toBe(4);
   });
 
-  it('keeps an explicit label over a computed verdict', () => {
-    score({ name: 'q', value: 2, threshold: 4, label: 'partially_correct' });
-    expect(onlyRecord().attributes[LABEL]).toBe('partially_correct');
+  it('the verdict wins the label; a non-verdict label moves to judge_label with a warning', () => {
+    score({ name: 'q_conflict', value: 2, threshold: 4, label: 'partially_correct' });
+    const a = onlyRecord().attributes;
+    expect(a[LABEL]).toBe('fail');
+    expect(a[JUDGE_LABEL_KEY]).toBe('partially_correct');
+    expect(JUDGE_LABEL_KEY).toBe('opensearch.gen_ai.evaluation.judge_label');
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringMatching(/"q_conflict" has label "partially_correct"/));
+  });
+
+  it('keeps a non-verdict label as the label when there is no verdict', () => {
+    score({ name: 'q', value: 2, label: 'relevant' });
+    const a = onlyRecord().attributes;
+    expect(a[LABEL]).toBe('relevant');
+    expect(a[JUDGE_LABEL_KEY]).toBeUndefined();
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+
+  it('stores a verdict label lowercase, and it wins over the threshold', () => {
+    score({ name: 'q', value: 2, threshold: 4, label: ' PASS ' });
+    const a = onlyRecord().attributes;
+    expect(a[LABEL]).toBe('pass');
+    expect(a[JUDGE_LABEL_KEY]).toBeUndefined();
   });
 
   it('records a threshold without a value but no verdict', () => {
@@ -295,5 +314,32 @@ describe('score verdicts', () => {
     const a = onlyRecord().attributes;
     expect(a[THRESHOLD]).toBe(4);
     expect(a[LABEL]).toBeUndefined();
+  });
+});
+
+describe('score attributes', () => {
+  it('SDK fields win and reserved keys are dropped from attributes', () => {
+    score({
+      name: 'relevance',
+      value: 0.5,
+      attributes: {
+        'gen_ai.evaluation.name': 'spoofed',
+        'gen_ai.evaluation.score.label': 'pass',
+        'opensearch.gen_ai.evaluation.evaluator.name': 'spoofed',
+        'error.type': 'Spoofed',
+        'gen_ai.agent.name': 'spoofed',
+        'test.case.id': 'case-1',
+        team: 'search',
+      },
+    });
+    const a = onlyRecord().attributes;
+    expect(a['gen_ai.evaluation.name']).toBe('relevance');
+    expect(a['gen_ai.evaluation.score.label']).toBeUndefined();
+    expect(a['opensearch.gen_ai.evaluation.evaluator.name']).toBeUndefined();
+    expect(a['error.type']).toBeUndefined();
+    expect(a['gen_ai.agent.name']).toBeUndefined();
+    expect(a['test.case.id']).toBe('case-1');
+    expect(a.team).toBe('search');
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringMatching(/dropped attributes the SDK sets itself \("gen_ai.evaluation.name"/));
   });
 });

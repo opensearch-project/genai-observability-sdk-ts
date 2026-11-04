@@ -407,7 +407,7 @@ The instrumentation scope is the library that emitted the event: every SDK event
 |---|---|---|---|
 | `name` | `string` | `gen_ai.evaluation.name` | Metric name (required) |
 | `value` | `number` | `gen_ai.evaluation.score.value` | Numeric score |
-| `label` | `string` | `gen_ai.evaluation.score.label` | Low-cardinality label (`"relevant"`). `"pass"` / `"fail"` (any case) is the verdict |
+| `label` | `string` | `gen_ai.evaluation.score.label` | Low-cardinality label (`"relevant"`). `"pass"` / `"fail"` (any case, stored lowercase) is the verdict. A non-verdict label with a threshold verdict goes to `opensearch.gen_ai.evaluation.judge_label` |
 | `explanation` | `string` | `gen_ai.evaluation.explanation` | Evaluator rationale (truncated to 500 chars) |
 | `responseId` | `string` | `gen_ai.response.id` | Evaluated completion id, if known |
 | `traceId` | `string` | event trace id | Trace of the evaluated span |
@@ -424,13 +424,13 @@ The instrumentation scope is the library that emitted the event: every SDK event
 | `agentVersion` | `string` | `gen_ai.agent.version` | Its version. Default: the active span's, else `register({ agentVersion })` |
 | `errorType` | `string` | `error.type` | Set when the evaluator failed |
 | `judgeTraceId` | `string` | `opensearch.gen_ai.evaluation.judge.trace_id` | The judge's own trace |
-| `attributes` | `Record<string, unknown>` | | Extra string, number, or boolean attributes |
+| `attributes` | `Record<string, unknown>` | | Extra string, number, or boolean attributes. SDK keys (`gen_ai.evaluation.*`, `opensearch.gen_ai.evaluation.*`, `error.type`, `gen_ai.response.id`, `gen_ai.conversation.id`, `gen_ai.agent.*`) are dropped with a warning; the options win |
 
 `opensearch.gen_ai.evaluation.*` attributes are OpenSearch extensions for fields that are still proposals in the GenAI semantic conventions. They will move to `gen_ai.*` names when those proposals merge.
 
 A trace-level score (only `traceId`) is never attached to a span id derived from the trace id. The OTel JS SDK only takes a trace id from a valid span context, so `register()` adds `TraceOnlyContextProcessor` to its LoggerProvider to set it; if you configure your own LoggerProvider, add `new TraceOnlyContextProcessor()` to its processors (the SDK warns once when it is missing).
 
-**Verdicts.** OpenSearch Dashboards shows pass/fail only for a declared rule; a result without one is neutral ("Scored"). Declare the rule with `label: "pass"` / `"fail"` (explicit verdict) or `threshold` (+ `direction`). The verdict is `gen_ai.evaluation.score.label` = `pass` / `fail`, as in OTel's own examples. When `value` and `threshold` are given without a `label`, the SDK computes it: `pass` if `value >= threshold` (`maximize`) or `value <= threshold` (`minimize`), else `fail`. A `label` you set is kept over a computed verdict (readers recompute it from `threshold` + `direction`).
+**Verdicts.** OpenSearch Dashboards shows pass/fail only for a declared rule; a result without one is neutral ("Scored"). Declare the rule with `label: "pass"` / `"fail"` (explicit verdict) or `threshold` (+ `direction`). The verdict is `gen_ai.evaluation.score.label` = `pass` / `fail`, as in OTel's own examples. When `value` and `threshold` are given without a `label`, the SDK computes it: `pass` if `value >= threshold` (`maximize`) or `value <= threshold` (`minimize`), else `fail`. A `"pass"` / `"fail"` `label` wins over a computed verdict and is stored lowercase. Any other `label` (for example `"relevant"`) is stored as the label only when there is no verdict; with a threshold verdict the verdict is the label and your label is kept as `opensearch.gen_ai.evaluation.judge_label`, with a warning.
 
 ```typescript
 score({ name: "answer_quality", value: 3, threshold: 4, scoreMin: 1, scoreMax: 5 }); // label=fail
@@ -501,7 +501,7 @@ const provider = new BasicTracerProvider({
 | `name` | `string` | Benchmark name (`test.suite.name`). Stable across runs |
 | `task` | `(input: unknown) => unknown` | Synchronous function that takes input and returns output |
 | `data` | `Array<{ input, expected?, caseId?, caseName? }>` | Test cases |
-| `scores` | `Array<ScorerFn \| Scorer>` | Scorer functions: `(input, output, expected)` returning `EvalScore`, `EvalScore[]`, `number`, or `boolean`. Optionally wrapped with `defineScorer()` |
+| `scores` | `Array<ScorerFn \| Scorer>` | Scorer functions: `(input, output, expected)` returning, synchronously, `EvalScore`, `EvalScore[]`, a finite `number`, or `boolean`. Anything else logs a warning and emits an error result. Optionally wrapped with `defineScorer()` |
 | `metadata` | `Record<string, unknown>` | Copied to every `gen_ai.evaluation.result` of the run. Reserved keys are filtered |
 | `runId` | `string` | `test.suite.run.id` (default: generated). Use the same id from every CI shard so they report into one run, or an existing run's id to re-score it (send new results with the same run id). Empty or whitespace-only throws |
 | `ciPipeline` | `Record<string, string>` | Set or override `cicd.pipeline.name` / `.run.id` / `.run.url.full` (read from the CI environment by default; nothing outside CI) |
@@ -526,7 +526,7 @@ const tools = defineScorer({ name: "tool_selection" }, () => ({
 }));
 ```
 
-`ScorerSpec` fields: `name` (evaluation name of number/boolean results and of the error grade; default the function name), `threshold`, `direction` (default `maximize` with a threshold), `scoreMin` / `scoreMax`, `evaluator` (scope and `evaluator.name`), `evaluatorType`. A scorer that throws emits a grade with `error.type` and no value under the declared `name` (else the function name), so it lands on the same evaluation as its successful results.
+`ScorerSpec` fields: `name` (evaluation name of number/boolean results and of the error grade; default the function name), `threshold`, `direction` (default `maximize` with a threshold), `scoreMin` / `scoreMax`, `evaluator` (`opensearch.gen_ai.evaluation.evaluator.name`), `evaluatorType`. A scorer that throws, or returns something other than a finite number, a boolean, an `EvalScore` or an `EvalScore[]` (for example `undefined`, `NaN` or a Promise, with a warning), emits a grade with `error.type` and no value, label or explanation under the declared `name` (else the function name), so it lands on the same evaluation as its successful results. The exception message stays in the local `scorerErrors`.
 
 **Case status** (local `resultStatus`, not sent): `error` if the task threw or any result errored; else `fail` if any score of the case has a `fail` verdict (a `pass` / `fail` `label`, `passed`, or `threshold` + `direction`); else `pass`. Scores with no declared rule never fail a case. The summary keeps `passCount`, `failCount` and `errorCount`.
 

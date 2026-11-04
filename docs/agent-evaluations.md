@@ -26,7 +26,8 @@ Attributes (each is set only when it has a value):
 |---|---|---|---|
 | `gen_ai.evaluation.name` | OTel | all | Metric name, for example `relevance` |
 | `gen_ai.evaluation.score.value` | OTel | all | Numeric score |
-| `gen_ai.evaluation.score.label` | OTel | all | Label. `pass` / `fail` is the verdict |
+| `gen_ai.evaluation.score.label` | OTel | all | Label. `pass` / `fail` (lowercase) is the verdict and always wins |
+| `opensearch.gen_ai.evaluation.judge_label` | OpenSearch | all | The judge's own label (for example `relevant`) when the result also has a verdict |
 | `gen_ai.evaluation.explanation` | OTel | all | Evaluator rationale, up to 500 characters |
 | `error.type` | OTel | all | The evaluator or the task failed; no value or label |
 | `gen_ai.agent.name` | OTel | all | Agent under evaluation |
@@ -143,16 +144,22 @@ const traceId = "6ebb9835f43af1552f2cebb9f5165e39";
 score({ name: "answer_quality", value: 3, threshold: 4, scoreMin: 1, scoreMax: 5, traceId }); // label = fail
 score({ name: "latency_s", value: 9.2, threshold: 12, direction: "minimize", traceId }); // label = pass
 
-// 2. The judge's own label. A label you pass wins over the threshold.
+// 2. The judge's own verdict. A pass / fail label (any case) wins over the threshold.
 score({ name: "faithfulness", value: 0.4, label: "fail", explanation: "Claims a hotel the tool did not return", traceId });
 ```
 
-A result with neither a `pass` / `fail` label nor a threshold is neutral: Dashboards shows it as "Scored". Other labels (for example `relevant`) are kept as-is and are not verdicts.
+A result with neither a `pass` / `fail` label nor a threshold is neutral: Dashboards shows it as "Scored". Other labels (for example `relevant`) are not verdicts:
+
+- Without a verdict, the label is stored as `gen_ai.evaluation.score.label`.
+- With a verdict (a threshold, or `passed` on an offline `EvalScore`), the verdict wins: `gen_ai.evaluation.score.label` is `pass` / `fail` and the judge's label moves to `opensearch.gen_ai.evaluation.judge_label`. The SDK logs a warning once per evaluation name.
+
+So the stored label always matches the local case status of `evaluate()` and `Benchmark`.
 
 ### Scales and evaluators
 
 - `scoreMin` / `scoreMax` record the scale (`opensearch.gen_ai.evaluation.score.min` / `.max`), so a 1 to 5 judge and a 0 to 1 check can be read side by side.
 - `evaluator`, `evaluatorVersion` and `evaluatorType` name the evaluator (`opensearch.gen_ai.evaluation.evaluator.*`). The instrumentation scope is always the SDK.
+- `attributes` adds your own keys. Keys the SDK sets (`gen_ai.evaluation.*`, `opensearch.gen_ai.evaluation.*`, `error.type`, `gen_ai.response.id`, `gen_ai.conversation.id`, `gen_ai.agent.*`) are dropped with a warning; use the `score()` options for them.
 
 ### Judge trace and errors
 
@@ -240,7 +247,7 @@ await provider.forceFlush();
 if (result.summary.failCount || result.summary.errorCount) process.exitCode = 1;
 ```
 
-- A scorer receives `(input, output, expected)` and returns a number, a boolean (a verdict), an `EvalScore` or an `EvalScore[]`.
+- A scorer receives `(input, output, expected)` and synchronously returns a finite number, a boolean (a verdict), an `EvalScore` or an `EvalScore[]`. Anything else (`undefined`, `null`, `NaN`, a Promise, an object without a `name`) logs a warning and emits an error result with `error.type` = `TypeError`.
 - `defineScorer(spec, fn)` declares the evaluation name, `threshold`, `direction`, `scoreMin`, `scoreMax`, `evaluator` and `evaluatorType`. Fields set on a returned `EvalScore` win.
 - `EvalScore.judgeTraceId` sets `opensearch.gen_ai.evaluation.judge.trace_id`, in `evaluate()` and in `Benchmark.log()`.
 - Scorers run outside the agent trace, so a traced judge gets its own trace.
@@ -311,7 +318,7 @@ For another CI system pass `ciPipeline: { "cicd.pipeline.run.id": "...", ... }` 
 ### Errors
 
 - The task throws (`evaluate()`): the case is not scored. Each scorer emits one error result under its evaluation name with `error.type` = the exception class name, no value, no label and no explanation. The run continues.
-- A scorer throws: one error result with `error.type` and the exception message as the explanation.
+- A scorer throws: one error result with `error.type` = the exception class name, no value, no label and no explanation. The message can carry URLs, keys or request bodies, so it stays in the local `scorerErrors`.
 - `Benchmark.log({ errorType: "TimeoutError", scores: [...] })`: every listed score is sent as an error result.
 
 ### Local summary

@@ -36,7 +36,7 @@ import {
 } from './internal.js';
 import { ciPipelineAttributes } from './cicd.js';
 import {
-  score,
+  emitScore,
   labelVerdict,
   thresholdVerdict,
   type Verdict,
@@ -65,7 +65,12 @@ export interface EvalScore {
   name: string;
   /** Numeric score. May be omitted for a verdict-only result. */
   value?: number;
-  /** `gen_ai.evaluation.score.label`; `"pass"` / `"fail"` is the verdict and wins over `passed`. */
+  /**
+   * `"pass"` / `"fail"` (any case) is the verdict and wins over `passed`. Any
+   * other label is the judge's own category: stored as
+   * `gen_ai.evaluation.score.label` when the score has no verdict, else as
+   * `opensearch.gen_ai.evaluation.judge_label` (the verdict is the label).
+   */
   label?: string;
   explanation?: string;
   metadata?: Record<string, unknown>;
@@ -93,7 +98,7 @@ export interface ScorerSpec {
   threshold?: number;
   scoreMin?: number;
   scoreMax?: number;
-  /** Evaluator identity: instrumentation scope and `opensearch.gen_ai.evaluation.evaluator.name`. */
+  /** `opensearch.gen_ai.evaluation.evaluator.name` of every result the scorer produces. */
   evaluator?: string;
   evaluatorType?: EvaluatorType;
 }
@@ -354,15 +359,18 @@ function emitCaseScores(
   metadata: Attributes,
   extra: { evaluator?: string; evaluatorType?: EvaluatorType; errorType?: string } = {},
 ): void {
-  // The expected output goes on results only, never on the agent's spans.
-  const testAttrs = { ...identityAttributes(identity), ...(identity.expected ?? {}) };
+  // The expected output goes on results only, never on the agent's spans. The
+  // agent identity is passed as score() options, not as extra attributes.
+  const { [AGENT_NAME_KEY]: _name, [AGENT_VERSION_KEY]: _version, ...identityAttrs } =
+    identityAttributes(identity);
+  const testAttrs = { ...identityAttrs, ...(identity.expected ?? {}) };
   const errored = extra.errorType !== undefined;
   for (const s of scores) {
     const scoreMeta = s.metadata ? toAttributes(safeMetadata(s.metadata, `score:${s.name}`)) : {};
     const options = {
       name: s.name,
       value: errored ? undefined : s.value,
-      label: errored ? undefined : s.label || verdictOf(s),
+      label: errored ? undefined : s.label,
       explanation: s.explanation,
       direction: s.direction,
       scoreMin: s.scoreMin,
@@ -378,8 +386,10 @@ function emitCaseScores(
       traceId: target.traceId,
       spanId: target.traceId ? target.spanId : undefined,
     };
+    // The verdict that set the local case status is the stored label.
+    const verdict = errored ? undefined : verdictOf(s);
     // No target: do not pick up whatever span the caller has active.
-    otelContext.with(ROOT_CONTEXT, () => score(options));
+    otelContext.with(ROOT_CONTEXT, () => emitScore(options, verdict));
   }
 }
 
@@ -625,6 +635,65 @@ export class Benchmark {
 // evaluate() function
 // ---------------------------------------------------------------------------
 
+/** `error.type` of the error result for a scorer that returned an unusable value. */
+const INVALID_SCORER_RESULT = 'TypeError';
+
+function isThenable(value: unknown): value is PromiseLike<unknown> {
+  return (
+    (typeof value === 'object' || typeof value === 'function') &&
+    value !== null &&
+    typeof (value as { then?: unknown }).then === 'function'
+  );
+}
+
+function describeValue(value: unknown): string {
+  if (value === null) return 'null';
+  if (Array.isArray(value)) return 'an array';
+  if (typeof value === 'number') return String(value);
+  return typeof value === 'object' ? 'an object' : `a ${typeof value}`;
+}
+
+/** Why `value` is not a usable EvalScore, or undefined when it is one. */
+function invalidEvalScore(value: unknown): string | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return describeValue(value);
+  const s = value as Record<string, unknown>;
+  if (typeof s.name !== 'string' || s.name === '') return 'an object without a string name';
+  if (s.value !== undefined && (typeof s.value !== 'number' || !Number.isFinite(s.value))) {
+    return `an EvalScore "${s.name}" whose value is ${describeValue(s.value)}`;
+  }
+  if (s.passed !== undefined && typeof s.passed !== 'boolean') {
+    return `an EvalScore "${s.name}" whose passed is not a boolean`;
+  }
+  if (s.label !== undefined && typeof s.label !== 'string') {
+    return `an EvalScore "${s.name}" whose label is not a string`;
+  }
+  return undefined;
+}
+
+/**
+ * The scores a scorer returned, or why the value cannot be used: a finite
+ * number, a boolean (a verdict), an EvalScore or an EvalScore[] is used;
+ * anything else (undefined, null, NaN, a bigint, a Promise, a malformed
+ * object) is not.
+ */
+function scorerResultScores(result: unknown, evalName: string): EvalScore[] | string {
+  if (typeof result === 'boolean') return [{ name: evalName, value: result ? 1 : 0, passed: result }];
+  if (typeof result === 'number') {
+    return Number.isFinite(result) ? [{ name: evalName, value: result }] : `returned ${result}`;
+  }
+  if (isThenable(result)) {
+    // Do not leave a rejected Promise unhandled.
+    Promise.resolve(result).catch(() => {});
+    return 'returned a Promise (evaluate() scorers must be synchronous)';
+  }
+  const items = Array.isArray(result) ? result : [result];
+  for (const item of items) {
+    const reason = invalidEvalScore(item);
+    if (reason) return `returned ${reason}`;
+  }
+  return items as EvalScore[];
+}
+
 export interface EvaluateOptions {
   name: string;
   task: (input: unknown) => unknown;
@@ -670,10 +739,14 @@ export interface EvaluateOptions {
  * agent run's own trace. The TypeScript SDK has no default context manager, so
  * this uses a module-level "current case" instead of the active OTel context.
  *
- * A scorer that throws emits an evaluator error result (`error.type`, no
- * value) named after its declared `name` (else the function name). When the
- * task throws, the scorers are not run and every scorer emits such an error
- * result with the task's `error.type`.
+ * A scorer returns a finite number, a boolean (a verdict), an `EvalScore` or
+ * an `EvalScore[]`, synchronously. A scorer that throws, or returns anything
+ * else (undefined, null, NaN, a Promise, a malformed object; with a warning),
+ * emits an evaluator error result (`error.type`, no value, no label, no
+ * explanation) named after its declared `name` (else the function name). The
+ * exception message is kept only in the local `scorerErrors`. When the task
+ * throws, the scorers are not run and every scorer emits such an error result
+ * with the task's `error.type`.
  *
  * Local case status: `error` if the task threw or a result errored; else
  * `fail` if any score has a `fail` verdict (a `pass` / `fail` `label` /
@@ -745,36 +818,36 @@ export function evaluate(options: EvaluateOptions): BenchmarkResult {
         scoreGroups.push({ scores: [applySpec({ name: evalName }, spec)], spec, errorType });
         continue;
       }
+      // Error result (error.type, no value, no explanation) under the evaluation
+      // name the scorer would have produced, so it is not a separate evaluation.
+      // The message stays local (scorerErrors): it can carry URLs, keys or bodies.
+      const scorerError = (message: string, type: string) => {
+        scorerErrors.push(message);
+        errorType ??= type;
+        scoreGroups.push({ scores: [applySpec({ name: evalName }, spec)], spec, errorType: type });
+      };
+      let result: unknown;
       try {
-        const result = scorer(item.input, output, expected);
-        let produced: EvalScore[];
-        if (typeof result === 'boolean') {
-          produced = [{ name: evalName, value: result ? 1 : 0, passed: result }];
-        } else if (typeof result === 'number') {
-          produced = [{ name: evalName, value: result }];
-        } else if (Array.isArray(result)) {
-          produced = result;
-        } else {
-          produced = [result];
-        }
-        produced = produced.map(s => applySpec(s, spec));
-        for (const es of produced) {
-          if (es.value !== undefined) caseScores[es.name] = es.value;
-        }
-        scoreGroups.push({ scores: produced, spec });
+        result = scorer(item.input, output, expected);
       } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
-        scorerErrors.push(msg);
-        const scorerErrorType = errorTypeOf(e);
-        errorType ??= scorerErrorType;
-        // Error result (error.type, no value) under the evaluation name the
-        // scorer would have produced, so it is not a separate evaluation.
-        scoreGroups.push({
-          scores: [applySpec({ name: evalName, explanation: msg }, spec)],
-          spec,
-          errorType: scorerErrorType,
-        });
+        scorerError(e instanceof Error ? e.message : String(e), errorTypeOf(e));
+        continue;
       }
+      const produced = scorerResultScores(result, evalName);
+      if (typeof produced === 'string') {
+        console.warn(
+          `[opensearch-genai-observability-sdk-ts] evaluate(): scorer "${evalName}" ${produced}. ` +
+            `A scorer returns a finite number, a boolean, an EvalScore or an EvalScore[]; ` +
+            `recording an error result.`,
+        );
+        scorerError(`scorer "${evalName}" ${produced}`, INVALID_SCORER_RESULT);
+        continue;
+      }
+      const withSpec = produced.map(s => applySpec(s, spec));
+      for (const es of withSpec) {
+        if (es.value !== undefined) caseScores[es.name] = es.value;
+      }
+      scoreGroups.push({ scores: withSpec, spec });
     }
 
     const verdicts = verdictsOf(
