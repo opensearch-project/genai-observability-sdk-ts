@@ -2,7 +2,12 @@
 // Copyright OpenSearch Contributors
 
 import { describe, it, expect } from 'vitest';
-import { parseMessages, extractMessagesFromDoc, mapSpanDoc } from '../src/retrieval.js';
+import {
+  parseMessages,
+  extractMessagesFromDoc,
+  mapSpanDoc,
+  OpenSearchTraceRetriever,
+} from '../src/retrieval.js';
 
 describe('parseMessages', () => {
   it('returns empty array for null', () => {
@@ -210,5 +215,58 @@ describe('mapSpanDoc', () => {
     const doc = { traceId: 'test', custom: 'data' };
     const span = mapSpanDoc(doc);
     expect(span.raw).toBe(doc);
+  });
+});
+
+describe('findEvaluatedTraceIds', () => {
+  function withClient(search: (opts: Record<string, unknown>) => Promise<unknown>, evaluationIndex?: string) {
+    const retriever = new OpenSearchTraceRetriever({ evaluationIndex });
+    // Swap the real client (an optional dependency) for a stub.
+    (retriever as unknown as { _clientPromise: Promise<unknown> })._clientPromise = Promise.resolve({ search });
+    return retriever;
+  }
+
+  it('looks up gen_ai.evaluation.result events in the evaluation index', async () => {
+    const calls: Record<string, unknown>[] = [];
+    const retriever = withClient(async (opts) => {
+      calls.push(opts);
+      return { body: { aggregations: { by_trace: { buckets: [{ key: 't1' }, { key: 'other' }] } } } };
+    });
+    const found = await retriever.findEvaluatedTraceIds(['t1', 't2']);
+    expect([...found]).toEqual(['t1']);
+    expect(calls).toHaveLength(1);
+    expect(calls[0].index).toBe('otel-v1-genai-evaluation*');
+    expect(calls[0].ignore_unavailable).toBe(true);
+    expect(calls[0].allow_no_indices).toBe(true);
+    const filter = (calls[0].body as { query: { bool: { filter: unknown[] } } }).query.bool.filter;
+    expect(filter).toContainEqual({ term: { eventName: 'gen_ai.evaluation.result' } });
+    expect(filter).toContainEqual({ terms: { traceId: ['t1', 't2'] } });
+  });
+
+  it('uses a custom evaluation index', async () => {
+    let index: unknown;
+    const retriever = withClient(async (opts) => {
+      index = opts.index;
+      return { body: {} };
+    }, 'my-evals-*');
+    expect((await retriever.findEvaluatedTraceIds(['t1'])).size).toBe(0);
+    expect(index).toBe('my-evals-*');
+  });
+
+  it('propagates search errors instead of reporting nothing evaluated', async () => {
+    const retriever = withClient(async () => {
+      throw new Error('security_exception: no permissions');
+    });
+    await expect(retriever.findEvaluatedTraceIds(['t1'])).rejects.toThrow(/security_exception/);
+  });
+
+  it('returns an empty set without querying for no trace ids', async () => {
+    let called = false;
+    const retriever = withClient(async () => {
+      called = true;
+      return {};
+    });
+    expect((await retriever.findEvaluatedTraceIds([])).size).toBe(0);
+    expect(called).toBe(false);
   });
 });

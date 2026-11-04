@@ -609,9 +609,11 @@ const roots = await retriever.listRootSpans({
   maxResults: 10,
 });
 
-// Check which traces already have evaluation spans
+// Check which traces already have evaluation results
 const evaluated = await retriever.findEvaluatedTraceIds(["trace-id-1", "trace-id-2"]);
 ```
+
+`findEvaluatedTraceIds()` returns the trace ids that already have a `gen_ai.evaluation.result` event in the evaluation index. A missing evaluation index (nothing sent yet) returns an empty set; any other error (auth, connection, mapping) is thrown, so a failed lookup never looks like "nothing evaluated" and never makes you re-run judges and write duplicate results.
 
 **Constructor:**
 
@@ -619,6 +621,7 @@ const evaluated = await retriever.findEvaluatedTraceIds(["trace-id-1", "trace-id
 |---|---|---|---|
 | `host` | `string` | `"https://localhost:9200"` | OpenSearch endpoint |
 | `index` | `string` | `"otel-v1-apm-span-*"` | Index pattern for span data |
+| `evaluationIndex` | `string` | `"otel-v1-genai-evaluation*"` | Index pattern for evaluation results, used by `findEvaluatedTraceIds()` |
 | `auth` | `{ username, password } \| "awsSigV4"` | — | Authentication method |
 | `verifyCerts` | `boolean` | `true` | Verify TLS certificates |
 

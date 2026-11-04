@@ -86,9 +86,14 @@ for (const [name, scoreSummary] of Object.entries(result.summary.scores)) {
 // });
 // console.log(`Found ${rootSpans.length} root spans`);
 //
+// // Skip traces that already have results. This throws on auth or connection
+// // errors (only a missing evaluation index means "none evaluated"), so a
+// // failed lookup never re-runs the judges and writes duplicate results.
+// const evaluated = await retriever.findEvaluatedTraceIds(session.traces.map((t) => t.traceId));
+//
 // // Write scores back: one gen_ai.evaluation.result event per evaluated span,
 // // parented to that span (exported over OTLP logs to otel-v1-genai-evaluation)
-// for (const trace of session.traces) {
+// for (const trace of session.traces.filter((t) => !evaluated.has(t.traceId))) {
 //   for (const span of trace.spans.filter((s) => s.operationName === 'invoke_agent')) {
 //     score({
 //       name: 'helpfulness',
