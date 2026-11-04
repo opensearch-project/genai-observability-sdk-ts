@@ -18,6 +18,7 @@ import {
   createLogExporter,
   createSpanExporter,
   resolveSignalEndpoint,
+  grpcMetadata,
   DEFAULT_BASE_ENDPOINT,
   DEFAULT_ENDPOINT,
   DEFAULT_LOGS_ENDPOINT,
@@ -302,6 +303,32 @@ describe('register - exporters', () => {
     const logExporter = await createLogExporter(options);
     expect(spans).toBeInstanceOf(GrpcTraceExporter);
     expect(logExporter).toBeInstanceOf(GrpcLogExporter);
+    await spans.shutdown();
+    await logExporter.shutdown();
+  });
+
+  it('grpcMetadata lowercases header keys and is undefined without headers', async () => {
+    expect(await grpcMetadata(undefined)).toBeUndefined();
+    expect(await grpcMetadata({})).toBeUndefined();
+    const md = await grpcMetadata({ Authorization: 'Basic abc', 'X-Tenant': 't1' });
+    expect(md?.getMap()).toEqual({ authorization: 'Basic abc', 'x-tenant': 't1' });
+  });
+
+  it('gRPC: sends headers as metadata (lowercased) on both signals', async () => {
+    const options = {
+      endpoint: 'grpc://c:4317',
+      headers: { Authorization: 'Bearer token', 'X-Scope': 'evals' },
+    };
+    // Metadata the OTel JS gRPC transport sends with each export.
+    const sentMetadata = (exporter: unknown) =>
+      (
+        exporter as { _delegate: { _transport: { _parameters: { metadata: () => { getMap(): unknown } } } } }
+      )._delegate._transport._parameters.metadata().getMap();
+    const spans = await createSpanExporter(options);
+    const logExporter = await createLogExporter(options);
+    const expected = { authorization: 'Bearer token', 'x-scope': 'evals' };
+    expect(sentMetadata(spans)).toMatchObject(expected);
+    expect(sentMetadata(logExporter)).toMatchObject(expected);
     await spans.shutdown();
     await logExporter.shutdown();
   });

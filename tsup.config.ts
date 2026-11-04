@@ -12,6 +12,7 @@ export default defineConfig({
   outDir: "dist",
   external: [
     /^@opentelemetry\//,
+    /^@grpc\//,
     /^@opensearch-project\//,
     /^@aws-sdk\//,
     "aws4",

@@ -85,7 +85,7 @@ await provider.forceFlush();
 Endpoints: each signal (traces, and logs for the evaluation events) is resolved the same way, following the OTel exporter spec. See the [README](../README.md#endpoints-traces-and-evaluation-logs) for details.
 
 - Endpoint: `tracesEndpoint` / `logsEndpoint` (full URL), else `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` / `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`, else the base URL (`endpoint`, else `OTEL_EXPORTER_OTLP_ENDPOINT`) + `/v1/traces` or `/v1/logs` over HTTP, as-is over gRPC, else the local Data Prepper base `http://localhost:21890/opentelemetry`.
-- Protocol: `protocol`, else `OTEL_EXPORTER_OTLP_<SIGNAL>_PROTOCOL`, else `OTEL_EXPORTER_OTLP_PROTOCOL`, else the URL scheme (`grpc://` / `grpcs://` mean gRPC). Over gRPC, logs go to the same host and port as traces.
+- Protocol: `protocol`, else `OTEL_EXPORTER_OTLP_<SIGNAL>_PROTOCOL`, else `OTEL_EXPORTER_OTLP_PROTOCOL`, else the URL scheme (`grpc://` / `grpcs://` mean gRPC). Over gRPC, logs go to the same host and port as traces, and `headers` are sent as gRPC metadata with lowercased keys.
 - Amazon OpenSearch Ingestion has one pipeline per signal, so pass both URLs. With `sigv4`, both exporters sign their requests:
 
 ```typescript

@@ -168,7 +168,7 @@ An unknown agent is left out, never invented. `evaluate()` also stamps the agent
 | `batch` | `boolean` | `true` | Use BatchSpanProcessor when true |
 | `autoInstrument` | `boolean` | `true` | Discover and activate instrumentor packages |
 | `exporter` | `SpanExporter` | none | Custom span exporter, used as given (traces only) |
-| `headers` | `Record<string, string>` | none | Headers for the OTLP/HTTP exporters (traces and logs). gRPC: use `OTEL_EXPORTER_OTLP_HEADERS` |
+| `headers` | `Record<string, string>` | none | Headers for every export (traces and logs). Over gRPC they are sent as gRPC metadata with lowercased keys (gRPC rejects uppercase keys) |
 | `logs` | `boolean` | `true` | Set up a LoggerProvider for evaluation events |
 | `logExporter` | `LogRecordExporter` | none | Custom log exporter, used as given (logs only) |
 

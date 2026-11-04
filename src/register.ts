@@ -81,8 +81,8 @@ export interface RegisterOptions {
   exporter?: SpanExporter;
   setGlobal?: boolean;
   /**
-   * Headers sent with every OTLP/HTTP export (traces and logs). The gRPC
-   * exporters do not take headers: use OTEL_EXPORTER_OTLP_HEADERS.
+   * Headers sent with every export (traces and logs). Over gRPC they are sent
+   * as gRPC metadata, with lowercased keys (gRPC rejects uppercase keys).
    */
   headers?: Record<string, string>;
   /**
@@ -194,6 +194,21 @@ function httpScheme(url: string): string {
   return url.trim().replace(/^grpc:\/\//i, "http://").replace(/^grpcs:\/\//i, "https://");
 }
 
+/**
+ * gRPC metadata from `headers`. Keys are lowercased: gRPC rejects uppercase
+ * metadata keys. Undefined when there are no headers.
+ */
+export async function grpcMetadata(
+  headers: Record<string, string> | undefined,
+): Promise<import("@grpc/grpc-js").Metadata | undefined> {
+  const entries = Object.entries(headers ?? {});
+  if (entries.length === 0) return undefined;
+  const { Metadata } = await import("@grpc/grpc-js");
+  const metadata = new Metadata();
+  for (const [key, value] of entries) metadata.set(key.toLowerCase(), value);
+  return metadata;
+}
+
 function requireHttpForSigV4(signal: OtlpSignal, endpoint: SignalEndpoint): void {
   if (endpoint.protocol === "grpc") {
     throw new Error(
@@ -213,7 +228,7 @@ export async function createSpanExporter(options: RegisterOptions): Promise<Span
   }
   if (endpoint.protocol === "grpc") {
     const { OTLPTraceExporter } = await import("@opentelemetry/exporter-trace-otlp-grpc");
-    return new OTLPTraceExporter({ url: endpoint.url });
+    return new OTLPTraceExporter({ url: endpoint.url, metadata: await grpcMetadata(options.headers) });
   }
   const { OTLPTraceExporter } = await import("@opentelemetry/exporter-trace-otlp-http");
   return new OTLPTraceExporter({ url: endpoint.url, headers: options.headers });
@@ -232,7 +247,7 @@ export async function createLogExporter(options: RegisterOptions): Promise<LogRe
   }
   if (endpoint.protocol === "grpc") {
     const { OTLPLogExporter } = await import("@opentelemetry/exporter-logs-otlp-grpc");
-    return new OTLPLogExporter({ url: endpoint.url });
+    return new OTLPLogExporter({ url: endpoint.url, metadata: await grpcMetadata(options.headers) });
   }
   const { OTLPLogExporter } = await import("@opentelemetry/exporter-logs-otlp-http");
   const exporter = new OTLPLogExporter({ url: endpoint.url, headers: options.headers });
