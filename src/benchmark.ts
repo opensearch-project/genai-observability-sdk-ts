@@ -9,7 +9,8 @@
  * ```
  * trace (one per test case)       the agent run, exactly like production
  *   root span                     + test.suite.name, test.suite.run.id, test.case.id, test.case.name
- *   LogRecord gen_ai.evaluation.result   one per score, parented to the root span, test.* copied
+ *   LogRecord gen_ai.evaluation.result   one per score, parented to the root span, test.* copied,
+ *                                        opensearch.test.case.expected when the case has one
  * ```
  *
  * The SDK creates no spans of its own for a run.
@@ -27,6 +28,7 @@ import {
   AGENT_NAME_KEY,
   AGENT_VERSION_KEY,
   RESERVED_KEYS,
+  expectedAttributes,
   normalizeSpanId,
   normalizeTraceId,
   resolveAgent,
@@ -69,12 +71,14 @@ export interface EvalScore {
   metadata?: Record<string, unknown>;
   /** Explicit verdict as a boolean. */
   passed?: boolean;
-  /** `opensearch.evaluation.score.threshold`. */
+  /** `opensearch.gen_ai.evaluation.score.threshold`. */
   threshold?: number;
-  /** `opensearch.evaluation.score.direction` (default `maximize` with a threshold). */
+  /** `opensearch.gen_ai.evaluation.score.direction` (default `maximize` with a threshold). */
   direction?: ScoreDirection;
   scoreMin?: number;
   scoreMax?: number;
+  /** `opensearch.gen_ai.evaluation.judge.trace_id`: the trace of the LLM judge call that produced this score. */
+  judgeTraceId?: string;
 }
 
 /** What a scorer declares about the evaluation it produces (see `defineScorer`). */
@@ -89,7 +93,7 @@ export interface ScorerSpec {
   threshold?: number;
   scoreMin?: number;
   scoreMax?: number;
-  /** Evaluator identity: instrumentation scope and `opensearch.evaluation.evaluator.name`. */
+  /** Evaluator identity: instrumentation scope and `opensearch.gen_ai.evaluation.evaluator.name`. */
   evaluator?: string;
   evaluatorType?: EvaluatorType;
 }
@@ -321,6 +325,8 @@ interface CaseIdentity {
   agent?: Record<string, string>;
   /** OTel `cicd.pipeline.*` of the CI run, when in CI. */
   ci?: Record<string, string>;
+  /** `opensearch.test.case.expected` (+ `_truncated`), when the case has an expected output. */
+  expected?: Record<string, string | boolean>;
 }
 
 function identityAttributes(identity: CaseIdentity): Record<string, string> {
@@ -348,7 +354,8 @@ function emitCaseScores(
   metadata: Attributes,
   extra: { evaluator?: string; evaluatorType?: EvaluatorType; errorType?: string } = {},
 ): void {
-  const testAttrs = identityAttributes(identity);
+  // The expected output goes on results only, never on the agent's spans.
+  const testAttrs = { ...identityAttributes(identity), ...(identity.expected ?? {}) };
   const errored = extra.errorType !== undefined;
   for (const s of scores) {
     const scoreMeta = s.metadata ? toAttributes(safeMetadata(s.metadata, `score:${s.name}`)) : {};
@@ -364,6 +371,7 @@ function emitCaseScores(
       evaluator: extra.evaluator,
       evaluatorType: extra.evaluatorType,
       errorType: extra.errorType,
+      judgeTraceId: s.judgeTraceId,
       agentName: identity.agent?.[AGENT_NAME_KEY],
       agentVersion: identity.agent?.[AGENT_VERSION_KEY],
       attributes: { ...metadata, ...scoreMeta, ...testAttrs },
@@ -509,6 +517,11 @@ export class Benchmark {
   log(options: {
     input?: unknown;
     output?: unknown;
+    /**
+     * Expected output. Sent on every result of the case as
+     * `opensearch.test.case.expected` (strings as is, other values
+     * JSON.stringify'd, truncated to 4096 characters).
+     */
     expected?: unknown;
     /** `{ name: value }`, or `EvalScore[]` to declare verdicts (label / threshold) and bounds. */
     scores?: Record<string, number> | EvalScore[];
@@ -551,6 +564,7 @@ export class Benchmark {
       caseName: options.caseName,
       agent: this._agent,
       ci: this._ci,
+      expected: expectedAttributes(options.expected),
     };
     if (options.status !== undefined && !CASE_STATUSES.includes(options.status)) {
       throw new Error(`status must be one of ${CASE_STATUSES.join(', ')}; got "${options.status}"`);
@@ -686,6 +700,7 @@ export function evaluate(options: EvaluateOptions): BenchmarkResult {
       ci,
     };
     const expected = item.expected;
+    const expectedAttrs = expectedAttributes(expected);
 
     let output: unknown;
     let error: string | undefined;
@@ -718,6 +733,7 @@ export function evaluate(options: EvaluateOptions): BenchmarkResult {
     // The agent that ran: declared, else named on its root span, else the
     // register() default.
     identity.agent = resolveAgent(options.agentName, options.agentVersion, active.rootSpan);
+    identity.expected = expectedAttrs;
 
     // Run scorers (outside the case: judge spans are not the agent run)
     for (const scorer of options.scores) {

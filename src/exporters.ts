@@ -180,9 +180,9 @@ function loadLogsSerializer(): LogsSerializer {
 /** Attributes that OTel semconv types as double. */
 const DOUBLE_ATTRIBUTES: ReadonlySet<string> = new Set([
   "gen_ai.evaluation.score.value",
-  "opensearch.evaluation.score.min",
-  "opensearch.evaluation.score.max",
-  "opensearch.evaluation.score.threshold",
+  "opensearch.gen_ai.evaluation.score.min",
+  "opensearch.gen_ai.evaluation.score.max",
+  "opensearch.gen_ai.evaluation.score.threshold",
 ]);
 
 interface OtlpKeyValue {

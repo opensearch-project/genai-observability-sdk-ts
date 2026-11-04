@@ -52,26 +52,26 @@ export interface ScoreOptions {
   explanation?: string;
   /** `gen_ai.response.id` of the evaluated response, only if known. */
   responseId?: string;
-  /** `opensearch.evaluation.level`. Defaults to `"trace"` for trace-level scores. */
+  /** `opensearch.gen_ai.evaluation.level`. Defaults to `"trace"` for trace-level scores. */
   level?: EvaluationLevel;
   /**
    * Evaluator identity: instrumentation scope name of the event and
-   * `opensearch.evaluation.evaluator.name`. Without it the scope is the SDK
+   * `opensearch.gen_ai.evaluation.evaluator.name`. Without it the scope is the SDK
    * scope (`opensearch-genai-observability-sdk-ts` + SDK version).
    */
   evaluator?: string;
-  /** Instrumentation scope version (with `evaluator`) and `opensearch.evaluation.evaluator.version`. */
+  /** Instrumentation scope version (with `evaluator`) and `opensearch.gen_ai.evaluation.evaluator.version`. */
   evaluatorVersion?: string;
-  /** `opensearch.evaluation.evaluator.type`. */
+  /** `opensearch.gen_ai.evaluation.evaluator.type`. */
   evaluatorType?: EvaluatorType;
-  /** `opensearch.evaluation.score.direction`. */
+  /** `opensearch.gen_ai.evaluation.score.direction`. */
   direction?: ScoreDirection;
-  /** `opensearch.evaluation.score.min`. */
+  /** `opensearch.gen_ai.evaluation.score.min`. */
   scoreMin?: number;
-  /** `opensearch.evaluation.score.max`. */
+  /** `opensearch.gen_ai.evaluation.score.max`. */
   scoreMax?: number;
   /**
-   * `opensearch.evaluation.score.threshold`: pass when `value >= threshold`
+   * `opensearch.gen_ai.evaluation.score.threshold`: pass when `value >= threshold`
    * (`direction` `"maximize"`, the default with a threshold and recorded) or
    * `value <= threshold` (`"minimize"`).
    */
@@ -87,7 +87,7 @@ export interface ScoreOptions {
   agentVersion?: string;
   /** `error.type` when the evaluator failed. */
   errorType?: string;
-  /** `opensearch.evaluation.judge.trace_id`: the judge's own trace. */
+  /** `opensearch.gen_ai.evaluation.judge.trace_id`: the judge's own trace. */
   judgeTraceId?: string;
   /** Extra attributes (string, number, boolean). Explicit options take precedence. */
   attributes?: Record<string, unknown>;
@@ -181,19 +181,19 @@ function buildAttributes(options: ScoreOptions, target: Target): Attributes {
   if (options.agentVersion) attrs[AGENT_VERSION_KEY] = options.agentVersion;
 
   const level = options.level ?? (target.traceOnlyId ? "trace" : undefined);
-  if (level) attrs["opensearch.evaluation.level"] = level;
-  if (options.evaluator) attrs["opensearch.evaluation.evaluator.name"] = options.evaluator;
+  if (level) attrs["opensearch.gen_ai.evaluation.level"] = level;
+  if (options.evaluator) attrs["opensearch.gen_ai.evaluation.evaluator.name"] = options.evaluator;
   if (options.evaluatorVersion) {
-    attrs["opensearch.evaluation.evaluator.version"] = options.evaluatorVersion;
+    attrs["opensearch.gen_ai.evaluation.evaluator.version"] = options.evaluatorVersion;
   }
-  if (options.evaluatorType) attrs["opensearch.evaluation.evaluator.type"] = options.evaluatorType;
+  if (options.evaluatorType) attrs["opensearch.gen_ai.evaluation.evaluator.type"] = options.evaluatorType;
   const direction =
     options.direction ?? (options.threshold !== undefined ? 'maximize' : undefined);
-  if (direction) attrs["opensearch.evaluation.score.direction"] = direction;
-  if (options.scoreMin !== undefined) attrs["opensearch.evaluation.score.min"] = options.scoreMin;
-  if (options.scoreMax !== undefined) attrs["opensearch.evaluation.score.max"] = options.scoreMax;
+  if (direction) attrs["opensearch.gen_ai.evaluation.score.direction"] = direction;
+  if (options.scoreMin !== undefined) attrs["opensearch.gen_ai.evaluation.score.min"] = options.scoreMin;
+  if (options.scoreMax !== undefined) attrs["opensearch.gen_ai.evaluation.score.max"] = options.scoreMax;
   if (options.threshold !== undefined) {
-    attrs["opensearch.evaluation.score.threshold"] = options.threshold;
+    attrs["opensearch.gen_ai.evaluation.score.threshold"] = options.threshold;
   }
   // The verdict is the label (OTel examples "pass" / "fail"). A label you set is
   // kept; without one, a threshold rule records its computed verdict.
@@ -201,7 +201,7 @@ function buildAttributes(options: ScoreOptions, target: Target): Attributes {
     options.label ||
     thresholdVerdict({ value: options.value, threshold: options.threshold, direction });
   if (label) attrs["gen_ai.evaluation.score.label"] = label;
-  if (options.judgeTraceId) attrs["opensearch.evaluation.judge.trace_id"] = options.judgeTraceId;
+  if (options.judgeTraceId) attrs["opensearch.gen_ai.evaluation.judge.trace_id"] = options.judgeTraceId;
   return attrs;
 }
 
@@ -232,7 +232,7 @@ let warnedTraceOnly = false;
  * - Inline: call while the evaluated span is active.
  * - Offline: pass `traceId` + `spanId` of the evaluated span.
  * - Trace-level: pass only `traceId`. The event carries it as its own trace id,
- *   with no span id, and `opensearch.evaluation.level=trace`.
+ *   with no span id, and `opensearch.gen_ai.evaluation.level=trace`.
  *
  * Verdict: readers show pass/fail only for a declared rule. Pass
  * `label: "pass" | "fail"` (explicit) or `threshold` (+ `direction`); with

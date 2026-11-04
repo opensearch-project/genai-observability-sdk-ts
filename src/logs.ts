@@ -42,7 +42,7 @@ export function hasGlobalLoggerProvider(): boolean {
 /**
  * Logger for SDK events. The instrumentation scope is the library that emitted
  * the event: always the SDK name and version, with no scope attributes. The
- * evaluator is an attribute of the result (`opensearch.evaluation.evaluator.*`).
+ * evaluator is an attribute of the result (`opensearch.gen_ai.evaluation.evaluator.*`).
  */
 export function getEventLogger(): Logger {
   return resolveLoggerProvider().getLogger(SDK_SCOPE_NAME, SDK_VERSION);

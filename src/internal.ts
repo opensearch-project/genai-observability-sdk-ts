@@ -10,12 +10,47 @@ export const RESERVED_KEYS: ReadonlySet<string> = new Set([
   "test.case.input",
   "test.case.output",
   "test.case.expected",
+  "opensearch.test.case.expected",
+  "opensearch.test.case.expected_truncated",
   "error.type",
   "gen_ai.operation.name",
   "cicd.pipeline.name",
   "cicd.pipeline.run.id",
   "cicd.pipeline.run.url.full",
 ]);
+
+/** Expected output of an offline test case, on each of its evaluation results. */
+export const TEST_CASE_EXPECTED_KEY = "opensearch.test.case.expected";
+/** `true` when `opensearch.test.case.expected` was truncated. */
+export const TEST_CASE_EXPECTED_TRUNCATED_KEY = "opensearch.test.case.expected_truncated";
+/** Maximum length of `opensearch.test.case.expected`, in characters. */
+export const EXPECTED_LIMIT = 4096;
+
+/**
+ * @internal `opensearch.test.case.expected` (and `_truncated` when cut) for a
+ * case's expected output. Strings are kept, other values are JSON.stringify'd.
+ * Empty when `expected` is undefined or null.
+ */
+export function expectedAttributes(expected: unknown): Record<string, string | boolean> {
+  if (expected === undefined || expected === null) return {};
+  let text: string;
+  if (typeof expected === "string") {
+    text = expected;
+  } else {
+    try {
+      text = JSON.stringify(expected) ?? String(expected);
+    } catch {
+      text = String(expected);
+    }
+  }
+  // Count characters (code points), not UTF-16 units.
+  const chars = Array.from(text);
+  if (chars.length <= EXPECTED_LIMIT) return { [TEST_CASE_EXPECTED_KEY]: text };
+  return {
+    [TEST_CASE_EXPECTED_KEY]: chars.slice(0, EXPECTED_LIMIT).join(""),
+    [TEST_CASE_EXPECTED_TRUNCATED_KEY]: true,
+  };
+}
 
 export function parseHex(value: string): number | null {
   if (value === "") return 0;

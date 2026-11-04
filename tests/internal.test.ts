@@ -2,7 +2,7 @@
 // Copyright OpenSearch Contributors
 
 import { describe, it, expect, vi } from 'vitest';
-import { parseHex, validateMetadataKeys, RESERVED_KEYS } from '../src/internal.js';
+import { parseHex, validateMetadataKeys, RESERVED_KEYS, expectedAttributes } from '../src/internal.js';
 
 describe('RESERVED_KEYS', () => {
   it('contains expected keys', () => {
@@ -14,6 +14,8 @@ describe('RESERVED_KEYS', () => {
     expect(RESERVED_KEYS.has('test.case.input')).toBe(true);
     expect(RESERVED_KEYS.has('test.case.output')).toBe(true);
     expect(RESERVED_KEYS.has('test.case.expected')).toBe(true);
+    expect(RESERVED_KEYS.has('opensearch.test.case.expected')).toBe(true);
+    expect(RESERVED_KEYS.has('opensearch.test.case.expected_truncated')).toBe(true);
     expect(RESERVED_KEYS.has('gen_ai.operation.name')).toBe(true);
   });
 
@@ -92,5 +94,25 @@ describe('validateMetadataKeys', () => {
     validateMetadataKeys({});
     expect(warnSpy).not.toHaveBeenCalled();
     warnSpy.mockRestore();
+  });
+});
+
+describe('expectedAttributes', () => {
+  it('counts characters, not UTF-16 units, when truncating', () => {
+    const out = expectedAttributes('😀'.repeat(4097));
+    expect(Array.from(out['opensearch.test.case.expected'] as string)).toHaveLength(4096);
+    expect(out['opensearch.test.case.expected_truncated']).toBe(true);
+  });
+
+  it('falls back to String() when JSON.stringify fails', () => {
+    const circular: Record<string, unknown> = {};
+    circular.self = circular;
+    expect(expectedAttributes(circular)['opensearch.test.case.expected']).toBe('[object Object]');
+    expect(expectedAttributes(10n)['opensearch.test.case.expected']).toBe('10');
+  });
+
+  it('is empty for undefined and null', () => {
+    expect(expectedAttributes(undefined)).toEqual({});
+    expect(expectedAttributes(null)).toEqual({});
   });
 });

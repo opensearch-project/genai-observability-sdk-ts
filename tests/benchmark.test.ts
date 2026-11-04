@@ -69,7 +69,7 @@ describe('Benchmark class', () => {
     const [record] = scoreRecords();
     expect(record.spanContext?.traceId).toBe('abcdef1234567890abcdef1234567890');
     expect(record.spanContext?.spanId).toBe('');
-    expect(record.attributes['opensearch.evaluation.level']).toBe('trace');
+    expect(record.attributes['opensearch.gen_ai.evaluation.level']).toBe('trace');
     logSpy.mockRestore();
   });
 
@@ -437,12 +437,12 @@ describe('evaluate (default: events, no harness spans)', () => {
       expect(e.spanContext?.spanId).toBe(crashingRoot.spanContext().spanId);
     }
     const q = bad[1].attributes;
-    expect(q['opensearch.evaluation.evaluator.name']).toBe('judge');
-    expect(q['opensearch.evaluation.evaluator.type']).toBe('llm_judge');
-    expect(q['opensearch.evaluation.score.threshold']).toBe(4);
-    expect(q['opensearch.evaluation.score.direction']).toBe('maximize');
-    expect(q['opensearch.evaluation.score.min']).toBe(1);
-    expect(q['opensearch.evaluation.score.max']).toBe(5);
+    expect(q['opensearch.gen_ai.evaluation.evaluator.name']).toBe('judge');
+    expect(q['opensearch.gen_ai.evaluation.evaluator.type']).toBe('llm_judge');
+    expect(q['opensearch.gen_ai.evaluation.score.threshold']).toBe(4);
+    expect(q['opensearch.gen_ai.evaluation.score.direction']).toBe('maximize');
+    expect(q['opensearch.gen_ai.evaluation.score.min']).toBe(1);
+    expect(q['opensearch.gen_ai.evaluation.score.max']).toBe(5);
     spy.mockRestore();
   });
 
@@ -710,7 +710,7 @@ describe('Benchmark (default: events, no harness spans)', () => {
       expect(e.attributes['gen_ai.agent.name']).toBe('agent-x');
       expect(e.spanContext?.spanId).toBe('1234567890abcdef');
     }
-    expect(events[0].attributes['opensearch.evaluation.score.threshold']).toBe(4);
+    expect(events[0].attributes['opensearch.gen_ai.evaluation.score.threshold']).toBe(4);
     expect(summary.errorCount).toBe(1);
     expect(summary.scores).toEqual({});
     spy.mockRestore();
@@ -786,7 +786,7 @@ describe('TestCaseSpanProcessor installation', () => {
 
 describe('declared scorer rules and verdicts', () => {
   const LABEL = 'gen_ai.evaluation.score.label';
-  const THRESHOLD = 'opensearch.evaluation.score.threshold';
+  const THRESHOLD = 'opensearch.gen_ai.evaluation.score.threshold';
   let logSpy: ReturnType<typeof vi.spyOn>;
   let warnSpy: ReturnType<typeof vi.spyOn>;
   beforeEach(() => {
@@ -822,11 +822,11 @@ describe('declared scorer rules and verdicts', () => {
     const r = grades()['answer_quality'];
     expect(r.attributes['gen_ai.evaluation.score.value']).toBe(3);
     expect(r.attributes[THRESHOLD]).toBe(4);
-    expect(r.attributes['opensearch.evaluation.score.direction']).toBe('maximize');
-    expect(r.attributes['opensearch.evaluation.score.min']).toBe(1);
-    expect(r.attributes['opensearch.evaluation.score.max']).toBe(5);
-    expect(r.attributes['opensearch.evaluation.evaluator.name']).toBe('quality_judge');
-    expect(r.attributes['opensearch.evaluation.evaluator.type']).toBe('llm_judge');
+    expect(r.attributes['opensearch.gen_ai.evaluation.score.direction']).toBe('maximize');
+    expect(r.attributes['opensearch.gen_ai.evaluation.score.min']).toBe(1);
+    expect(r.attributes['opensearch.gen_ai.evaluation.score.max']).toBe(5);
+    expect(r.attributes['opensearch.gen_ai.evaluation.evaluator.name']).toBe('quality_judge');
+    expect(r.attributes['opensearch.gen_ai.evaluation.evaluator.type']).toBe('llm_judge');
     expect(r.attributes[LABEL]).toBe('fail');
     expect(r.instrumentationScope.name).toBe('opensearch-genai-observability-sdk-ts');
     expect(result.cases[0].scores).toEqual({ answer_quality: 3 });
@@ -841,7 +841,7 @@ describe('declared scorer rules and verdicts', () => {
     evaluate({ name: 'override', task: x => x, data: [{ input: 'q' }], scores: [latency] });
     const a = grades()['latency_budget'].attributes;
     expect(a[THRESHOLD]).toBe(15);
-    expect(a['opensearch.evaluation.score.direction']).toBe('minimize');
+    expect(a['opensearch.gen_ai.evaluation.score.direction']).toBe('minimize');
     expect(a[LABEL]).toBe('pass');
   });
 
@@ -940,7 +940,7 @@ describe('declared scorer rules and verdicts', () => {
     const summary = bm.close();
     const g = grades();
     expect(g['answer_quality'].attributes[LABEL]).toBe('fail');
-    expect(g['answer_quality'].attributes['opensearch.evaluation.score.max']).toBe(5);
+    expect(g['answer_quality'].attributes['opensearch.gen_ai.evaluation.score.max']).toBe(5);
     expect(g['tool_selection'].attributes[LABEL]).toBe('pass');
     expect(summary.failCount).toBe(1);
   });
@@ -952,5 +952,149 @@ describe('declared scorer rules and verdicts', () => {
     const summary = bm.close();
     expect(summary.passCount).toBe(2);
     expect(scoreRecords()[0].attributes[LABEL]).toBeUndefined();
+  });
+});
+
+describe('expected output on evaluation results', () => {
+  const EXPECTED = 'opensearch.test.case.expected';
+  const TRUNCATED = 'opensearch.test.case.expected_truncated';
+  const silence = () => vi.spyOn(console, 'log').mockImplementation(() => {});
+  const two = [function a() { return 1; }, function b() { return 0; }];
+
+  it('evaluate() puts a string expected on every result of the case', () => {
+    const spy = silence();
+    evaluate({
+      name: 'exp',
+      task: (input) => `answer:${input}`,
+      data: [{ input: 'q', expected: 'answer:q', caseId: 'c1' }],
+      scores: two,
+    });
+    const records = scoreRecords();
+    expect(records).toHaveLength(2);
+    for (const r of records) {
+      expect(r.attributes[EXPECTED]).toBe('answer:q');
+      expect(r.attributes[TRUNCATED]).toBeUndefined();
+    }
+    spy.mockRestore();
+  });
+
+  it('JSON.stringifies a non-string expected', () => {
+    const spy = silence();
+    const bm = new Benchmark('exp');
+    bm.log({ input: 'q', expected: { city: 'Paris', n: [1, 2] }, scores: { accuracy: 1 } });
+    bm.log({ input: 'r', expected: 42, scores: { accuracy: 1 } });
+    bm.close();
+    const [obj, num] = scoreRecords();
+    expect(obj.attributes[EXPECTED]).toBe('{"city":"Paris","n":[1,2]}');
+    expect(num.attributes[EXPECTED]).toBe('42');
+    spy.mockRestore();
+  });
+
+  it('truncates to 4096 characters and flags it', () => {
+    const spy = silence();
+    const bm = new Benchmark('exp');
+    bm.log({ input: 'q', expected: 'x'.repeat(5000), scores: { accuracy: 1 } });
+    bm.log({ input: 'r', expected: 'y'.repeat(4096), scores: { accuracy: 1 } });
+    bm.close();
+    const [long, exact] = scoreRecords();
+    expect(long.attributes[EXPECTED]).toBe('x'.repeat(4096));
+    expect(long.attributes[TRUNCATED]).toBe(true);
+    expect(exact.attributes[EXPECTED]).toBe('y'.repeat(4096));
+    expect(exact.attributes[TRUNCATED]).toBeUndefined();
+    spy.mockRestore();
+  });
+
+  it('is absent when the case has no expected output', () => {
+    const spy = silence();
+    evaluate({ name: 'exp', task: (i) => i, data: [{ input: 'q' }], scores: two });
+    const bm = new Benchmark('exp');
+    bm.log({ input: 'q', scores: { accuracy: 1 } });
+    bm.close();
+    const records = scoreRecords();
+    expect(records).toHaveLength(3);
+    for (const r of records) {
+      expect(r.attributes[EXPECTED]).toBeUndefined();
+      expect(r.attributes[TRUNCATED]).toBeUndefined();
+    }
+    spy.mockRestore();
+  });
+
+  it('is on the error results of a case whose task throws', () => {
+    const spy = silence();
+    evaluate({
+      name: 'exp',
+      task: () => { throw new Error('boom'); },
+      data: [{ input: 'q', expected: 'gold' }],
+      scores: two,
+    });
+    const records = scoreRecords();
+    expect(records).toHaveLength(2);
+    for (const r of records) {
+      expect(r.attributes['error.type']).toBe('Error');
+      expect(r.attributes[EXPECTED]).toBe('gold');
+    }
+    spy.mockRestore();
+  });
+
+  it('is not on the agent spans', () => {
+    const spy = silence();
+    evaluate({
+      name: 'exp',
+      task: (input) =>
+        trace.getTracer('agent').startActiveSpan('invoke_agent a', (s) => {
+          s.end();
+          return input;
+        }),
+      data: [{ input: 'q', expected: 'gold' }],
+      scores: two,
+    });
+    const root = getFinishedSpans().find(s => s.name === 'invoke_agent a')!;
+    expect(root.attributes['test.suite.name']).toBe('exp');
+    expect(root.attributes[EXPECTED]).toBeUndefined();
+    spy.mockRestore();
+  });
+
+  it('metadata cannot set it', () => {
+    const spy = silence();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const bm = new Benchmark('exp', { metadata: { [EXPECTED]: 'meta', [TRUNCATED]: true } });
+    bm.log({ input: 'q', scores: { accuracy: 1 } });
+    bm.close();
+    const [r] = scoreRecords();
+    expect(r.attributes[EXPECTED]).toBeUndefined();
+    expect(r.attributes[TRUNCATED]).toBeUndefined();
+    spy.mockRestore();
+    warn.mockRestore();
+  });
+
+  it('online score() sets it only when passed in attributes', () => {
+    score({ name: 'relevance', value: 1 });
+    score({ name: 'relevance', value: 1, attributes: { [EXPECTED]: 'gold' } });
+    const [plain, explicit] = scoreRecords();
+    expect(plain.attributes[EXPECTED]).toBeUndefined();
+    expect(explicit.attributes[EXPECTED]).toBe('gold');
+  });
+});
+
+describe('judge trace id from offline scorers', () => {
+  const JUDGE = 'opensearch.gen_ai.evaluation.judge.trace_id';
+
+  it('evaluate() and Benchmark.log send EvalScore.judgeTraceId', () => {
+    const spy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    evaluate({
+      name: 'judge',
+      task: (i) => i,
+      data: [{ input: 'q' }],
+      scores: [() => ({ name: 'quality', value: 4, judgeTraceId: 'ab'.repeat(16) })],
+    });
+    const bm = new Benchmark('judge');
+    bm.log({ input: 'q', scores: [{ name: 'quality', value: 4, judgeTraceId: 'cd'.repeat(16) }] });
+    bm.log({ input: 'r', scores: { quality: 4 } });
+    bm.close();
+    const [fromEvaluate, fromLog, none] = scoreRecords();
+    expect(fromEvaluate.attributes[JUDGE]).toBe('ab'.repeat(16));
+    expect(fromLog.attributes[JUDGE]).toBe('cd'.repeat(16));
+    expect(none.attributes[JUDGE]).toBeUndefined();
+    spy.mockRestore();
   });
 });

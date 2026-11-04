@@ -55,7 +55,7 @@ describe('score', () => {
     expect(r.instrumentationScope.name).toBe(SDK_SCOPE_NAME);
     expect(r.instrumentationScope.name).toBe('opensearch-genai-observability-sdk-ts');
     expect(r.instrumentationScope.version).toBe(SDK_VERSION);
-    expect(r.attributes['opensearch.evaluation.evaluator.name']).toBeUndefined();
+    expect(r.attributes['opensearch.gen_ai.evaluation.evaluator.name']).toBeUndefined();
   });
 
   it('records the evaluator as attributes; the scope stays the SDK', () => {
@@ -63,8 +63,8 @@ describe('score', () => {
     const r = onlyRecord();
     expect(r.instrumentationScope.name).toBe(SDK_SCOPE_NAME);
     expect(r.instrumentationScope.version).toBe(SDK_VERSION);
-    expect(r.attributes['opensearch.evaluation.evaluator.name']).toBe('helpfulness_judge');
-    expect(r.attributes['opensearch.evaluation.evaluator.version']).toBe('3.1.0');
+    expect(r.attributes['opensearch.gen_ai.evaluation.evaluator.name']).toBe('helpfulness_judge');
+    expect(r.attributes['opensearch.gen_ai.evaluation.evaluator.version']).toBe('3.1.0');
   });
 
   it('maps all options to standard and opensearch.* attributes', () => {
@@ -94,12 +94,12 @@ describe('score', () => {
       'gen_ai.conversation.id': 'sess-1',
       'gen_ai.agent.name': 'travel-planner',
       'error.type': 'timeout',
-      'opensearch.evaluation.level': 'tool_call',
-      'opensearch.evaluation.evaluator.type': 'llm_judge',
-      'opensearch.evaluation.score.direction': 'maximize',
-      'opensearch.evaluation.score.min': 0,
-      'opensearch.evaluation.score.max': 1,
-      'opensearch.evaluation.judge.trace_id': 'ffffffffffffffffffffffffffffffff',
+      'opensearch.gen_ai.evaluation.level': 'tool_call',
+      'opensearch.gen_ai.evaluation.evaluator.type': 'llm_judge',
+      'opensearch.gen_ai.evaluation.score.direction': 'maximize',
+      'opensearch.gen_ai.evaluation.score.min': 0,
+      'opensearch.gen_ai.evaluation.score.max': 1,
+      'opensearch.gen_ai.evaluation.judge.trace_id': 'ffffffffffffffffffffffffffffffff',
     });
   });
 
@@ -146,7 +146,7 @@ describe('score', () => {
     const r = onlyRecord();
     expect(r.spanContext?.traceId).toBe(ids!.traceId);
     expect(r.spanContext?.spanId).toBe(ids!.spanId);
-    expect(r.attributes['opensearch.evaluation.level']).toBeUndefined();
+    expect(r.attributes['opensearch.gen_ai.evaluation.level']).toBeUndefined();
   });
 
   it('has no span context when standalone', () => {
@@ -181,13 +181,13 @@ describe('score', () => {
     const r = onlyRecord();
     expect(r.spanContext?.traceId).toBe(TRACE_ID);
     expect(r.spanContext?.spanId).toBe('');
-    expect(r.attributes['opensearch.evaluation.level']).toBe('trace');
+    expect(r.attributes['opensearch.gen_ai.evaluation.level']).toBe('trace');
     expect(warnSpy).not.toHaveBeenCalled();
   });
 
   it('trace-level score keeps an explicit level', () => {
     score({ name: 'session_quality', value: 1, traceId: TRACE_ID, level: 'session' });
-    expect(onlyRecord().attributes['opensearch.evaluation.level']).toBe('session');
+    expect(onlyRecord().attributes['opensearch.gen_ai.evaluation.level']).toBe('session');
   });
 
   it('throws when spanId is given without traceId', () => {
@@ -242,8 +242,8 @@ describe('score', () => {
 
 describe('score verdicts', () => {
   const LABEL = 'gen_ai.evaluation.score.label';
-  const THRESHOLD = 'opensearch.evaluation.score.threshold';
-  const DIRECTION = 'opensearch.evaluation.score.direction';
+  const THRESHOLD = 'opensearch.gen_ai.evaluation.score.threshold';
+  const DIRECTION = 'opensearch.gen_ai.evaluation.score.direction';
 
   it('records no verdict without a rule', () => {
     score({ name: 'relevance', value: 0.9 });
