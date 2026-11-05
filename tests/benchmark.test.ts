@@ -1225,6 +1225,50 @@ describe('expected output on evaluation results', () => {
     warn.mockRestore();
   });
 
+  it('is recorded by default, with recordExpected: true the same', () => {
+    const spy = silence();
+    evaluate({ name: 'exp', task: (i) => i, data: [{ input: 'q', expected: 'gold' }], scores: two, recordExpected: true });
+    const bm = new Benchmark('exp', { recordExpected: true });
+    bm.log({ input: 'q', expected: 'gold', scores: { accuracy: 1 } });
+    bm.close();
+    const records = scoreRecords();
+    expect(records).toHaveLength(3);
+    for (const r of records) expect(r.attributes[EXPECTED]).toBe('gold');
+    spy.mockRestore();
+  });
+
+  it('recordExpected: false writes neither attribute, on scores and error results', () => {
+    const spy = silence();
+    const long = 'x'.repeat(5000);
+    const result = evaluate({
+      name: 'exp',
+      task: (i) => i,
+      data: [{ input: 'q', expected: long }],
+      scores: two,
+      recordExpected: false,
+    });
+    evaluate({
+      name: 'exp',
+      task: () => { throw new Error('boom'); },
+      data: [{ input: 'q', expected: long }],
+      scores: two,
+      recordExpected: false,
+    });
+    const bm = new Benchmark('exp', { recordExpected: false });
+    bm.log({ input: 'q', expected: long, scores: { accuracy: 1 } });
+    bm.log({ input: 'r', expected: long, scores: [{ name: 'accuracy' }], errorType: 'TimeoutError' });
+    bm.close();
+    const records = scoreRecords();
+    expect(records).toHaveLength(6);
+    for (const r of records) {
+      expect(r.attributes[EXPECTED]).toBeUndefined();
+      expect(r.attributes[TRUNCATED]).toBeUndefined();
+    }
+    // The local result still has it.
+    expect(result.cases[0].expected).toBe(long);
+    spy.mockRestore();
+  });
+
   it('online score() sets it only when passed in attributes', () => {
     score({ name: 'relevance', value: 1 });
     score({ name: 'relevance', value: 1, attributes: { [EXPECTED]: 'gold' } });

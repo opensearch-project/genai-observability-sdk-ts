@@ -476,7 +476,7 @@ trace (one per case)                        the agent run, unchanged
 
 Each `gen_ai.evaluation.result` carries `test.suite.name`, `test.suite.run.id`, `test.case.id`, `test.case.name`, `gen_ai.agent.name` / `gen_ai.agent.version` when known, `opensearch.test.case.expected` when the case has an `expected`, and the run `metadata` (reserved keys are dropped; the score's own `metadata` and the SDK attributes win). Pass/fail/error counts are not sent: readers derive them from the results of a run. The summary `evaluate()` returns is computed locally.
 
-**Expected output.** When a case has `expected`, every result of the case (including error results) carries it as `opensearch.test.case.expected`: strings as is, other values `JSON.stringify`'d. It is truncated to 4096 characters; a truncated value also sets `opensearch.test.case.expected_truncated = true`. It is not put on the agent spans. Online `score()` never sets it; pass it in `attributes` if you want it there.
+**Expected output.** When a case has `expected`, every result of the case (including error results) carries it as `opensearch.test.case.expected`: strings as is, other values `JSON.stringify`'d. It is truncated to 4096 characters; a truncated value also sets `opensearch.test.case.expected_truncated = true`. It is not put on the agent spans. Online `score()` never sets it; pass it in `attributes` if you want it there. It is exported by default; if your test sets hold sensitive data, pass `recordExpected: false` to `evaluate()` or `new Benchmark()`, and neither attribute is written.
 
 `test.suite.run.id` and `test.case.id` are proposed OTel attributes ([semantic-conventions#1262](https://github.com/open-telemetry/semantic-conventions/issues/1262), [semantic-conventions-genai#79](https://github.com/open-telemetry/semantic-conventions-genai/issues/79)); the other `test.*` names are OTel's.
 
@@ -505,6 +505,7 @@ const provider = new BasicTracerProvider({
 | `metadata` | `Record<string, unknown>` | Copied to every `gen_ai.evaluation.result` of the run. Reserved keys are filtered |
 | `runId` | `string` | `test.suite.run.id` (default: generated). Use the same id from every CI shard so they report into one run, or an existing run's id to re-score it (send new results with the same run id). Empty or whitespace-only throws |
 | `ciPipeline` | `Record<string, string>` | Set or override `cicd.pipeline.name` / `.run.id` / `.run.url.full` (read from the CI environment by default; nothing outside CI) |
+| `recordExpected` | `boolean` | Export each case's `expected` as `opensearch.test.case.expected` (default `true`). Pass `false` if test sets hold sensitive data. Also a `new Benchmark()` option |
 
 Each `TestCaseResult` has `status` (`pass`, or `fail` when the case errored or failed a verdict), `resultStatus` (`pass` | `fail` | `error`), `errorType`, `durationMs`, `verdicts` (evaluation name to verdict), and the `traceId` / `spanId` of the agent root span when the task created one.
 

@@ -290,6 +290,7 @@ The `expected` value of an `evaluate()` case, or `Benchmark.log({ expected })`, 
 - Values longer than 4096 characters are cut to 4096 and `opensearch.test.case.expected_truncated` is set to `true`.
 - `undefined` and `null` send neither key.
 - It is not put on the agent's spans, and online `score()` never sets it.
+- It is exported by default. If your test sets hold sensitive data, pass `recordExpected: false` to `evaluate()` or `new Benchmark()`: neither `opensearch.test.case.expected` nor `opensearch.test.case.expected_truncated` is then written. The value is still on the local result.
 
 ### Run ids
 

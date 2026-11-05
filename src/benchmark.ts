@@ -11,6 +11,7 @@
  *   root span                     + test.suite.name, test.suite.run.id, test.case.id, test.case.name
  *   LogRecord gen_ai.evaluation.result   one per score, parented to the root span, test.* copied,
  *                                        opensearch.test.case.expected when the case has one
+ *                                        (unless recordExpected: false)
  * ```
  *
  * The SDK creates no spans of its own for a run.
@@ -489,6 +490,13 @@ export interface BenchmarkOptions {
    * read from GitHub Actions, GitLab CI or Jenkins. Nothing is added outside CI.
    */
   ciPipeline?: Record<string, string>;
+  /**
+   * Export each case's `expected` as `opensearch.test.case.expected` (and
+   * `opensearch.test.case.expected_truncated` when cut) on its results.
+   * Default true. Pass false if your test sets hold sensitive data: neither
+   * attribute is then written (the value is still kept on the local result).
+   */
+  recordExpected?: boolean;
 }
 
 /**
@@ -505,6 +513,7 @@ export class Benchmark {
   private _closed = false;
   private _agent: Record<string, string>;
   private _ci: Record<string, string>;
+  private _recordExpected: boolean;
 
   constructor(name: string, options?: BenchmarkOptions) {
     this._name = name;
@@ -513,6 +522,7 @@ export class Benchmark {
     this._agent = resolveAgent(options?.agentName, options?.agentVersion);
     this._metadata = safeMetadata(options?.metadata, `benchmark:${name}`);
     this._ci = ciPipelineAttributes(options?.ciPipeline);
+    this._recordExpected = options?.recordExpected ?? true;
     this._start = performance.now();
   }
 
@@ -530,7 +540,8 @@ export class Benchmark {
     /**
      * Expected output. Sent on every result of the case as
      * `opensearch.test.case.expected` (strings as is, other values
-     * JSON.stringify'd, truncated to 4096 characters).
+     * JSON.stringify'd, truncated to 4096 characters), unless the Benchmark
+     * was created with `recordExpected: false`.
      */
     expected?: unknown;
     /** `{ name: value }`, or `EvalScore[]` to declare verdicts (label / threshold) and bounds. */
@@ -574,7 +585,7 @@ export class Benchmark {
       caseName: options.caseName,
       agent: this._agent,
       ci: this._ci,
-      expected: expectedAttributes(options.expected),
+      expected: this._recordExpected ? expectedAttributes(options.expected) : undefined,
     };
     if (options.status !== undefined && !CASE_STATUSES.includes(options.status)) {
       throw new Error(`status must be one of ${CASE_STATUSES.join(', ')}; got "${options.status}"`);
@@ -729,6 +740,13 @@ export interface EvaluateOptions {
    * evaluation results and the agent root spans; nothing is added outside CI.
    */
   ciPipeline?: Record<string, string>;
+  /**
+   * Export each case's `expected` as `opensearch.test.case.expected` (and
+   * `opensearch.test.case.expected_truncated` when cut) on its results.
+   * Default true. Pass false if your test sets hold sensitive data: neither
+   * attribute is then written (the value is still kept on the local result).
+   */
+  recordExpected?: boolean;
 }
 
 /**
@@ -761,6 +779,7 @@ export function evaluate(options: EvaluateOptions): BenchmarkResult {
   const cases: TestCaseResult[] = [];
   const declaredAgent = resolveAgent(options.agentName, options.agentVersion);
   const ci = ciPipelineAttributes(options.ciPipeline);
+  const recordExpected = options.recordExpected ?? true;
 
   ensureGlobalTestCaseProcessor();
 
@@ -774,7 +793,7 @@ export function evaluate(options: EvaluateOptions): BenchmarkResult {
       ci,
     };
     const expected = item.expected;
-    const expectedAttrs = expectedAttributes(expected);
+    const expectedAttrs = recordExpected ? expectedAttributes(expected) : undefined;
 
     let output: unknown;
     let error: string | undefined;
