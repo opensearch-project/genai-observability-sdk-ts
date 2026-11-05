@@ -738,4 +738,4 @@ explore.agentTraces.evaluations.enabled: true
 - **A run shows twice the results.** The same results were sent twice; see [Re-imports](#d-re-imports-duplicate-results).
 - **No pass/fail shown.** The result has no `pass` / `fail` label. Pass `label` or `threshold`, or add the label mapping in [(c)](#c-optional-mappings-you-add-yourself).
 - **Evaluations page missing.** Turn on both feature flags in [Verify](#verify).
-- **Whole-number scores.** OTel JS encodes whole numbers as integers. The SDK's own log exporters re-encode score fields as doubles, and the template maps them as `double` either way.
+- **Whole-number scores.** OTel JS encodes whole numbers as integers. The OTLP/HTTP log exporter that `register()` creates and `AWSSigV4OTLPLogExporter` re-encode score fields as doubles; the gRPC log exporter and your own `logExporter` send them as `intValue`. The template maps them as `double` either way.

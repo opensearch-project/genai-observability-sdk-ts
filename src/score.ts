@@ -57,8 +57,10 @@ export interface ScoreOptions {
   /** `gen_ai.evaluation.name` (required), for example `"relevance"`. */
   name: string;
   /**
-   * `gen_ai.evaluation.score.value` (a double in OTel semconv). The SDK's OTLP
-   * log exporters send whole numbers as `doubleValue` too; see README.
+   * `gen_ai.evaluation.score.value` (a double in OTel semconv). The OTLP/HTTP
+   * log exporter register() creates and AWSSigV4OTLPLogExporter send whole
+   * numbers as `doubleValue` too; the gRPC log exporter and your own exporters
+   * send them as `intValue`. See README.
    */
   value?: number;
   /** Trace of the evaluated span. Without `spanId` the score is trace-level. */
