@@ -162,7 +162,7 @@ An unknown agent is left out, never invented. `evaluate()` also stamps the agent
 | `tracesEndpoint` | `string` | none | Full traces URL, used as-is. Pass with `logsEndpoint` (or `logExporter`) |
 | `logsEndpoint` | `string` | none | Full logs URL for evaluation events, used as-is. Pass with `tracesEndpoint` (or `exporter`) |
 | `protocol` | `"http" \| "grpc"` | Auto-detected per signal | Export protocol for all signals |
-| `sigv4` | `{ service?, region? }` | none | Sign traces and logs with AWS SigV4 (OTLP/HTTP only) |
+| `sigv4` | `{ service?, region? }` | none | Sign traces and logs with AWS SigV4 (OTLP/HTTP protobuf only) |
 | `serviceName` | `string` | `"unknown_service"` | `service.name` resource attribute |
 | `serviceVersion` | `string` | none | `service.version` resource attribute |
 | `batch` | `boolean` | `true` | Use BatchSpanProcessor when true |
@@ -240,6 +240,8 @@ await register({ endpoint: "http://collector:4318" });
 3. `OTEL_EXPORTER_OTLP_TRACES_PROTOCOL` / `OTEL_EXPORTER_OTLP_LOGS_PROTOCOL`
 4. `OTEL_EXPORTER_OTLP_PROTOCOL`
 5. URL scheme of that signal's endpoint (`grpc://` or `grpcs://` mean gRPC), else HTTP
+
+**OTLP/HTTP is binary protobuf** (`Content-Type: application/x-protobuf`), for every exporter `register()` builds, signed or not. The SDK never sends OTLP/JSON: Data Prepper and OSIS read OTLP/JSON hex trace and span ids as base64, which corrupts them so spans and evaluation results no longer match their traces.
 
 `grpc://` and `grpcs://` are mapped to `http://` / `https://` once the protocol is known. An `http://` or `https://` scheme does not select HTTP over the env vars (the OTel JS gRPC exporters take `http(s)://` URLs too).
 
@@ -663,7 +665,7 @@ const exporter = new AWSSigV4OTLPExporter({
 });
 ```
 
-`AWSSigV4OTLPLogExporter` takes the same options and signs OTLP/JSON log exports (evaluation events). `register({ sigv4 })` creates both for you; construct them yourself only to pass as `exporter` / `logExporter`.
+`AWSSigV4OTLPLogExporter` takes the same options and signs OTLP/HTTP protobuf log exports (evaluation events). Both send `Content-Type: application/x-protobuf` and sign exactly the bytes sent. `register({ sigv4 })` creates both for you; construct them yourself only to pass as `exporter` / `logExporter`.
 
 Requires `@aws-sdk/credential-providers` and `aws4` packages.
 

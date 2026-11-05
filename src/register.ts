@@ -83,12 +83,15 @@ export interface RegisterOptions {
    * Protocol for every signal. Default per signal: a `grpc://` / `grpcs://`
    * scheme on the URL passed in code, else OTEL_EXPORTER_OTLP_<SIGNAL>_PROTOCOL,
    * else OTEL_EXPORTER_OTLP_PROTOCOL, else the URL scheme, else HTTP.
+   * `"http"` is OTLP/HTTP with binary protobuf (`application/x-protobuf`);
+   * the SDK never sends OTLP/JSON, and an env value of `http/json` is sent as
+   * protobuf too.
    */
   protocol?: OtlpProtocol;
   /**
    * Sign both signals with AWS SigV4: register() creates an
    * AWSSigV4OTLPExporter for traces and an AWSSigV4OTLPLogExporter for logs.
-   * OTLP/HTTP (JSON) only.
+   * OTLP/HTTP (protobuf) only.
    */
   sigv4?: SigV4Options;
   projectName?: string;
@@ -353,7 +356,9 @@ export async function createSpanExporter(options: RegisterOptions): Promise<Span
     const { OTLPTraceExporter } = await import("@opentelemetry/exporter-trace-otlp-grpc");
     return new OTLPTraceExporter({ url: endpoint.url, metadata: await grpcMetadata(options.headers) });
   }
-  const { OTLPTraceExporter } = await import("@opentelemetry/exporter-trace-otlp-http");
+  // OTLP/HTTP is binary protobuf: OTLP/JSON hex ids are misread as base64 by
+  // some receivers (Data Prepper, OSIS), corrupting trace and span ids.
+  const { OTLPTraceExporter } = await import("@opentelemetry/exporter-trace-otlp-proto");
   return new OTLPTraceExporter({ url: endpoint.url, headers: options.headers });
 }
 
@@ -374,7 +379,7 @@ export async function createLogExporter(options: RegisterOptions): Promise<LogRe
     const { OTLPLogExporter } = await import("@opentelemetry/exporter-logs-otlp-grpc");
     return new OTLPLogExporter({ url: endpoint.url, metadata: await grpcMetadata(options.headers) });
   }
-  const { OTLPLogExporter } = await import("@opentelemetry/exporter-logs-otlp-http");
+  const { OTLPLogExporter } = await import("@opentelemetry/exporter-logs-otlp-proto");
   const exporter = new OTLPLogExporter({ url: endpoint.url, headers: options.headers });
   sendScoresAsDouble(exporter);
   return exporter;

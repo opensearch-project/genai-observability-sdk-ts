@@ -29,7 +29,13 @@ function resolveRegion(region?: string): string {
   return resolved;
 }
 
-/** POST an OTLP/JSON body to `endpoint`, signed with AWS SigV4. */
+/** Content type of every OTLP/HTTP request the SDK sends: binary protobuf. */
+export const OTLP_PROTOBUF_CONTENT_TYPE = 'application/x-protobuf';
+
+/**
+ * POST an OTLP protobuf body to `endpoint`, signed with AWS SigV4. The
+ * signature covers exactly the bytes sent.
+ */
 async function signAndPost(
   endpoint: string,
   service: string,
@@ -52,7 +58,7 @@ async function signAndPost(
       path: url.pathname + url.search,
       host: url.host,
       headers: {
-        'Content-Type': 'application/json',
+        'Content-Type': OTLP_PROTOBUF_CONTENT_TYPE,
         Host: url.host,
       },
       body,
@@ -98,8 +104,9 @@ async function drain(pending: Set<Promise<void>>): Promise<void> {
 }
 
 /**
- * An OTLP trace exporter that signs HTTP requests with AWS SigV4.
- * Uses JSON serialization and sends traces to an AWS endpoint (e.g., OSIS pipeline).
+ * An OTLP/HTTP trace exporter that signs requests with AWS SigV4. Sends
+ * binary protobuf (`application/x-protobuf`), so trace and span ids arrive as
+ * raw bytes, to an AWS endpoint (for example an OSIS pipeline).
  */
 export class AWSSigV4OTLPExporter implements SpanExporter {
   private _endpoint: string;
@@ -141,11 +148,7 @@ export class AWSSigV4OTLPExporter implements SpanExporter {
   }
 
   private async _export(spans: ReadableSpan[]): Promise<void> {
-    // @opentelemetry/otlp-transformer is a transitive dep of
-    // @opentelemetry/exporter-trace-otlp-http, available at runtime.
-    // @ts-expect-error — not in direct deps but guaranteed present
-    const transformer: { JsonTraceSerializer: { serializeRequest(spans: ReadableSpan[]): Uint8Array | undefined } } = await import('@opentelemetry/otlp-transformer');
-    const serialized = transformer.JsonTraceSerializer.serializeRequest(spans);
+    const serialized = loadTraceSerializer().serializeRequest(spans);
     if (!serialized) {
       throw new Error('Failed to serialize spans');
     }
@@ -153,27 +156,39 @@ export class AWSSigV4OTLPExporter implements SpanExporter {
   }
 }
 
-interface LogsSerializer {
-  serializeRequest(logs: ReadableLogRecord[]): Uint8Array | undefined;
+interface Serializer<T> {
+  serializeRequest(items: T[]): Uint8Array | undefined;
 }
-
-let logsSerializer: LogsSerializer | undefined;
+type LogsSerializer = Serializer<ReadableLogRecord>;
 
 /**
- * Load JsonLogsSerializer from the otlp-transformer that
- * @opentelemetry/exporter-logs-otlp-http depends on. The trace exporters pull
- * in an older otlp-transformer that does not serialize LogRecord.eventName,
- * so resolve relative to the logs exporter rather than from this package.
+ * Load a serializer from the otlp-transformer that `exporterPackage` depends
+ * on. Traces and logs are on different OTel JS lines with their own
+ * otlp-transformer (the traces one does not serialize LogRecord.eventName),
+ * so resolve relative to the matching protobuf exporter.
  */
+function loadSerializer<T>(exporterPackage: string, name: string): Serializer<T> {
+  const localRequire = createRequire(import.meta.url);
+  const exporterPath = localRequire.resolve(exporterPackage);
+  const transformer = createRequire(exporterPath)('@opentelemetry/otlp-transformer') as Record<
+    string,
+    Serializer<T>
+  >;
+  return transformer[name];
+}
+
+let traceSerializer: Serializer<ReadableSpan> | undefined;
+let logsSerializer: LogsSerializer | undefined;
+
+/** ProtobufTraceSerializer of @opentelemetry/exporter-trace-otlp-proto. */
+function loadTraceSerializer(): Serializer<ReadableSpan> {
+  traceSerializer ??= loadSerializer<ReadableSpan>('@opentelemetry/exporter-trace-otlp-proto', 'ProtobufTraceSerializer');
+  return traceSerializer;
+}
+
+/** ProtobufLogsSerializer of @opentelemetry/exporter-logs-otlp-proto. */
 function loadLogsSerializer(): LogsSerializer {
-  if (!logsSerializer) {
-    const localRequire = createRequire(import.meta.url);
-    const logsExporterPath = localRequire.resolve('@opentelemetry/exporter-logs-otlp-http');
-    const transformer = createRequire(logsExporterPath)('@opentelemetry/otlp-transformer') as {
-      JsonLogsSerializer: LogsSerializer;
-    };
-    logsSerializer = transformer.JsonLogsSerializer;
-  }
+  logsSerializer ??= loadSerializer<ReadableLogRecord>('@opentelemetry/exporter-logs-otlp-proto', 'ProtobufLogsSerializer');
   return logsSerializer;
 }
 
@@ -185,38 +200,157 @@ const DOUBLE_ATTRIBUTES: ReadonlySet<string> = new Set([
   "opensearch.gen_ai.evaluation.score.threshold",
 ]);
 
-interface OtlpKeyValue {
-  key?: string;
-  value?: { intValue?: number | string; doubleValue?: number };
+// Minimal protobuf reading and writing, enough to rewrite attribute values of
+// an ExportLogsServiceRequest. Field numbers from opentelemetry-proto:
+//   ExportLogsServiceRequest.resource_logs = 1, ResourceLogs.scope_logs = 2,
+//   ScopeLogs.log_records = 2, LogRecord.attributes = 6,
+//   KeyValue.key = 1, KeyValue.value = 2,
+//   AnyValue.int_value = 3 (varint), AnyValue.double_value = 4 (fixed64).
+
+const WIRE_VARINT = 0;
+const WIRE_FIXED64 = 1;
+const WIRE_LEN = 2;
+const WIRE_FIXED32 = 5;
+
+interface Field {
+  field: number;
+  wire: number;
+  /** Start of the tag. */
+  start: number;
+  /** End of the field. */
+  end: number;
+  /** Payload of a length-delimited field, or the varint value. */
+  payloadStart: number;
+  varint?: bigint;
+}
+
+function readVarint(buf: Uint8Array, pos: number): [bigint, number] {
+  let result = 0n;
+  let shift = 0n;
+  for (;;) {
+    if (pos >= buf.length) throw new Error('truncated protobuf varint');
+    const byte = buf[pos++];
+    result |= BigInt(byte & 0x7f) << shift;
+    if ((byte & 0x80) === 0) return [result, pos];
+    shift += 7n;
+  }
+}
+
+function writeVarint(value: bigint): number[] {
+  const out: number[] = [];
+  let v = BigInt.asUintN(64, value);
+  while (v > 0x7fn) {
+    out.push(Number(v & 0x7fn) | 0x80);
+    v >>= 7n;
+  }
+  out.push(Number(v));
+  return out;
+}
+
+function fieldsOf(buf: Uint8Array): Field[] {
+  const fields: Field[] = [];
+  let pos = 0;
+  while (pos < buf.length) {
+    const start = pos;
+    const [tag, afterTag] = readVarint(buf, pos);
+    const field = Number(tag >> 3n);
+    const wire = Number(tag & 7n);
+    pos = afterTag;
+    if (wire === WIRE_VARINT) {
+      const [value, next] = readVarint(buf, pos);
+      fields.push({ field, wire, start, end: next, payloadStart: pos, varint: value });
+      pos = next;
+    } else if (wire === WIRE_FIXED64 || wire === WIRE_FIXED32) {
+      const end = pos + (wire === WIRE_FIXED64 ? 8 : 4);
+      fields.push({ field, wire, start, end, payloadStart: pos });
+      pos = end;
+    } else if (wire === WIRE_LEN) {
+      const [length, payloadStart] = readVarint(buf, pos);
+      const end = payloadStart + Number(length);
+      fields.push({ field, wire, start, end, payloadStart });
+      pos = end;
+    } else {
+      throw new Error(`unsupported protobuf wire type ${wire}`);
+    }
+    if (pos > buf.length) throw new Error('truncated protobuf message');
+  }
+  return fields;
+}
+
+function concat(parts: Uint8Array[]): Uint8Array {
+  const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+  let offset = 0;
+  for (const p of parts) {
+    out.set(p, offset);
+    offset += p.length;
+  }
+  return out;
 }
 
 /**
- * Re-encode whole-number values of double-typed attributes in an OTLP/JSON
- * logs request as `doubleValue`. OTel JS encodes any integral JS number as
- * `intValue`, and the logs API has no way to ask for a double, so a score of
- * `1` would otherwise arrive as an int64.
+ * Rewrite the length-delimited fields numbered `field` of a message with
+ * `child`, copying every other byte as is. Returns `buf` itself when nothing
+ * changed.
+ */
+function rewriteChildren(
+  buf: Uint8Array,
+  field: number,
+  child: (payload: Uint8Array) => Uint8Array,
+): Uint8Array {
+  let changed = false;
+  const parts: Uint8Array[] = [];
+  for (const f of fieldsOf(buf)) {
+    if (f.field !== field || f.wire !== WIRE_LEN) {
+      parts.push(buf.subarray(f.start, f.end));
+      continue;
+    }
+    const payload = buf.subarray(f.payloadStart, f.end);
+    const rewritten = child(payload);
+    if (rewritten === payload) {
+      parts.push(buf.subarray(f.start, f.end));
+      continue;
+    }
+    changed = true;
+    parts.push(
+      new Uint8Array([...writeVarint(BigInt((field << 3) | WIRE_LEN)), ...writeVarint(BigInt(rewritten.length))]),
+      rewritten,
+    );
+  }
+  return changed ? concat(parts) : buf;
+}
+
+/** AnyValue with int_value -> the same value as double_value. */
+function intToDouble(anyValue: Uint8Array): Uint8Array {
+  const fields = fieldsOf(anyValue);
+  const int = fields.find(f => f.field === 3 && f.wire === WIRE_VARINT);
+  if (!int || fields.length !== 1) return anyValue;
+  const out = new Uint8Array(9);
+  out[0] = (4 << 3) | WIRE_FIXED64;
+  new DataView(out.buffer).setFloat64(1, Number(BigInt.asIntN(64, int.varint!)), true);
+  return out;
+}
+
+function rewriteKeyValue(kv: Uint8Array): Uint8Array {
+  const keyField = fieldsOf(kv).find(f => f.field === 1 && f.wire === WIRE_LEN);
+  if (!keyField) return kv;
+  const key = Buffer.from(kv.subarray(keyField.payloadStart, keyField.end)).toString('utf8');
+  if (!DOUBLE_ATTRIBUTES.has(key)) return kv;
+  return rewriteChildren(kv, 2, intToDouble);
+}
+
+/**
+ * Re-encode whole-number values of double-typed attributes (for example
+ * `gen_ai.evaluation.score.value`) in a protobuf ExportLogsServiceRequest as
+ * `double_value`. OTel JS encodes any integral JS number as `int_value`, and
+ * the logs API has no way to ask for a double, so a score of `1` would
+ * otherwise arrive as an int64. Every other byte is copied as is.
  */
 export function forceDoubleAttributes(serialized: Uint8Array): Uint8Array {
-  const text = Buffer.from(serialized).toString("utf8");
-  if (!text.includes('"intValue"')) return serialized;
-  const request = JSON.parse(text) as {
-    resourceLogs?: { scopeLogs?: { logRecords?: { attributes?: OtlpKeyValue[] }[] }[] }[];
-  };
-  let changed = false;
-  for (const rl of request.resourceLogs ?? []) {
-    for (const sl of rl.scopeLogs ?? []) {
-      for (const record of sl.logRecords ?? []) {
-        for (const kv of record.attributes ?? []) {
-          const value = kv.value;
-          if (!kv.key || !DOUBLE_ATTRIBUTES.has(kv.key) || value?.intValue === undefined) continue;
-          value.doubleValue = Number(value.intValue);
-          delete value.intValue;
-          changed = true;
-        }
-      }
-    }
-  }
-  return changed ? new Uint8Array(Buffer.from(JSON.stringify(request), "utf8")) : serialized;
+  return rewriteChildren(serialized, 1, (resourceLogs) =>
+    rewriteChildren(resourceLogs, 2, (scopeLogs) =>
+      rewriteChildren(scopeLogs, 2, (logRecord) => rewriteChildren(logRecord, 6, rewriteKeyValue)),
+    ),
+  );
 }
 
 function doubleAttributesSerializer(base: LogsSerializer): LogsSerializer {
@@ -229,10 +363,10 @@ function doubleAttributesSerializer(base: LogsSerializer): LogsSerializer {
 }
 
 /**
- * Make an `@opentelemetry/exporter-logs-otlp-http` OTLPLogExporter send
+ * Make an `@opentelemetry/exporter-logs-otlp-proto` OTLPLogExporter send
  * double-typed attributes (for example `gen_ai.evaluation.score.value`) as
- * `doubleValue` even when the value is a whole number. Wraps the exporter's
- * OTLP/JSON serializer; returns false (and changes nothing) when the exporter
+ * `double_value` even when the value is a whole number. Wraps the exporter's
+ * protobuf serializer; returns false (and changes nothing) when the exporter
  * does not have the expected internals.
  */
 export function sendScoresAsDouble(exporter: unknown): boolean {
@@ -245,9 +379,10 @@ export function sendScoresAsDouble(exporter: unknown): boolean {
 }
 
 /**
- * An OTLP log exporter that signs HTTP requests with AWS SigV4 (OTLP/JSON).
- * Used for `gen_ai.evaluation.result` events sent to an AWS endpoint
- * (for example an OSIS logs pipeline).
+ * An OTLP/HTTP log exporter that signs requests with AWS SigV4. Sends binary
+ * protobuf (`application/x-protobuf`), with whole-number scores as
+ * `double_value`. Used for `gen_ai.evaluation.result` events sent to an AWS
+ * endpoint (for example an OSIS logs pipeline).
  */
 export class AWSSigV4OTLPLogExporter implements LogRecordExporter {
   private _endpoint: string;
