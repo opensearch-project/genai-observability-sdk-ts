@@ -406,7 +406,7 @@ assert(evalResult2.cases[0].error === "task failed", "evaluate: error message ca
 // ── 23. register() — default endpoint ────────────────────────────────
 console.log("\n=== 23. register() ===");
 
-assert(DEFAULT_ENDPOINT === "http://localhost:21890/opentelemetry/v1/traces", "DEFAULT_ENDPOINT value");
+assert(DEFAULT_ENDPOINT === "http://localhost:4318/v1/traces", "DEFAULT_ENDPOINT value");
 
 // ── 24. Retrieval — parseMessages ────────────────────────────────────
 console.log("\n=== 24. Retrieval — parseMessages ===");

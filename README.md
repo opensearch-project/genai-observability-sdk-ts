@@ -52,7 +52,7 @@ npm install @aws-sdk/credential-providers aws4
 import { register, observe, Op, enrich, score } from "@opensearch-project/genai-observability-sdk-ts";
 
 // 1. Initialize tracing (one line)
-await register({ endpoint: "http://localhost:21890/opentelemetry" });
+await register(); // OTLP/HTTP to http://localhost:4318 (local OTel Collector)
 
 // 2. Trace your functions
 const search = observe(
@@ -158,9 +158,9 @@ An unknown agent is left out, never invented. `evaluate()` also stamps the agent
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
-| `endpoint` | `string` | See [Endpoints](#endpoints-traces-and-evaluation-logs) | OTLP base URL for all signals (same as `OTEL_EXPORTER_OTLP_ENDPOINT`) |
-| `tracesEndpoint` | `string` | none | Full traces URL, used as-is |
-| `logsEndpoint` | `string` | none | Full logs URL for evaluation events, used as-is |
+| `endpoint` | `string` | `http://localhost:4318` (see [Endpoints](#endpoints-traces-and-evaluation-logs)) | OTLP base URL for all signals, port included (same as `OTEL_EXPORTER_OTLP_ENDPOINT`). A path ending in `/v1/traces` or `/v1/logs` throws |
+| `tracesEndpoint` | `string` | none | Full traces URL, used as-is. Pass with `logsEndpoint` (or `logExporter`) |
+| `logsEndpoint` | `string` | none | Full logs URL for evaluation events, used as-is. Pass with `tracesEndpoint` (or `exporter`) |
 | `protocol` | `"http" \| "grpc"` | Auto-detected per signal | Export protocol for all signals |
 | `sigv4` | `{ service?, region? }` | none | Sign traces and logs with AWS SigV4 (OTLP/HTTP only) |
 | `serviceName` | `string` | `"unknown_service"` | `service.name` resource attribute |
@@ -178,13 +178,47 @@ An unknown agent is left out, never invented. `evaluate()` also stamps the agent
 
 Spans and evaluation events (`gen_ai.evaluation.result`) are separate OTLP signals. `register()` resolves each one with the same rule, following the [OTel exporter spec](https://opentelemetry.io/docs/specs/otel/protocol/exporter/). Options passed in code always win over env vars, as in the OTel SDK exporters.
 
+There are no port options: the port is part of each URL (`endpoint`, `tracesEndpoint`, `logsEndpoint`).
+
+**Pick one of three setups:**
+
+**(a) Local OTel Collector or the observability stack.** Nothing to set: the default base is the OTel standard `http://localhost:4318` (`DEFAULT_BASE_ENDPOINT`), so traces go to `/v1/traces` and logs to `/v1/logs`. Over gRPC the default is `http://localhost:4317`.
+
+```typescript
+await register({ serviceName: "my-app" });
+// the same, explicitly:
+await register({ endpoint: "http://localhost:4318", serviceName: "my-app" });
+// gRPC: traces and logs both go to localhost:4317
+await register({ endpoint: "grpc://localhost:4317", serviceName: "my-app" });
+```
+
+or with env vars only: `export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318`.
+
+**(b) One OSIS or Data Prepper `otlp` source** that serves both signals at `/<pipeline>/v1/traces` and `/<pipeline>/v1/logs`. Pass the base, path prefix included. For OSIS, sign with SigV4 service `osis`:
+
+```typescript
+await register({
+  endpoint: "https://<host>/<pipeline>", // -> /<pipeline>/v1/traces and /<pipeline>/v1/logs
+  sigv4: { service: "osis", region: "us-east-1" }, // OSIS only
+});
+```
+
+**(c) Separate trace and logs pipelines** (`otel_trace_source` and `otel_logs_source`). Pass both full URLs; each is used as-is. On Data Prepper the default ports are 21890 (traces) and 21892 (logs); set `path:` on each source (for example `/v1/traces` and `/v1/logs`) and `unframed_requests: true` so plain OTLP/HTTP requests are accepted. On OSIS, add `sigv4`.
+
+```typescript
+await register({
+  tracesEndpoint: "http://data-prepper:21890/v1/traces",
+  logsEndpoint: "http://data-prepper:21892/v1/logs",
+});
+```
+
 **Endpoint resolution, per signal (traces and logs), first match wins:**
 
 1. `tracesEndpoint` / `logsEndpoint` parameter: full URL, used as-is
-2. `endpoint` parameter: base URL, with `/v1/traces` or `/v1/logs` appended over HTTP, as-is over gRPC (the deprecated traces URL form of `endpoint`, see below, takes this place too)
+2. `endpoint` parameter: base URL, with `/v1/traces` or `/v1/logs` appended over HTTP, as-is over gRPC
 3. `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` / `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`: full URL, used as-is
 4. `OTEL_EXPORTER_OTLP_ENDPOINT`: base URL, same rule as `endpoint`
-5. Nothing configured: the Data Prepper base `http://localhost:21890/opentelemetry` (`DEFAULT_BASE_ENDPOINT`), so `/v1/traces` and `/v1/logs`
+5. Nothing configured: `http://localhost:4318` (`http://localhost:4317` over gRPC), same rule
 
 For example, with `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=http://env-logs:4318/v1/logs` set:
 
@@ -192,11 +226,12 @@ For example, with `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=http://env-logs:4318/v1/logs
 await register({ endpoint: "http://collector:4318" });
 // traces -> http://collector:4318/v1/traces
 // logs   -> http://collector:4318/v1/logs   (endpoint beats the env var)
-
-await register({ tracesEndpoint: "http://collector:4318/v1/traces" });
-// traces -> http://collector:4318/v1/traces
-// logs   -> http://env-logs:4318/v1/logs    (no logsEndpoint or endpoint in code)
 ```
+
+**Errors.** `register()` throws:
+
+- when `endpoint` (or `OTEL_EXPORTER_OTLP_ENDPOINT`) has a path ending in `/v1/traces` or `/v1/logs`: it is the OTLP base URL. Remove the suffix (`http://host:4318`), or pass `tracesEndpoint` and `logsEndpoint`.
+- when only one of `tracesEndpoint` / `logsEndpoint` is passed. `logExporter` (or `logs: false`) stands in for `logsEndpoint`, and `exporter` for `tracesEndpoint`.
 
 **Protocol per signal (priority order):**
 
@@ -208,37 +243,9 @@ await register({ tracesEndpoint: "http://collector:4318/v1/traces" });
 
 `grpc://` and `grpcs://` are mapped to `http://` / `https://` once the protocol is known. An `http://` or `https://` scheme does not select HTTP over the env vars (the OTel JS gRPC exporters take `http(s)://` URLs too).
 
-`exporter` and `logExporter` are escape hatches: each replaces one signal's exporter and nothing is derived from it. Without `exporter`, every signal has an endpoint (the Data Prepper default at worst). With `exporter` and no logs destination (`logExporter`, or any of steps 1 to 4 above for logs: `logsEndpoint`, `endpoint`, `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`, `OTEL_EXPORTER_OTLP_ENDPOINT`), `register()` does not set up a logs pipeline: it warns once, and evaluation events go to the global `LoggerProvider` (a no-op unless you registered one). Pass `logsEndpoint` or `logExporter` to export them.
+`exporter` and `logExporter` are escape hatches: each replaces one signal's exporter and nothing is derived from it. Without `exporter`, every signal has an endpoint (the default at worst). With `exporter` and no logs destination (`logExporter`, or any of steps 1 to 4 above for logs: `logsEndpoint`, `endpoint`, `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`, `OTEL_EXPORTER_OTLP_ENDPOINT`), `register()` does not set up a logs pipeline: it warns once, and evaluation events go to the global `LoggerProvider` (a no-op unless you registered one). Pass `logsEndpoint` or `logExporter` to export them.
 
-**Local OTel Collector or Data Prepper.** One base URL serves both signals:
-
-```typescript
-// traces -> http://localhost:4318/v1/traces, logs -> http://localhost:4318/v1/logs
-await register({ endpoint: "http://localhost:4318", serviceName: "my-app" });
-
-// gRPC: traces and logs both go to localhost:4317
-await register({ endpoint: "grpc://localhost:4317", serviceName: "my-app" });
-```
-
-or with env vars only:
-
-```bash
-export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318
-```
-
-**AWS OSIS: one pipeline per signal.** An OpenSearch Ingestion traces pipeline does not accept logs. Create a separate logs pipeline (OTel logs source, routed to `otel-v1-genai-evaluation`) and pass both URLs. With `sigv4`, `register()` builds an `AWSSigV4OTLPExporter` and an `AWSSigV4OTLPLogExporter` with the same service and region:
-
-```typescript
-import { register } from "@opensearch-project/genai-observability-sdk-ts";
-
-await register({
-  tracesEndpoint: "https://traces-pipeline.us-east-1.osis.amazonaws.com/v1/traces",
-  logsEndpoint: "https://logs-pipeline.us-east-1.osis.amazonaws.com/v1/logs",
-  sigv4: { service: "osis", region: "us-east-1" },
-});
-```
-
-**Migrating from a traces URL in `endpoint`.** Before this release `endpoint` was the full traces URL. An `endpoint` whose path ends in `traces` (for example `http://c:4318/v1/traces` or `https://gw/otlp/traces`) is still accepted for one release: over HTTP traces go to it as-is, logs go to the same URL with that last segment replaced by `logs` (`/v1/logs`, `/otlp/logs`), and `register()` prints a deprecation warning. Pass the base URL, or `tracesEndpoint` and `logsEndpoint`, instead.
+**Migrating from a traces URL in `endpoint`.** Before this release `endpoint` was the full traces URL and the default was `http://localhost:21890/opentelemetry/v1/traces`. `endpoint` is now always the base URL, and a value ending in `/v1/traces` throws. Pass the base (`http://host:4318`), or `tracesEndpoint` and `logsEndpoint`. To keep sending to a Data Prepper `otlp` source on its old default, pass `endpoint: "http://localhost:21890"` and set `traces_path` / `logs_path` and `unframed_requests: true` on the source (see the [guide](docs/agent-evaluations.md#ingestion)).
 
 **Scores over gRPC.** The OTLP/HTTP log exporters send whole-number scores as `doubleValue` (see [Scores are doubles](#score)); the gRPC log exporter sends them as `intValue`. The evaluation index maps them as `double` either way.
 
@@ -664,7 +671,7 @@ Requires `@aws-sdk/credential-providers` and `aws4` packages.
 
 | Environment Variable | Description | Default |
 |---|---|---|
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | Base OTLP URL for all signals (`/v1/traces` and `/v1/logs` appended over HTTP, as-is over gRPC) | Data Prepper base |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | Base OTLP URL for all signals (`/v1/traces` and `/v1/logs` appended over HTTP, as-is over gRPC). `endpoint` wins over it | `http://localhost:4318` |
 | `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | Full OTLP traces URL. `tracesEndpoint` and `endpoint` win over it | none |
 | `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` | Full OTLP logs URL for evaluation events. `logsEndpoint` and `endpoint` win over it | none |
 | `OTEL_EXPORTER_OTLP_PROTOCOL` | Protocol for all signals (`grpc`, `http/protobuf`, `http/json`) | none |

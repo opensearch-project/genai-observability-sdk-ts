@@ -26,8 +26,15 @@ import {
   TraceOnlyContextProcessor,
 } from "./logs.js";
 
-/** Data Prepper OTLP base URL, used when no endpoint is configured. */
-export const DEFAULT_BASE_ENDPOINT = "http://localhost:21890/opentelemetry";
+/**
+ * OTLP/HTTP base URL used when no endpoint is configured: the OTel standard
+ * `http://localhost:4318` (an OTel Collector, such as the one in the
+ * OpenSearch observability stack).
+ */
+export const DEFAULT_BASE_ENDPOINT = "http://localhost:4318";
+
+/** OTLP/gRPC URL used when no endpoint is configured and the protocol is gRPC. */
+export const DEFAULT_GRPC_ENDPOINT = "http://localhost:4317";
 
 /** Default OTLP/HTTP traces URL: DEFAULT_BASE_ENDPOINT + `/v1/traces`. */
 export const DEFAULT_ENDPOINT = `${DEFAULT_BASE_ENDPOINT}/v1/traces`;
@@ -50,23 +57,26 @@ export interface SigV4Options {
 
 export interface RegisterOptions {
   /**
-   * OTLP base URL for all signals (same meaning as OTEL_EXPORTER_OTLP_ENDPOINT).
-   * Over HTTP the SDK appends `/v1/traces` and `/v1/logs`; over gRPC the URL is
-   * used as-is for both. Deprecated form, accepted for one release with a
-   * warning: a full traces URL, whose path ends in `traces` (for example
-   * `http://c:4318/v1/traces` or `https://gw/otlp/traces`). Over HTTP it is then
-   * used as-is for traces, and logs go to the same URL with that last segment
-   * replaced by `logs`.
+   * OTLP base URL for all signals (same meaning as OTEL_EXPORTER_OTLP_ENDPOINT),
+   * port included, for example `http://localhost:4318` or
+   * `https://<host>/<pipeline>`. Over HTTP the SDK appends `/v1/traces` and
+   * `/v1/logs`; over gRPC the URL is used as-is for both. A path ending in
+   * `/v1/traces` or `/v1/logs` throws: pass the base, or `tracesEndpoint` and
+   * `logsEndpoint`.
    */
   endpoint?: string;
   /**
-   * Full OTLP traces URL, used as-is. Overrides `endpoint` and every
-   * OTEL_EXPORTER_OTLP_* endpoint env var for traces.
+   * Full OTLP traces URL, port included, used as-is. Overrides `endpoint` and
+   * every OTEL_EXPORTER_OTLP_* endpoint env var for traces. Pass it together
+   * with `logsEndpoint` (or `logExporter`, or `logs: false`), else register()
+   * throws.
    */
   tracesEndpoint?: string;
   /**
-   * Full OTLP logs URL for evaluation events, used as-is. Overrides `endpoint`
-   * and every OTEL_EXPORTER_OTLP_* endpoint env var for logs.
+   * Full OTLP logs URL for evaluation events, port included, used as-is.
+   * Overrides `endpoint` and every OTEL_EXPORTER_OTLP_* endpoint env var for
+   * logs. Pass it together with `tracesEndpoint` (or `exporter`), else
+   * register() throws.
    */
   logsEndpoint?: string;
   /**
@@ -123,37 +133,40 @@ const INSTRUMENTOR_PACKAGES = [
   "@opentelemetry/instrumentation-openai",
 ];
 
-/** Traces and logs URLs of an `endpoint` option written as a full traces URL (deprecated form). */
-interface LegacyTracesEndpoint {
-  traces: string;
-  logs: string;
-  /** The base URL, when the path ends in `/v1/traces`. */
-  base?: string;
+const SIGNAL_PATH_RE = /\/v1\/(traces|logs)$/;
+
+/**
+ * Throw when a base URL (`endpoint` or OTEL_EXPORTER_OTLP_ENDPOINT) has a path
+ * ending in `/v1/traces` or `/v1/logs`: that is a signal URL, not a base.
+ */
+function assertBaseUrl(url: string, source: string): void {
+  const path = url.trim().split(/[?#]/)[0].replace(/\/+$/, "");
+  const match = SIGNAL_PATH_RE.exec(path);
+  if (!match) return;
+  throw new Error(
+    `register(): ${source} "${url}" ends in /v1/${match[1]}. ` +
+      `endpoint is the OTLP base URL (e.g. http://host:4318). ` +
+      `Remove '/v1/${match[1]}', or pass tracesEndpoint and logsEndpoint.`,
+  );
 }
 
 /**
- * Parse the deprecated form of `endpoint`: a full traces URL, whose path's last
- * segment is `traces`. Null for a base URL.
+ * Throw when only one of `tracesEndpoint` / `logsEndpoint` is passed and the
+ * other signal has no destination of its own in code. `exporter` stands in for
+ * `tracesEndpoint`; `logExporter` (or `logs: false`) for `logsEndpoint`.
  */
-function legacyTracesEndpoint(endpoint: string): LegacyTracesEndpoint | null {
-  const traces = endpoint.trim();
-  let url: URL;
-  try {
-    url = new URL(traces);
-  } catch {
-    return null;
-  }
-  const segments = url.pathname.replace(/\/+$/, "").split("/");
-  if (segments[segments.length - 1] !== "traces") return null;
-  const parent = segments.slice(0, -1);
-  url.pathname = [...parent, "logs"].join("/");
-  const logsUrl = url.toString();
-  let base: string | undefined;
-  if (parent[parent.length - 1] === "v1") {
-    url.pathname = parent.slice(0, -1).join("/");
-    base = url.toString().replace(/\/+$/, "");
-  }
-  return { traces, logs: logsUrl, base };
+function assertSignalEndpointsPaired(options: RegisterOptions): void {
+  const tracesSet = Boolean(options.tracesEndpoint || options.exporter);
+  const logsSet = Boolean(options.logsEndpoint || options.logExporter || options.logs === false);
+  const missing =
+    options.tracesEndpoint && !logsSet ? "logsEndpoint" : options.logsEndpoint && !tracesSet ? "tracesEndpoint" : null;
+  if (!missing) return;
+  const given = missing === "logsEndpoint" ? "tracesEndpoint" : "logsEndpoint";
+  throw new Error(
+    `register(): ${given} was passed without ${missing}. tracesEndpoint and logsEndpoint ` +
+      `must be passed together (logExporter can stand in for logsEndpoint, exporter for ` +
+      `tracesEndpoint). Or pass endpoint, the OTLP base URL for both signals.`,
+  );
 }
 
 function parseProtocol(value: string | undefined, source: string): OtlpProtocol | undefined {
@@ -211,11 +224,13 @@ export interface SignalEndpoint {
  * win over env vars, as in the OTel SDK exporters:
  *
  * 1. `tracesEndpoint` / `logsEndpoint` (full URL, used as-is)
- * 2. `endpoint` (base URL) + `/v1/<signal>` over HTTP, as-is over gRPC. The
- *    deprecated traces URL form of `endpoint` takes this place too.
+ * 2. `endpoint` (base URL) + `/v1/<signal>` over HTTP, as-is over gRPC
  * 3. OTEL_EXPORTER_OTLP_<SIGNAL>_ENDPOINT (full URL, used as-is)
  * 4. OTEL_EXPORTER_OTLP_ENDPOINT (base URL, same rule as `endpoint`)
- * 5. DEFAULT_BASE_ENDPOINT (base URL, same rule)
+ * 5. DEFAULT_BASE_ENDPOINT (`http://localhost:4318`, same rule), or
+ *    DEFAULT_GRPC_ENDPOINT (`http://localhost:4317`) over gRPC
+ *
+ * A base URL whose path ends in `/v1/traces` or `/v1/logs` throws.
  *
  * The protocol comes from resolveSignalProtocol() on the chosen URL. The
  * returned URL has an http:// or https:// scheme (`grpc://` and `grpcs://`
@@ -229,18 +244,20 @@ export function resolveSignalEndpoint(
   if (own) return fullUrl(signal, options, own, true);
 
   if (options.endpoint) {
-    const protocol = resolveSignalProtocol(signal, options, options.endpoint, true);
-    // Deprecated: `endpoint` written as a full traces URL (see RegisterOptions.endpoint).
-    const legacy = protocol === "http" ? legacyTracesEndpoint(options.endpoint) : null;
-    if (legacy) return { url: httpScheme(signal === "traces" ? legacy.traces : legacy.logs), protocol };
-    return baseUrl(signal, options.endpoint, protocol);
+    assertBaseUrl(options.endpoint, "endpoint");
+    return baseUrl(signal, options.endpoint, resolveSignalProtocol(signal, options, options.endpoint, true));
   }
 
   const envFull = process.env[`OTEL_EXPORTER_OTLP_${signal.toUpperCase()}_ENDPOINT`];
   if (envFull) return fullUrl(signal, options, envFull, false);
 
-  const base = process.env.OTEL_EXPORTER_OTLP_ENDPOINT || DEFAULT_BASE_ENDPOINT;
-  return baseUrl(signal, base, resolveSignalProtocol(signal, options, base));
+  const envBase = process.env.OTEL_EXPORTER_OTLP_ENDPOINT;
+  if (envBase) {
+    assertBaseUrl(envBase, "OTEL_EXPORTER_OTLP_ENDPOINT");
+    return baseUrl(signal, envBase, resolveSignalProtocol(signal, options, envBase));
+  }
+  const protocol = resolveSignalProtocol(signal, options, DEFAULT_BASE_ENDPOINT);
+  return baseUrl(signal, protocol === "grpc" ? DEFAULT_GRPC_ENDPOINT : DEFAULT_BASE_ENDPOINT, protocol);
 }
 
 /** A full signal URL, used as-is. */
@@ -261,8 +278,7 @@ function baseUrl(signal: OtlpSignal, base: string, protocol: OtlpProtocol): Sign
 
 /**
  * True when a logs destination is configured, that is when
- * resolveSignalEndpoint("logs") would not fall back to the Data Prepper
- * default: `logsEndpoint`, `endpoint`, OTEL_EXPORTER_OTLP_LOGS_ENDPOINT or
+ * resolveSignalEndpoint("logs") would not fall back to the default: `logsEndpoint`, `endpoint`, OTEL_EXPORTER_OTLP_LOGS_ENDPOINT or
  * OTEL_EXPORTER_OTLP_ENDPOINT (same order).
  */
 function hasLogsDestination(options: RegisterOptions): boolean {
@@ -474,38 +490,45 @@ async function tryAutoInstrument(): Promise<void> {
  *
  * 1. `tracesEndpoint` / `logsEndpoint`: full URL, used as-is
  * 2. `endpoint`: base URL, `/v1/<signal>` appended over HTTP, as-is over gRPC
- *    (the deprecated traces URL form of `endpoint` takes this place)
  * 3. OTEL_EXPORTER_OTLP_TRACES_ENDPOINT / OTEL_EXPORTER_OTLP_LOGS_ENDPOINT:
  *    full URL, used as-is
  * 4. OTEL_EXPORTER_OTLP_ENDPOINT: base URL, same rule as `endpoint`
- * 5. the Data Prepper base DEFAULT_BASE_ENDPOINT, same rule
+ * 5. `http://localhost:4318` (DEFAULT_BASE_ENDPOINT), same rule; over gRPC
+ *    `http://localhost:4317`
+ *
+ * Throws when a base URL (`endpoint` or OTEL_EXPORTER_OTLP_ENDPOINT) has a
+ * path ending in `/v1/traces` or `/v1/logs`, and when only one of
+ * `tracesEndpoint` / `logsEndpoint` is passed (`exporter` and `logExporter`
+ * stand in for them). There are no port options: the port is part of each URL.
  *
  * Protocol, per signal: `protocol`, else a `grpc://` / `grpcs://` scheme on a
  * URL passed in code, else OTEL_EXPORTER_OTLP_<SIGNAL>_PROTOCOL, else
  * OTEL_EXPORTER_OTLP_PROTOCOL, else the URL scheme, else HTTP.
  *
  * @example
- * // OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=http://env-logs:4318/v1/logs is set.
- * await register({ endpoint: "http://collector:4318" });
- * // traces -> http://collector:4318/v1/traces
- * // logs   -> http://collector:4318/v1/logs (endpoint beats the env var)
+ * // (a) Local OTel Collector or the observability stack: nothing to set.
+ * await register();                                   // http://localhost:4318/v1/{traces,logs}
+ * await register({ endpoint: "http://localhost:4318" }); // the same
+ *
+ * // (b) One OSIS or Data Prepper `otlp` source serving
+ * // /<pipeline>/v1/traces and /<pipeline>/v1/logs:
+ * await register({
+ *   endpoint: "https://<host>/<pipeline>",
+ *   sigv4: { service: "osis", region: "us-east-1" }, // OSIS only
+ * });
+ *
+ * // (c) Separate trace and logs pipelines (otel_trace_source, otel_logs_source):
+ * await register({
+ *   tracesEndpoint: "http://data-prepper:21890/v1/traces",
+ *   logsEndpoint: "http://data-prepper:21892/v1/logs",
+ * });
  */
 export async function register(
   options: RegisterOptions = {},
 ): Promise<BasicTracerProvider> {
+  assertSignalEndpointsPaired(options);
+  if (options.endpoint) assertBaseUrl(options.endpoint, "endpoint");
   setAgentDefaults(options.agentName, options.agentVersion);
-  const legacy = options.endpoint ? legacyTracesEndpoint(options.endpoint) : null;
-  if (legacy) {
-    const fix = legacy.base
-      ? `pass the base ("${legacy.base}"), or tracesEndpoint and logsEndpoint`
-      : `pass tracesEndpoint ("${legacy.traces}") and logsEndpoint`;
-    console.warn(
-      `[opensearch-genai-observability-sdk-ts] register(): endpoint "${options.endpoint}" is a ` +
-        `traces URL. endpoint is now the OTLP base URL for all signals. For this release it is ` +
-        `still used as the traces URL over HTTP, with logs sent to "${legacy.logs}"; ${fix}. ` +
-        `This form is removed in a future release.`,
-    );
-  }
 
   const serviceName =
     options.serviceName ?? options.projectName ?? "unknown_service";

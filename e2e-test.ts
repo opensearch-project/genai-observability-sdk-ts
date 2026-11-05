@@ -310,7 +310,7 @@ check(errEval.summary.errorCount === 1, "error counted");
 // 14. register() — default endpoint
 // =====================================================================
 console.log("\n--- 14. register() ---");
-check(DEFAULT_ENDPOINT === "http://localhost:21890/opentelemetry/v1/traces", "default endpoint");
+check(DEFAULT_ENDPOINT === "http://localhost:4318/v1/traces", "default endpoint");
 
 // =====================================================================
 // 15. AWSSigV4OTLPExporter

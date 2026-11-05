@@ -4,6 +4,7 @@
 export {
   register,
   DEFAULT_BASE_ENDPOINT,
+  DEFAULT_GRPC_ENDPOINT,
   DEFAULT_ENDPOINT,
   DEFAULT_LOGS_ENDPOINT,
 } from './register.js';

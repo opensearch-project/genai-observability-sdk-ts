@@ -21,6 +21,7 @@ import {
   grpcMetadata,
   resetRegisterWarnings,
   DEFAULT_BASE_ENDPOINT,
+  DEFAULT_GRPC_ENDPOINT,
   DEFAULT_ENDPOINT,
   DEFAULT_LOGS_ENDPOINT,
 } from '../src/register.js';
@@ -29,10 +30,11 @@ import { getSdkLoggerProvider, setSdkLoggerProvider } from '../src/logs.js';
 import { AWSSigV4OTLPExporter, AWSSigV4OTLPLogExporter } from '../src/exporters.js';
 
 describe('default endpoints', () => {
-  it('derive from the Data Prepper base URL', () => {
-    expect(DEFAULT_BASE_ENDPOINT).toBe('http://localhost:21890/opentelemetry');
-    expect(DEFAULT_ENDPOINT).toBe('http://localhost:21890/opentelemetry/v1/traces');
-    expect(DEFAULT_LOGS_ENDPOINT).toBe('http://localhost:21890/opentelemetry/v1/logs');
+  it('are the OTel standard localhost:4318 (HTTP) and localhost:4317 (gRPC)', () => {
+    expect(DEFAULT_BASE_ENDPOINT).toBe('http://localhost:4318');
+    expect(DEFAULT_ENDPOINT).toBe('http://localhost:4318/v1/traces');
+    expect(DEFAULT_LOGS_ENDPOINT).toBe('http://localhost:4318/v1/logs');
+    expect(DEFAULT_GRPC_ENDPOINT).toBe('http://localhost:4317');
   });
 });
 
@@ -195,9 +197,45 @@ describe('resolveSignalEndpoint', () => {
     process.env = originalEnv;
   });
 
-  it('uses the Data Prepper base for both signals when nothing is configured', () => {
-    expect(resolveSignalEndpoint('traces', {})).toEqual({ url: DEFAULT_ENDPOINT, protocol: 'http' });
-    expect(resolveSignalEndpoint('logs', {})).toEqual({ url: DEFAULT_LOGS_ENDPOINT, protocol: 'http' });
+  it('uses http://localhost:4318 for both signals when nothing is configured', () => {
+    expect(resolveSignalEndpoint('traces', {})).toEqual({ url: 'http://localhost:4318/v1/traces', protocol: 'http' });
+    expect(resolveSignalEndpoint('logs', {})).toEqual({ url: 'http://localhost:4318/v1/logs', protocol: 'http' });
+  });
+
+  it('uses http://localhost:4317 as-is when nothing is configured and the protocol is gRPC', () => {
+    process.env.OTEL_EXPORTER_OTLP_PROTOCOL = 'grpc';
+    expect(resolveSignalEndpoint('traces', {})).toEqual({ url: 'http://localhost:4317', protocol: 'grpc' });
+    expect(resolveSignalEndpoint('logs', { protocol: 'grpc' })).toEqual({ url: 'http://localhost:4317', protocol: 'grpc' });
+  });
+
+  it('a base URL with a pipeline path gets /v1/<signal> appended (one OSIS or Data Prepper otlp source)', () => {
+    const options = { endpoint: 'https://pipe.example.com/my-pipeline/' };
+    expect(resolveSignalEndpoint('traces', options).url).toBe('https://pipe.example.com/my-pipeline/v1/traces');
+    expect(resolveSignalEndpoint('logs', options).url).toBe('https://pipe.example.com/my-pipeline/v1/logs');
+  });
+
+  it.each([
+    ['http://c:4318/v1/traces', 'traces'],
+    ['http://c:4318/v1/traces/', 'traces'],
+    ['https://gw/pipe/v1/logs', 'logs'],
+    ['http://c:4318/v1/traces?x=1', 'traces'],
+    ['grpc://c:4317/v1/traces', 'traces'],
+  ])('endpoint %s throws with a migration message', (endpoint, signal) => {
+    for (const s of ['traces', 'logs'] as const) {
+      expect(() => resolveSignalEndpoint(s, { endpoint })).toThrow(
+        `endpoint is the OTLP base URL (e.g. http://host:4318). Remove '/v1/${signal}', or pass tracesEndpoint and logsEndpoint.`,
+      );
+    }
+  });
+
+  it('OTEL_EXPORTER_OTLP_ENDPOINT ending in /v1/traces throws too', () => {
+    process.env.OTEL_EXPORTER_OTLP_ENDPOINT = 'http://env:4318/v1/traces';
+    expect(() => resolveSignalEndpoint('traces', {})).toThrow(/OTEL_EXPORTER_OTLP_ENDPOINT .*Remove '\/v1\/traces'/);
+  });
+
+  it('a path that ends in traces without /v1, or has /v1/traces in the middle, is a base URL', () => {
+    expect(resolveSignalEndpoint('logs', { endpoint: 'https://gw/otlp/traces' }).url).toBe('https://gw/otlp/traces/v1/logs');
+    expect(resolveSignalEndpoint('logs', { endpoint: 'https://gw/v1/traces/x' }).url).toBe('https://gw/v1/traces/x/v1/logs');
   });
 
   it('endpoint is the base for all signals over HTTP', () => {
@@ -239,15 +277,6 @@ describe('resolveSignalEndpoint', () => {
     const options = { endpoint: 'grpc://base:4317' };
     expect(resolveSignalEndpoint('traces', options)).toEqual({ url: 'http://base:4317', protocol: 'grpc' });
     expect(resolveSignalEndpoint('logs', options)).toEqual({ url: 'http://base:4317', protocol: 'grpc' });
-  });
-
-  it('a legacy traces URL in endpoint keeps the place of endpoint, ahead of the env vars', () => {
-    process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT = 'http://env-traces/ingest';
-    process.env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT = 'http://env-logs/ingest';
-    const options = { endpoint: 'https://gw/otlp/traces' };
-    expect(resolveSignalEndpoint('traces', options).url).toBe('https://gw/otlp/traces');
-    expect(resolveSignalEndpoint('logs', options).url).toBe('https://gw/otlp/logs');
-    expect(resolveSignalEndpoint('logs', { ...options, logsEndpoint: 'http://l/y' }).url).toBe('http://l/y');
   });
 
   it('a per-signal env var beats OTEL_EXPORTER_OTLP_ENDPOINT, which beats the default', () => {
@@ -319,32 +348,6 @@ describe('resolveSignalEndpoint', () => {
     warnSpy.mockRestore();
   });
 
-  it('a legacy endpoint ending in /v1/traces is the traces URL, and its base serves logs', () => {
-    const options = { endpoint: 'http://c:4318/v1/traces' };
-    expect(resolveSignalEndpoint('traces', options).url).toBe('http://c:4318/v1/traces');
-    expect(resolveSignalEndpoint('logs', options).url).toBe('http://c:4318/v1/logs');
-  });
-
-  it('a legacy endpoint whose last path segment is traces is the traces URL; logs replace that segment', () => {
-    const options = { endpoint: 'https://gw/otlp/traces' };
-    expect(resolveSignalEndpoint('traces', options)).toEqual({ url: 'https://gw/otlp/traces', protocol: 'http' });
-    expect(resolveSignalEndpoint('logs', options)).toEqual({ url: 'https://gw/otlp/logs', protocol: 'http' });
-    const trailing = { endpoint: 'https://gw/traces/' };
-    expect(resolveSignalEndpoint('traces', trailing).url).toBe('https://gw/traces/');
-    expect(resolveSignalEndpoint('logs', trailing).url).toBe('https://gw/logs');
-  });
-
-  it('a base URL that only contains traces elsewhere in the path is not legacy', () => {
-    const options = { endpoint: 'https://gw/traces/otlp' };
-    expect(resolveSignalEndpoint('traces', options).url).toBe('https://gw/traces/otlp/v1/traces');
-    expect(resolveSignalEndpoint('logs', options).url).toBe('https://gw/traces/otlp/v1/logs');
-  });
-
-  it('a legacy traces URL over gRPC is used as-is for both signals', () => {
-    const options = { endpoint: 'grpc://c:4317/otlp/traces' };
-    expect(resolveSignalEndpoint('traces', options)).toEqual({ url: 'http://c:4317/otlp/traces', protocol: 'grpc' });
-    expect(resolveSignalEndpoint('logs', options)).toEqual({ url: 'http://c:4317/otlp/traces', protocol: 'grpc' });
-  });
 });
 
 describe('register - exporters', () => {
@@ -461,36 +464,40 @@ describe('register - exporters', () => {
     expect(logExporter).toBeInstanceOf(OTLPLogExporter);
   });
 
-  it('warns once about a legacy traces URL in endpoint', async () => {
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    const provider = await register({
-      endpoint: 'http://custom:4318/v1/traces',
-      logExporter: new InMemoryLogRecordExporter(),
-      setGlobal: false,
-      autoInstrument: false,
-    });
-    expect(warnSpy).toHaveBeenCalledTimes(1);
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringMatching(/endpoint is now the OTLP base URL/));
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('pass the base ("http://custom:4318")'));
-    warnSpy.mockRestore();
+  it('register() throws on an endpoint ending in /v1/traces, before setting anything up', async () => {
+    await expect(
+      register({ endpoint: 'http://custom:4318/v1/traces', exporter: new InMemorySpanExporter(), logExporter: new InMemoryLogRecordExporter(), autoInstrument: false }),
+    ).rejects.toThrow("endpoint is the OTLP base URL (e.g. http://host:4318). Remove '/v1/traces', or pass tracesEndpoint and logsEndpoint.");
+    expect(getSdkLoggerProvider()).toBeUndefined();
+  });
+
+  it('tracesEndpoint without logsEndpoint throws', async () => {
+    await expect(
+      register({ tracesEndpoint: 'http://c:4318/v1/traces', autoInstrument: false }),
+    ).rejects.toThrow(/tracesEndpoint was passed without logsEndpoint.*must be passed together/);
+  });
+
+  it('logsEndpoint without tracesEndpoint throws', async () => {
+    await expect(
+      register({ logsEndpoint: 'http://c:4318/v1/logs', endpoint: 'http://c:4318', autoInstrument: false }),
+    ).rejects.toThrow(/logsEndpoint was passed without tracesEndpoint/);
+  });
+
+  it.each([
+    ['tracesEndpoint + logsEndpoint', { tracesEndpoint: 'http://t:21890/v1/traces', logsEndpoint: 'http://l:21892/v1/logs' }],
+    ['tracesEndpoint + logExporter', { tracesEndpoint: 'http://t:21890/v1/traces', logExporter: new InMemoryLogRecordExporter() }],
+    ['tracesEndpoint + logs: false', { tracesEndpoint: 'http://t:21890/v1/traces', logs: false }],
+    ['exporter + logsEndpoint', { exporter: new InMemorySpanExporter(), logsEndpoint: 'http://l:21892/v1/logs' }],
+  ])('%s is accepted', async (_name, extra) => {
+    const provider = await register({ setGlobal: false, autoInstrument: false, ...extra });
+    expect(provider).toBeDefined();
     await provider.shutdown();
   });
 
-  it('warns about a legacy traces URL whose path ends in traces without /v1', async () => {
-    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    const provider = await register({
-      endpoint: 'https://gw/otlp/traces',
-      logExporter: new InMemoryLogRecordExporter(),
-      setGlobal: false,
-      autoInstrument: false,
-    });
-    expect(warnSpy).toHaveBeenCalledTimes(1);
-    const message = String(warnSpy.mock.calls[0][0]);
-    expect(message).toMatch(/endpoint is now the OTLP base URL/);
-    expect(message).toContain('logs sent to "https://gw/otlp/logs"');
-    expect(message).toContain('pass tracesEndpoint ("https://gw/otlp/traces") and logsEndpoint');
-    warnSpy.mockRestore();
-    await provider.shutdown();
+  it('separate pipelines: both full URLs are used as-is', async () => {
+    const options = { tracesEndpoint: 'http://dp:21890/v1/traces', logsEndpoint: 'http://dp:21892/v1/logs' };
+    expect(resolveSignalEndpoint('traces', options).url).toBe('http://dp:21890/v1/traces');
+    expect(resolveSignalEndpoint('logs', options).url).toBe('http://dp:21892/v1/logs');
   });
 
   it('does not warn for a base URL', async () => {
