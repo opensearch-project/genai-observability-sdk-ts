@@ -671,6 +671,24 @@ describe('Benchmark (default: events, no harness spans)', () => {
     spy.mockRestore();
   });
 
+  it('marks a case logged with errorType alone as failed and errored, like evaluate()', () => {
+    const spy = quiet();
+    const bm = new Benchmark('upload');
+    bm.log({ input: 'q1', caseId: 'typed', scores: [{ name: 'accuracy' }], errorType: 'TimeoutError' });
+    bm.log({ input: 'q2', caseId: 'typed-no-scores', errorType: 'TimeoutError' });
+    bm.log({ input: 'q3', caseId: 'explicit', status: 'error' });
+    const cases = bm['_cases'];
+    const summary = bm.close();
+    expect(cases.map(c => [c.status, c.resultStatus])).toEqual([
+      ['fail', 'error'],
+      ['fail', 'error'],
+      ['fail', 'error'],
+    ]);
+    expect(summary.errorCount).toBe(3);
+    expect(summary.passCount).toBe(0);
+    spy.mockRestore();
+  });
+
   it('emits only gen_ai.evaluation.result events', () => {
     const spy = quiet();
     const bm = new Benchmark('upload');

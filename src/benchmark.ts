@@ -588,7 +588,8 @@ export class Benchmark {
     const hasError = options.error !== undefined;
     const resultStatus: TestCaseStatus =
       options.status ?? (hasError || errorType ? 'error' : failed ? 'fail' : 'pass');
-    const status = options.status ?? (hasError || failed ? 'fail' : 'pass');
+    // Same rule as evaluate(): only a passing case has status `pass`.
+    const status = resultStatus === 'pass' ? 'pass' : 'fail';
     const caseMeta = toAttributes(safeMetadata(options.metadata, `case:${caseId}`));
     const evaluated = spanContextFrom(options.traceId, options.spanId);
 
