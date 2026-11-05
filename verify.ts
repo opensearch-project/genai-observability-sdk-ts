@@ -350,13 +350,7 @@ assert(summary.scores["accuracy"].max === 1.0, "benchmark: accuracy max = 1.0");
 assert(summary.runId.startsWith("run_"), "benchmark: runId starts with run_");
 
 spans = exporter.getFinishedSpans();
-const rootSpan = spans.find(s => s.name.includes("test_suite_run"))!;
-const caseSpans = spans.filter(s => s.name === "test_case");
-assert(rootSpan !== undefined, "benchmark: root span exists");
-assert(rootSpan.attributes["test.suite.name"] === "rag-v2", "benchmark: root suite name");
-assert(rootSpan.attributes["model"] === "gpt-4", "benchmark: metadata on root span");
-assert(caseSpans.length === 2, "benchmark: 2 case spans");
-assert(caseSpans.every(s => s.parentSpanId === rootSpan.spanContext().spanId), "benchmark: cases are children of root");
+assert(spans.length === 0, "benchmark: creates no spans");
 
 // ── 20. Benchmark — error case ───────────────────────────────────────
 console.log("\n=== 20. Benchmark — error ===");
@@ -366,9 +360,7 @@ const bench2 = new Benchmark("err-bench");
 bench2.log({ input: "q1", error: "boom" });
 const sum2 = bench2.close();
 assert(sum2.errorCount === 1, "benchmark: error counted");
-spans = exporter.getFinishedSpans();
-const rootSpan2 = spans.find(s => s.name.includes("test_suite_run"))!;
-assert(rootSpan2.attributes["test.suite.run.status"] === "fail", "benchmark: root status fail");
+assert(sum2.passCount === 0, "benchmark: errored case is not a pass");
 
 // ── 21. evaluate() ───────────────────────────────────────────────────
 console.log("\n=== 21. evaluate() ===");
@@ -414,7 +406,7 @@ assert(evalResult2.cases[0].error === "task failed", "evaluate: error message ca
 // ── 23. register() — default endpoint ────────────────────────────────
 console.log("\n=== 23. register() ===");
 
-assert(DEFAULT_ENDPOINT === "http://localhost:21890/opentelemetry/v1/traces", "DEFAULT_ENDPOINT value");
+assert(DEFAULT_ENDPOINT === "http://localhost:4318/v1/traces", "DEFAULT_ENDPOINT value");
 
 // ── 24. Retrieval — parseMessages ────────────────────────────────────
 console.log("\n=== 24. Retrieval — parseMessages ===");

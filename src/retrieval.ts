@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright OpenSearch Contributors
 
+import { EVALUATION_RESULT_EVENT } from './score.js';
+
 export interface Message {
   role: string;
   content: string;
@@ -160,7 +162,13 @@ export function mapSpanDoc(doc: Record<string, unknown>): SpanRecord {
 
 export interface OpenSearchTraceRetrieverOptions {
   host?: string;
+  /** Index pattern for span data. Default `otel-v1-apm-span-*`. */
   index?: string;
+  /**
+   * Index pattern for evaluation results (`gen_ai.evaluation.result` events
+   * routed by Data Prepper). Default `otel-v1-genai-evaluation*`.
+   */
+  evaluationIndex?: string;
   auth?: { username: string; password: string } | 'awsSigV4';
   verifyCerts?: boolean;
 }
@@ -168,10 +176,12 @@ export interface OpenSearchTraceRetrieverOptions {
 export class OpenSearchTraceRetriever {
   private _clientPromise: Promise<unknown>;
   private _index: string;
+  private _evaluationIndex: string;
 
   constructor(options?: OpenSearchTraceRetrieverOptions) {
     const host = options?.host ?? 'https://localhost:9200';
     this._index = options?.index ?? 'otel-v1-apm-span-*';
+    this._evaluationIndex = options?.evaluationIndex ?? 'otel-v1-genai-evaluation*';
 
     this._clientPromise = this._createClient(host, options);
   }
@@ -349,6 +359,13 @@ export class OpenSearchTraceRetriever {
     });
   }
 
+  /**
+   * The subset of `traceIds` that already has an evaluation result: a
+   * `gen_ai.evaluation.result` event with that `traceId` in the evaluation
+   * index. A missing evaluation index means none are evaluated; any other
+   * error (auth, connection, mapping) is thrown, so callers do not re-run
+   * judges and write duplicate results.
+   */
   async findEvaluatedTraceIds(traceIds: string[]): Promise<Set<string>> {
     if (traceIds.length === 0) return new Set();
 
@@ -358,39 +375,31 @@ export class OpenSearchTraceRetriever {
     ) => Promise<Record<string, unknown>>;
 
     const response = await search.call(client, {
-      index: this._index,
+      index: this._evaluationIndex,
+      // A missing index (no results sent yet) is an empty answer, not an error.
+      ignore_unavailable: true,
+      allow_no_indices: true,
       body: {
+        size: 0,
         query: {
           bool: {
             filter: [
+              { term: { eventName: EVALUATION_RESULT_EVENT } },
               { terms: { traceId: traceIds } },
-              { exists: { field: 'attributes.test.suite.name' } },
             ],
           },
         },
-        size: 0,
         aggs: {
-          evaluated_traces: {
-            terms: {
-              field: 'traceId',
-              size: traceIds.length,
-            },
-          },
+          by_trace: { terms: { field: 'traceId', size: traceIds.length } },
         },
       },
     });
 
-    const body =
-      (response['body'] as Record<string, unknown>) ?? response;
-    const aggs = body['aggregations'] as
-      | Record<string, unknown>
-      | undefined;
-    const evaluated = aggs?.['evaluated_traces'] as
-      | Record<string, unknown>
-      | undefined;
-    const buckets =
-      (evaluated?.['buckets'] as Record<string, unknown>[]) ?? [];
-
-    return new Set(buckets.map((b) => String(b['key'])));
+    const body = (response['body'] as Record<string, unknown>) ?? response;
+    const aggs = body['aggregations'] as Record<string, unknown> | undefined;
+    const byTrace = aggs?.['by_trace'] as Record<string, unknown> | undefined;
+    const buckets = (byTrace?.['buckets'] as Record<string, unknown>[]) ?? [];
+    const wanted = new Set(traceIds);
+    return new Set(buckets.map((b) => String(b['key'])).filter((id) => wanted.has(id)));
   }
 }

@@ -6,12 +6,17 @@
  *
  * Demonstrates using the Benchmark class for manual test case logging
  * and the evaluate() function for automated benchmarking with scorers.
+ *
+ * Each case's agent run is its own trace; its root span is stamped with
+ * test.suite.name, test.suite.run.id, test.case.id and test.case.name. Each
+ * score is a `gen_ai.evaluation.result` log event parented to that root span.
+ * The run summary is computed locally.
  */
 
-import { Benchmark, evaluate, register } from '../src/index.js';
+import { Benchmark, Op, evaluate, register, withObserve } from '../src/index.js';
 import type { EvalScore } from '../src/index.js';
 
-await register({
+const provider = await register({
   serviceName: 'benchmark-example',
   batch: false,
   autoInstrument: false,
@@ -20,7 +25,6 @@ await register({
 // 1. Manual benchmarking with Benchmark class
 const bench = new Benchmark('translation-quality', {
   metadata: { 'eval.language_pair': 'en-fr' },
-  recordIo: true,
 });
 
 // Log individual test cases
@@ -43,7 +47,10 @@ bench.log({
 bench.log({
   input: 'Complex sentence with idioms.',
   output: 'Error: translation failed',
+  // The evaluator failed: each score is sent as an error result (error.type, no value).
+  scores: [{ name: 'bleu' }, { name: 'semantic_similarity' }],
   error: 'Translation service timeout',
+  errorType: 'TimeoutError',
   caseName: 'error-case',
 });
 
@@ -60,7 +67,8 @@ bench2.log({
   input: 'What is OpenSearch?',
   output: 'OpenSearch is a search and analytics engine.',
   scores: { relevance: 0.9 },
-  // Link to the production trace that generated this output
+  // The production span that generated this output: the score events are
+  // parented to it.
   traceId: 'abcdef1234567890abcdef1234567890',
   spanId: 'abcdef1234567890',
 });
@@ -83,11 +91,13 @@ function matchScore(_input: unknown, output: unknown, expected: unknown): number
 
 const evalResult = evaluate({
   name: 'qa-benchmark',
-  task: (input) => {
-    const q = (input as { question: string }).question;
-    // Simulated LLM response
-    return `The answer to "${q}" is based on available knowledge.`;
-  },
+  // The task's root span (invoke_agent qa-agent) gets the test.* ids.
+  task: (input) =>
+    withObserve('qa-agent', { op: Op.INVOKE_AGENT }, () => {
+      const q = (input as { question: string }).question;
+      // Simulated LLM response
+      return `The answer to "${q}" is based on available knowledge.`;
+    }),
   data: [
     { input: { question: 'What is AI?' }, expected: 'AI is artificial intelligence.' },
     { input: { question: 'What is ML?' }, expected: 'ML is machine learning.' },
@@ -100,5 +110,10 @@ const evalResult = evaluate({
 console.log(`\nAutomated Evaluation: ${evalResult.summary.benchmarkName}`);
 console.log(`Total cases: ${evalResult.summary.totalCases}`);
 for (const c of evalResult.cases) {
-  console.log(`  Case ${c.caseId.slice(0, 8)}: ${c.status} - scores: ${JSON.stringify(c.scores)}`);
+  console.log(
+    `  Case ${c.caseId.slice(0, 8)}: ${c.resultStatus} trace=${c.traceId} scores=${JSON.stringify(c.scores)}`,
+  );
 }
+
+// Flush spans and evaluation events
+await provider.shutdown();

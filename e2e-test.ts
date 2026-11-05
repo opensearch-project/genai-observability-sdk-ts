@@ -238,7 +238,7 @@ check(spans()[0].parentSpanId === TID.slice(16), "trace-level derived parent");
 console.log("\n--- 10. Benchmark ---");
 reset();
 
-const bench = new Benchmark("qa-eval", { recordIo: true, metadata: { version: "1.0" } });
+const bench = new Benchmark("qa-eval", { metadata: { version: "1.0" } });
 bench.log({ input: "q1", output: "a1", scores: { accuracy: 1.0 }, caseName: "case-1" });
 bench.log({ input: "q2", output: "a2", scores: { accuracy: 0.7 }, caseName: "case-2" });
 bench.log({ input: "q3", error: "timeout", caseName: "case-3" });
@@ -249,30 +249,21 @@ check(summary.totalCases === 3, "3 cases");
 check(summary.errorCount === 1, "1 error");
 check(summary.scores["accuracy"].avg === 0.85, "avg accuracy 0.85");
 check(summary.runId.startsWith("run_"), "run id");
-
-const rootBench = spans().find(s => s.name.includes("test_suite_run"))!;
-const caseSpans = spans().filter(s => s.name === "test_case");
-check(rootBench !== undefined, "root span exists");
-check(rootBench.attributes["test.suite.run.status"] === "fail", "suite status fail");
-check(caseSpans.length === 3, "3 case spans");
-check(caseSpans.every(cs => cs.parentSpanId === rootBench.spanContext().spanId), "cases are children");
-
-// recordIo: true means IO is captured
-const ioSpan = caseSpans.find(cs => cs.attributes["test.case.name"] === "case-1")!;
-check(ioSpan.attributes["test.case.input"] !== undefined, "IO recorded when recordIo=true");
+check(spans().length === 0, "Benchmark creates no spans");
 
 // =====================================================================
-// 11. Benchmark — recordIo default is false
+// 11. Benchmark: explicit runId
 // =====================================================================
-console.log("\n--- 11. Benchmark recordIo default ---");
+console.log("\n--- 11. Benchmark runId ---");
 reset();
 
-const bench2 = new Benchmark("no-io");
-bench2.log({ input: "q", output: "a" });
-bench2.close();
+const bench2 = new Benchmark("sharded", { runId: "ci-run-42" });
+bench2.log({ input: "q", output: "a", scores: { accuracy: 1 } });
+check(bench2.close().runId === "ci-run-42", "explicit runId used");
 
-const noIoSpan = spans().find(s => s.name === "test_case")!;
-check(noIoSpan.attributes["test.case.input"] === undefined, "IO NOT recorded by default");
+let emptyRunIdRejected = false;
+try { new Benchmark("bad", { runId: "  " }); } catch { emptyRunIdRejected = true; }
+check(emptyRunIdRejected, "empty runId rejected");
 
 // =====================================================================
 // 12. evaluate()
@@ -292,7 +283,6 @@ const evalResult = evaluate({
       return { name: "exact", value: output === expected ? 1.0 : 0.0 };
     },
   ],
-  recordIo: true,
 });
 
 check(evalResult.summary.totalCases === 2, "eval 2 cases");
@@ -320,7 +310,7 @@ check(errEval.summary.errorCount === 1, "error counted");
 // 14. register() — default endpoint
 // =====================================================================
 console.log("\n--- 14. register() ---");
-check(DEFAULT_ENDPOINT === "http://localhost:21890/opentelemetry/v1/traces", "default endpoint");
+check(DEFAULT_ENDPOINT === "http://localhost:4318/v1/traces", "default endpoint");
 
 // =====================================================================
 // 15. AWSSigV4OTLPExporter

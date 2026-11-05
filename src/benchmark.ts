@@ -1,34 +1,196 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright OpenSearch Contributors
 
+/**
+ * Offline evaluation runs: `evaluate()` and `Benchmark`.
+ *
+ * Shape of a run:
+ *
+ * ```
+ * trace (one per test case)       the agent run, exactly like production
+ *   root span                     + test.suite.name, test.suite.run.id, test.case.id, test.case.name
+ *   LogRecord gen_ai.evaluation.result   one per score, parented to the root span, test.* copied,
+ *                                        opensearch.test.case.expected when the case has one
+ *                                        (unless recordExpected: false)
+ * ```
+ *
+ * The SDK creates no spans of its own for a run.
+ */
+
 import {
-  trace,
   context as otelContext,
-  SpanStatusCode,
+  ROOT_CONTEXT,
   TraceFlags,
-  type Span,
   type SpanContext,
-  type Context,
-  type Link,
   type Attributes,
 } from '@opentelemetry/api';
 import { createHash, randomUUID } from 'crypto';
-import { RESERVED_KEYS, validateMetadataKeys } from './internal.js';
-
-const TRACER_NAME = "opensearch-genai-observability-sdk-ts-benchmarks";
-const IO_TRUNCATION_LIMIT = 10_000;
-const TRUNCATION_MARKER = "...[truncated]";
+import {
+  AGENT_NAME_KEY,
+  AGENT_VERSION_KEY,
+  RESERVED_KEYS,
+  expectedAttributes,
+  normalizeSpanId,
+  normalizeTraceId,
+  resolveAgent,
+  validateMetadataKeys,
+} from './internal.js';
+import { ciPipelineAttributes } from './cicd.js';
+import {
+  emitScore,
+  labelVerdict,
+  thresholdVerdict,
+  type Verdict,
+  type EvaluatorType,
+  type ScoreDirection,
+} from './score.js';
+import {
+  ensureGlobalTestCaseProcessor,
+  runInTestCase,
+  type ActiveTestCase,
+} from './testcase.js';
 
 // ---------------------------------------------------------------------------
 // Public interfaces
 // ---------------------------------------------------------------------------
 
+/**
+ * One score from a scorer (or passed to `Benchmark.log({ scores: [...] })`).
+ *
+ * Verdict fields are optional; unset ones fall back to the scorer's
+ * `defineScorer()` declaration. A `"pass"` / `"fail"` `label` (or `passed`) is
+ * an explicit verdict and wins; otherwise `threshold` + `direction` is applied
+ * to `value`.
+ */
 export interface EvalScore {
   name: string;
-  value: number;
+  /** Numeric score. May be omitted for a verdict-only result. */
+  value?: number;
+  /**
+   * `"pass"` / `"fail"` (any case) is the verdict and wins over `passed`. Any
+   * other label is the judge's own category: stored as
+   * `gen_ai.evaluation.score.label` when the score has no verdict, else as
+   * `opensearch.gen_ai.evaluation.judge_label` (the verdict is the label).
+   */
   label?: string;
   explanation?: string;
   metadata?: Record<string, unknown>;
+  /** Explicit verdict as a boolean. */
+  passed?: boolean;
+  /** `opensearch.gen_ai.evaluation.score.threshold`. */
+  threshold?: number;
+  /** `opensearch.gen_ai.evaluation.score.direction` (default `maximize` with a threshold). */
+  direction?: ScoreDirection;
+  scoreMin?: number;
+  scoreMax?: number;
+  /** `opensearch.gen_ai.evaluation.judge.trace_id`: the trace of the LLM judge call that produced this score. */
+  judgeTraceId?: string;
+}
+
+/** What a scorer declares about the evaluation it produces (see `defineScorer`). */
+export interface ScorerSpec {
+  /**
+   * `gen_ai.evaluation.name` of number/boolean results and of the error grade
+   * emitted when the scorer throws. Default: the function name.
+   */
+  name?: string;
+  /** Default `maximize` when `threshold` is set. */
+  direction?: ScoreDirection;
+  threshold?: number;
+  scoreMin?: number;
+  scoreMax?: number;
+  /** `opensearch.gen_ai.evaluation.evaluator.name` of every result the scorer produces. */
+  evaluator?: string;
+  evaluatorType?: EvaluatorType;
+}
+
+export type ScorerFn = (
+  input: unknown,
+  output: unknown,
+  expected: unknown,
+) => EvalScore | EvalScore[] | number | boolean;
+
+/** A scorer function with its declared name and rule attached. */
+export type Scorer = ScorerFn & { readonly scorerSpec: ScorerSpec };
+
+const DIRECTIONS: readonly ScoreDirection[] = ['maximize', 'minimize'];
+const EVALUATOR_TYPES: readonly EvaluatorType[] = ['llm_judge', 'code', 'human', 'external'];
+
+/**
+ * Declare a scorer's evaluation name and pass rule for `evaluate()`.
+ *
+ * ```ts
+ * const quality = defineScorer(
+ *   { name: 'answer_quality', threshold: 4, scoreMin: 1, scoreMax: 5, evaluatorType: 'llm_judge' },
+ *   (input, output) => judge(input, output),
+ * );
+ * ```
+ *
+ * Rule fields are defaults for every score the scorer returns; fields set on a
+ * returned `EvalScore` win. Throws on an unknown `direction` / `evaluatorType`
+ * or a non-finite `threshold` / `scoreMin` / `scoreMax`.
+ */
+export function defineScorer(spec: ScorerSpec, fn: ScorerFn): Scorer {
+  if (spec.direction !== undefined && !DIRECTIONS.includes(spec.direction)) {
+    throw new Error(`direction must be one of ${DIRECTIONS.join(', ')}; got "${spec.direction}"`);
+  }
+  if (spec.evaluatorType !== undefined && !EVALUATOR_TYPES.includes(spec.evaluatorType)) {
+    throw new Error(
+      `evaluatorType must be one of ${EVALUATOR_TYPES.join(', ')}; got "${spec.evaluatorType}"`,
+    );
+  }
+  for (const key of ['threshold', 'scoreMin', 'scoreMax'] as const) {
+    const v = spec[key];
+    if (v !== undefined && (typeof v !== 'number' || !Number.isFinite(v))) {
+      throw new Error(`${key} must be a finite number; got ${JSON.stringify(v)}`);
+    }
+  }
+  const resolved: ScorerSpec = {
+    ...spec,
+    direction: spec.direction ?? (spec.threshold !== undefined ? 'maximize' : undefined),
+  };
+  const scorer = ((input: unknown, output: unknown, expected: unknown) =>
+    fn(input, output, expected)) as Scorer;
+  Object.defineProperty(scorer, 'name', { value: fn.name || spec.name || 'score' });
+  Object.defineProperty(scorer, 'scorerSpec', { value: Object.freeze(resolved), enumerable: true });
+  return scorer;
+}
+
+function specOf(fn: ScorerFn): ScorerSpec | undefined {
+  return (fn as Partial<Scorer>).scorerSpec;
+}
+
+/** Fill unset rule fields of a score from its scorer's declaration. */
+function applySpec(s: EvalScore, spec?: ScorerSpec): EvalScore {
+  if (!spec) return s;
+  return {
+    ...s,
+    threshold: s.threshold ?? spec.threshold,
+    direction: s.direction ?? spec.direction,
+    scoreMin: s.scoreMin ?? spec.scoreMin,
+    scoreMax: s.scoreMax ?? spec.scoreMax,
+  };
+}
+
+/** Verdict of a score: a `pass` / `fail` label, else `passed`, else the threshold rule. */
+function verdictOf(s: EvalScore): Verdict | undefined {
+  const fromLabel = labelVerdict(s.label);
+  if (fromLabel) return fromLabel;
+  if (s.passed !== undefined) return s.passed ? 'pass' : 'fail';
+  return thresholdVerdict({ value: s.value, threshold: s.threshold, direction: s.direction });
+}
+
+function verdictsOf(scores: EvalScore[]): Record<string, Verdict> {
+  const out: Record<string, Verdict> = {};
+  for (const s of scores) {
+    const v = verdictOf(s);
+    if (v) out[s.name] = v;
+  }
+  return out;
+}
+
+function hasFailVerdict(verdicts: Record<string, Verdict>): boolean {
+  return Object.values(verdicts).includes('fail');
 }
 
 export interface ScoreSummary {
@@ -39,11 +201,21 @@ export interface ScoreSummary {
   count: number;
 }
 
+/**
+ * Local status of a test case: `error` if the task raised or a result errored,
+ * else `fail` if a result has a `fail` verdict, else `pass`.
+ */
+export type TestCaseStatus = "pass" | "fail" | "error";
+const CASE_STATUSES: readonly TestCaseStatus[] = ["pass", "fail", "error"];
+
 export interface BenchmarkSummary {
   benchmarkName: string;
   runId: string;
   totalCases: number;
+  /** Cases whose task raised or a result errored (status `error`). */
   errorCount: number;
+  passCount: number;
+  failCount: number;
   durationMs: number;
   scores: Record<string, ScoreSummary>;
 }
@@ -56,8 +228,19 @@ export interface TestCaseResult {
   expected: unknown;
   scores: Record<string, number>;
   error?: string;
+  /** `"pass"`, or `"fail"` when the case errored or a score failed its verdict. */
   status: string;
+  /** `pass` | `fail` | `error` (see `TestCaseStatus`). */
+  resultStatus: TestCaseStatus;
+  /** `error.type` (exception class name) when the case errored. */
+  errorType?: string;
+  durationMs?: number;
+  /** Trace and span id of the agent run's root span, when the task created one. */
+  traceId?: string;
+  spanId?: string;
   scorerErrors?: string[];
+  /** Evaluation name to declared verdict, for scores that have one. */
+  verdicts?: Record<string, Verdict>;
 }
 
 export interface BenchmarkResult {
@@ -69,7 +252,13 @@ export interface BenchmarkResult {
 // Helper functions
 // ---------------------------------------------------------------------------
 
-function makeRunId(): string {
+function makeRunId(runId?: string): string {
+  if (runId !== undefined) {
+    if (typeof runId !== 'string' || runId.trim() === '') {
+      throw new Error('runId must be a non-empty string');
+    }
+    return runId;
+  }
   const now = new Date();
   const ts = [
     now.getFullYear(),
@@ -87,12 +276,6 @@ function makeRunId(): string {
 function makeCaseId(input: unknown): string {
   const serialized = JSON.stringify(input ?? '');
   return createHash('sha256').update(serialized).digest('hex').slice(0, 16);
-}
-
-function truncateIo(value: unknown): string {
-  const s = typeof value === 'string' ? value : JSON.stringify(value ?? '');
-  if (s.length <= IO_TRUNCATION_LIMIT) return s;
-  return s.slice(0, IO_TRUNCATION_LIMIT - TRUNCATION_MARKER.length) + TRUNCATION_MARKER;
 }
 
 function toAttributes(record: Record<string, unknown>): Attributes {
@@ -120,54 +303,109 @@ function safeMetadata(
   return result;
 }
 
-function buildSpanLink(traceIdHex?: string, spanIdHex?: string): Link | null {
-  if (!traceIdHex) return null;
-
-  const cleanTraceId = traceIdHex.replace(/^0[xX]/, '').padStart(32, '0').toLowerCase();
-  if (!/^[0-9a-f]{32}$/.test(cleanTraceId)) return null;
-
-  let cleanSpanId: string;
-  if (spanIdHex) {
-    cleanSpanId = spanIdHex.replace(/^0[xX]/, '').padStart(16, '0').toLowerCase();
-    if (!/^[0-9a-f]{16}$/.test(cleanSpanId)) return null;
-  } else {
-    cleanSpanId = cleanTraceId.slice(16);
-  }
-
-  const spanContext: SpanContext = {
-    traceId: cleanTraceId,
-    spanId: cleanSpanId,
-    traceFlags: TraceFlags.SAMPLED,
-    isRemote: true,
-  };
-  return { context: spanContext };
+function errorTypeOf(e: unknown): string {
+  if (e instanceof Error) return e.constructor?.name || e.name || 'Error';
+  return typeof e;
 }
 
-function addScoreEvents(span: Span, scores: EvalScore[]): void {
+/** Elapsed milliseconds, kept fractional so OTLP encodes it as a double. */
+function elapsedMs(start: number): number {
+  return performance.now() - start;
+}
+
+function spanContextFrom(traceIdHex?: string, spanIdHex?: string): SpanContext | null {
+  // Needs a real span id. Never derive one from the trace id.
+  if (!traceIdHex || !spanIdHex) return null;
+  const traceId = normalizeTraceId(traceIdHex);
+  const spanId = normalizeSpanId(spanIdHex);
+  if (!traceId || !spanId) return null;
+  return { traceId, spanId, traceFlags: TraceFlags.SAMPLED, isRemote: true };
+}
+
+interface CaseIdentity {
+  suiteName: string;
+  runId: string;
+  caseId: string;
+  caseName?: string;
+  /** `gen_ai.agent.name` / `gen_ai.agent.version` of the agent under test, when known. */
+  agent?: Record<string, string>;
+  /** OTel `cicd.pipeline.*` of the CI run, when in CI. */
+  ci?: Record<string, string>;
+  /** `opensearch.test.case.expected` (+ `_truncated`), when the case has an expected output. */
+  expected?: Record<string, string | boolean>;
+}
+
+function identityAttributes(identity: CaseIdentity): Record<string, string> {
+  const attrs: Record<string, string> = {
+    "test.suite.name": identity.suiteName,
+    "test.suite.run.id": identity.runId,
+    "test.case.id": identity.caseId,
+  };
+  if (identity.caseName) attrs["test.case.name"] = identity.caseName;
+  return { ...attrs, ...(identity.ci ?? {}), ...(identity.agent ?? {}) };
+}
+
+/**
+ * Emit one gen_ai.evaluation.result event per score, with the suite and case
+ * identity and the run / case `metadata` copied. `target` is the evaluated
+ * span (the agent run's root span or a caller-supplied span). With only a
+ * trace id the score is trace-level; with neither the event has no trace
+ * context. With `extra.errorType` every score is an evaluator error result:
+ * `error.type`, no value and no label.
+ */
+function emitCaseScores(
+  scores: EvalScore[],
+  identity: CaseIdentity,
+  target: { traceId?: string; spanId?: string },
+  metadata: Attributes,
+  extra: { evaluator?: string; evaluatorType?: EvaluatorType; errorType?: string } = {},
+): void {
+  // The expected output goes on results only, never on the agent's spans. The
+  // agent identity is passed as score() options, not as extra attributes.
+  const { [AGENT_NAME_KEY]: _name, [AGENT_VERSION_KEY]: _version, ...identityAttrs } =
+    identityAttributes(identity);
+  const testAttrs = { ...identityAttrs, ...(identity.expected ?? {}) };
+  const errored = extra.errorType !== undefined;
   for (const s of scores) {
-    const attrs: Attributes = {
-      "gen_ai.evaluation.name": s.name,
-      "gen_ai.evaluation.score.value": s.value,
+    const scoreMeta = s.metadata ? toAttributes(safeMetadata(s.metadata, `score:${s.name}`)) : {};
+    const options = {
+      name: s.name,
+      value: errored ? undefined : s.value,
+      label: errored ? undefined : s.label,
+      explanation: s.explanation,
+      direction: s.direction,
+      scoreMin: s.scoreMin,
+      scoreMax: s.scoreMax,
+      threshold: s.threshold,
+      evaluator: extra.evaluator,
+      evaluatorType: extra.evaluatorType,
+      errorType: extra.errorType,
+      judgeTraceId: s.judgeTraceId,
+      agentName: identity.agent?.[AGENT_NAME_KEY],
+      agentVersion: identity.agent?.[AGENT_VERSION_KEY],
+      attributes: { ...metadata, ...scoreMeta, ...testAttrs },
+      traceId: target.traceId,
+      spanId: target.traceId ? target.spanId : undefined,
     };
-    if (s.label) attrs["gen_ai.evaluation.score.label"] = s.label;
-    if (s.explanation) attrs["gen_ai.evaluation.explanation"] = s.explanation.slice(0, 500);
-    if (s.metadata) {
-      const safe = safeMetadata(s.metadata, `score:${s.name}`);
-      Object.assign(attrs, toAttributes(safe));
-    }
-    span.addEvent("gen_ai.evaluation.result", attrs);
+    // The verdict that set the local case status is the stored label.
+    const verdict = errored ? undefined : verdictOf(s);
+    // No target: do not pick up whatever span the caller has active.
+    otelContext.with(ROOT_CONTEXT, () => emitScore(options, verdict));
   }
+}
+
+function scoreValues(scores: EvalScore[]): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const s of scores) if (s.value !== undefined) out[s.name] = s.value;
+  return out;
 }
 
 function computeSummary(
   name: string,
   runId: string,
   cases: TestCaseResult[],
-  startTime: number,
+  durationMs: number,
 ): BenchmarkSummary {
-  const errorCount = cases.filter(c => c.status === 'fail').length;
-  const durationMs = Date.now() - startTime;
-
   const scoreAcc: Record<string, { sum: number; min: number; max: number; count: number }> = {};
   for (const c of cases) {
     for (const [scoreName, scoreValue] of Object.entries(c.scores)) {
@@ -198,7 +436,9 @@ function computeSummary(
     benchmarkName: name,
     runId,
     totalCases: cases.length,
-    errorCount,
+    errorCount: cases.filter(c => c.resultStatus === 'error').length,
+    passCount: cases.filter(c => c.resultStatus === 'pass').length,
+    failCount: cases.filter(c => c.resultStatus === 'fail').length,
     durationMs,
     scores,
   };
@@ -209,7 +449,7 @@ function formatSummary(summary: BenchmarkSummary): string {
   lines.push(`Benchmark: ${summary.benchmarkName}`);
   lines.push(`Run ID:    ${summary.runId}`);
   lines.push(`Cases:     ${summary.totalCases} (${summary.errorCount} errors)`);
-  lines.push(`Duration:  ${summary.durationMs}ms`);
+  lines.push(`Duration:  ${Math.round(summary.durationMs)}ms`);
 
   const scoreNames = Object.keys(summary.scores);
   if (scoreNames.length > 0) {
@@ -226,34 +466,64 @@ function formatSummary(summary: BenchmarkSummary): string {
 // Benchmark class
 // ---------------------------------------------------------------------------
 
+
+export interface BenchmarkOptions {
+  /**
+   * Run metadata, stamped on every `gen_ai.evaluation.result` event of the run
+   * (reserved keys are dropped; the score's own metadata and the SDK
+   * attributes win).
+   */
+  metadata?: Record<string, unknown>;
+  /**
+   * `test.suite.run.id` of the run. Default: a generated id. Pass the same id
+   * from every CI shard so they report into one run, or the id of an existing
+   * run to re-score it (send the new results with the same run id). Must not
+   * be empty or whitespace.
+   */
+  runId?: string;
+  /** `gen_ai.agent.name` of the agent under test. Default: `register({ agentName })`. */
+  agentName?: string;
+  /** `gen_ai.agent.version` of the agent under test. Default: `register({ agentVersion })`. */
+  agentVersion?: string;
+  /**
+   * Sets or overrides the OTel `cicd.pipeline.name` / `.run.id` / `.run.url.full`
+   * read from GitHub Actions, GitLab CI or Jenkins. Nothing is added outside CI.
+   */
+  ciPipeline?: Record<string, string>;
+  /**
+   * Export each case's `expected` as `opensearch.test.case.expected` (and
+   * `opensearch.test.case.expected_truncated` when cut) on its results.
+   * Default true. Pass false if your test sets hold sensitive data: neither
+   * attribute is then written (the value is still kept on the local result).
+   */
+  recordExpected?: boolean;
+}
+
+/**
+ * Upload results of cases you ran yourself. Each `log()` emits one
+ * `gen_ai.evaluation.result` event per score, parented to the evaluated span
+ * when `traceId` + `spanId` are given. `close()` returns the local summary.
+ */
 export class Benchmark {
   private _name: string;
   private _metadata: Record<string, unknown>;
-  private _recordIo: boolean;
   private _runId: string;
-  private _startTime: number;
+  private _start: number;
   private _cases: TestCaseResult[] = [];
   private _closed = false;
-  private _rootSpan: Span;
-  private _rootContext: Context;
+  private _agent: Record<string, string>;
+  private _ci: Record<string, string>;
+  private _recordExpected: boolean;
 
-  constructor(name: string, options?: { metadata?: Record<string, unknown>; recordIo?: boolean }) {
+  constructor(name: string, options?: BenchmarkOptions) {
     this._name = name;
+    this._runId = makeRunId(options?.runId);
+    // Declared agent, else the register() default (never invented).
+    this._agent = resolveAgent(options?.agentName, options?.agentVersion);
     this._metadata = safeMetadata(options?.metadata, `benchmark:${name}`);
-    this._recordIo = options?.recordIo ?? false;
-    this._runId = makeRunId();
-    this._startTime = Date.now();
-
-    const tracer = trace.getTracer(TRACER_NAME);
-    const rootAttrs: Attributes = {
-      "test.suite.name": name,
-      "test.suite.run.id": this._runId,
-      "gen_ai.operation.name": "evaluation",
-      ...toAttributes(this._metadata),
-    };
-
-    this._rootSpan = tracer.startSpan(`test_suite_run ${name}`, { attributes: rootAttrs });
-    this._rootContext = trace.setSpan(otelContext.active(), this._rootSpan);
+    this._ci = ciPipelineAttributes(options?.ciPipeline);
+    this._recordExpected = options?.recordExpected ?? true;
+    this._start = performance.now();
   }
 
   get name(): string {
@@ -267,10 +537,33 @@ export class Benchmark {
   log(options: {
     input?: unknown;
     output?: unknown;
+    /**
+     * Expected output. Sent on every result of the case as
+     * `opensearch.test.case.expected` (strings as is, other values
+     * JSON.stringify'd, truncated to 4096 characters), unless the Benchmark
+     * was created with `recordExpected: false`.
+     */
     expected?: unknown;
-    scores?: Record<string, number>;
+    /** `{ name: value }`, or `EvalScore[]` to declare verdicts (label / threshold) and bounds. */
+    scores?: Record<string, number> | EvalScore[];
+    /**
+     * Case metadata, stamped on the case's `gen_ai.evaluation.result` events
+     * (over the run metadata; reserved keys are dropped).
+     */
     metadata?: Record<string, unknown>;
+    /** Error message, kept on the local result. The local status becomes `error`. */
     error?: string;
+    /**
+     * `error.type` for an errored case (exception class name or similar). Every
+     * score in `scores` is then emitted as an evaluator error result: `error.type`
+     * set, no score value and no label.
+     */
+    errorType?: string;
+    /**
+     * Explicit local case status. Default `error` when `error` or `errorType` is
+     * given, else `fail` when a score has a `fail` verdict, else `pass`.
+     */
+    status?: TestCaseStatus;
     caseId?: string;
     caseName?: string;
     traceId?: string;
@@ -285,53 +578,41 @@ export class Benchmark {
     }
 
     const caseId = options.caseId ?? makeCaseId(options.input);
-    const hasError = options.error !== undefined;
-    const status = hasError ? 'fail' : 'pass';
-
-    const tracer = trace.getTracer(TRACER_NAME);
-
-    const spanAttrs: Attributes = {
-      "test.suite.name": this._name,
-      "test.suite.run.id": this._runId,
-      "test.case.id": caseId,
-      "test.case.result.status": status,
-      "gen_ai.operation.name": "evaluation",
+    const identity: CaseIdentity = {
+      suiteName: this._name,
+      runId: this._runId,
+      caseId,
+      caseName: options.caseName,
+      agent: this._agent,
+      ci: this._ci,
+      expected: this._recordExpected ? expectedAttributes(options.expected) : undefined,
     };
-
-    if (options.caseName) spanAttrs["test.case.name"] = options.caseName;
-    if (hasError) spanAttrs["test.case.error"] = options.error;
-
-    if (this._recordIo) {
-      if (options.input !== undefined) spanAttrs["test.case.input"] = truncateIo(options.input);
-      if (options.output !== undefined) spanAttrs["test.case.output"] = truncateIo(options.output);
-      if (options.expected !== undefined) spanAttrs["test.case.expected"] = truncateIo(options.expected);
+    if (options.status !== undefined && !CASE_STATUSES.includes(options.status)) {
+      throw new Error(`status must be one of ${CASE_STATUSES.join(', ')}; got "${options.status}"`);
     }
+    const evalScores: EvalScore[] = Array.isArray(options.scores)
+      ? options.scores
+      : Object.entries(options.scores ?? {}).map(([name, value]) => ({ name, value }));
+    const errorType = options.errorType;
+    const verdicts = errorType ? {} : verdictsOf(evalScores);
+    const failed = hasFailVerdict(verdicts);
+    const hasError = options.error !== undefined;
+    const resultStatus: TestCaseStatus =
+      options.status ?? (hasError || errorType ? 'error' : failed ? 'fail' : 'pass');
+    // Same rule as evaluate(): only a passing case has status `pass`.
+    const status = resultStatus === 'pass' ? 'pass' : 'fail';
+    const caseMeta = toAttributes(safeMetadata(options.metadata, `case:${caseId}`));
+    const evaluated = spanContextFrom(options.traceId, options.spanId);
 
-    const caseMeta = safeMetadata(options.metadata, `case:${caseId}`);
-    Object.assign(spanAttrs, toAttributes(caseMeta));
-
-    const links: Link[] = [];
-    const link = buildSpanLink(options.traceId, options.spanId);
-    if (link) links.push(link);
-
-    const span = tracer.startSpan(
-      "test_case",
-      { attributes: spanAttrs, links },
-      this._rootContext,
-    );
-
-    if (options.scores) {
-      const evalScores: EvalScore[] = Object.entries(options.scores).map(
-        ([name, value]) => ({ name, value }),
+    if (evalScores.length > 0) {
+      emitCaseScores(
+        evalScores,
+        identity,
+        { traceId: options.traceId, spanId: options.spanId },
+        { ...toAttributes(this._metadata), ...caseMeta },
+        { errorType },
       );
-      addScoreEvents(span, evalScores);
     }
-
-    if (hasError) {
-      span.setStatus({ code: SpanStatusCode.ERROR, message: options.error });
-    }
-
-    span.end();
 
     this._cases.push({
       caseId,
@@ -339,9 +620,14 @@ export class Benchmark {
       input: options.input,
       output: options.output,
       expected: options.expected,
-      scores: options.scores ?? {},
+      scores: errorType ? {} : scoreValues(evalScores),
       error: options.error,
       status,
+      resultStatus,
+      errorType,
+      traceId: evaluated?.traceId,
+      spanId: evaluated?.spanId,
+      verdicts: Object.keys(verdicts).length > 0 ? verdicts : undefined,
     });
   }
 
@@ -351,16 +637,7 @@ export class Benchmark {
     }
     this._closed = true;
 
-    const errorCount = this._cases.filter(c => c.status === 'fail').length;
-    const suiteStatus = errorCount === 0 ? 'pass' : 'fail';
-
-    this._rootSpan.setAttribute("test.suite.run.status", suiteStatus);
-    if (errorCount > 0) {
-      this._rootSpan.setStatus({ code: SpanStatusCode.ERROR, message: `${errorCount} case(s) failed` });
-    }
-    this._rootSpan.end();
-
-    const summary = computeSummary(this._name, this._runId, this._cases, this._startTime);
+    const summary = computeSummary(this._name, this._runId, this._cases, elapsedMs(this._start));
     console.log(formatSummary(summary));
     return summary;
   }
@@ -370,140 +647,270 @@ export class Benchmark {
 // evaluate() function
 // ---------------------------------------------------------------------------
 
-type ScorerFn = (input: unknown, output: unknown, expected: unknown) => EvalScore | EvalScore[] | number;
+/** `error.type` of the error result for a scorer that returned an unusable value. */
+const INVALID_SCORER_RESULT = 'TypeError';
 
-export function evaluate(options: {
+function isThenable(value: unknown): value is PromiseLike<unknown> {
+  return (
+    (typeof value === 'object' || typeof value === 'function') &&
+    value !== null &&
+    typeof (value as { then?: unknown }).then === 'function'
+  );
+}
+
+function describeValue(value: unknown): string {
+  if (value === null) return 'null';
+  if (Array.isArray(value)) return 'an array';
+  if (typeof value === 'number') return String(value);
+  return typeof value === 'object' ? 'an object' : `a ${typeof value}`;
+}
+
+/** Why `value` is not a usable EvalScore, or undefined when it is one. */
+function invalidEvalScore(value: unknown): string | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return describeValue(value);
+  const s = value as Record<string, unknown>;
+  if (typeof s.name !== 'string' || s.name === '') return 'an object without a string name';
+  if (s.value !== undefined && (typeof s.value !== 'number' || !Number.isFinite(s.value))) {
+    return `an EvalScore "${s.name}" whose value is ${describeValue(s.value)}`;
+  }
+  if (s.passed !== undefined && typeof s.passed !== 'boolean') {
+    return `an EvalScore "${s.name}" whose passed is not a boolean`;
+  }
+  if (s.label !== undefined && typeof s.label !== 'string') {
+    return `an EvalScore "${s.name}" whose label is not a string`;
+  }
+  return undefined;
+}
+
+/**
+ * The scores a scorer returned, or why the value cannot be used: a finite
+ * number, a boolean (a verdict), an EvalScore or an EvalScore[] is used;
+ * anything else (undefined, null, NaN, a bigint, a Promise, a malformed
+ * object) is not.
+ */
+function scorerResultScores(result: unknown, evalName: string): EvalScore[] | string {
+  if (typeof result === 'boolean') return [{ name: evalName, value: result ? 1 : 0, passed: result }];
+  if (typeof result === 'number') {
+    return Number.isFinite(result) ? [{ name: evalName, value: result }] : `returned ${result}`;
+  }
+  if (isThenable(result)) {
+    // Do not leave a rejected Promise unhandled.
+    Promise.resolve(result).catch(() => {});
+    return 'returned a Promise (evaluate() scorers must be synchronous)';
+  }
+  const items = Array.isArray(result) ? result : [result];
+  for (const item of items) {
+    const reason = invalidEvalScore(item);
+    if (reason) return `returned ${reason}`;
+  }
+  return items as EvalScore[];
+}
+
+export interface EvaluateOptions {
   name: string;
   task: (input: unknown) => unknown;
   data: Array<{ input: unknown; expected?: unknown; caseId?: string; caseName?: string }>;
-  scores: ScorerFn[];
+  /** Scorer functions, optionally wrapped with `defineScorer()` to declare name and rule. */
+  scores: Array<ScorerFn | Scorer>;
+  /**
+   * Run metadata, stamped on every `gen_ai.evaluation.result` event of the run
+   * (reserved keys are dropped; the score's own metadata and the SDK
+   * attributes win).
+   */
   metadata?: Record<string, unknown>;
-  recordIo?: boolean;
-}): BenchmarkResult {
-  const filteredMetadata = safeMetadata(options.metadata, `evaluate:${options.name}`);
-  const recordIo = options.recordIo ?? false;
-  const runId = makeRunId();
-  const startTime = Date.now();
+  /**
+   * `test.suite.run.id` of the run. Default: a generated id. Pass the same id
+   * from every CI shard so they report into one run, or the id of an existing
+   * run to re-score it (send the new results with the same run id). Must not
+   * be empty or whitespace.
+   */
+  runId?: string;
+  /**
+   * `gen_ai.agent.name` of the agent under test. Stamped on the agent root spans
+   * that name none themselves and on every evaluation result.
+   * When omitted, each case uses the agent its root span names, else
+   * `register({ agentName })`.
+   */
+  agentName?: string;
+  /** `gen_ai.agent.version` of the agent under test, resolved the same way. */
+  agentVersion?: string;
+  /**
+   * Sets or overrides the OTel `cicd.pipeline.name` / `.run.id` / `.run.url.full`
+   * read from GitHub Actions, GitLab CI or Jenkins. In CI they go on the
+   * evaluation results and the agent root spans; nothing is added outside CI.
+   */
+  ciPipeline?: Record<string, string>;
+  /**
+   * Export each case's `expected` as `opensearch.test.case.expected` (and
+   * `opensearch.test.case.expected_truncated` when cut) on its results.
+   * Default true. Pass false if your test sets hold sensitive data: neither
+   * attribute is then written (the value is still kept on the local result).
+   */
+  recordExpected?: boolean;
+}
+
+/**
+ * Run `task` on each data item, score it and record the results.
+ *
+ * Cases run one at a time and `task` must be synchronous. While a case runs,
+ * the SDK's TestCaseSpanProcessor stamps `test.*` ids on the root span(s) the
+ * task starts and remembers the first one, so score events are parented to the
+ * agent run's own trace. The TypeScript SDK has no default context manager, so
+ * this uses a module-level "current case" instead of the active OTel context.
+ *
+ * A scorer returns a finite number, a boolean (a verdict), an `EvalScore` or
+ * an `EvalScore[]`, synchronously. A scorer that throws, or returns anything
+ * else (undefined, null, NaN, a Promise, a malformed object; with a warning),
+ * emits an evaluator error result (`error.type`, no value, no label, no
+ * explanation) named after its declared `name` (else the function name). The
+ * exception message is kept only in the local `scorerErrors`. When the task
+ * throws, the scorers are not run and every scorer emits such an error result
+ * with the task's `error.type`.
+ *
+ * Local case status: `error` if the task threw or a result errored; else
+ * `fail` if any score has a `fail` verdict (a `pass` / `fail` `label` /
+ * `passed`, or `threshold` + `direction` from the score or its `defineScorer()`
+ * declaration); else `pass`. Scores without a declared rule never fail a case.
+ */
+export function evaluate(options: EvaluateOptions): BenchmarkResult {
+  const runId = makeRunId(options.runId);
+  const filteredMetadata = toAttributes(safeMetadata(options.metadata, `evaluate:${options.name}`));
+  const runStart = performance.now();
   const cases: TestCaseResult[] = [];
+  const declaredAgent = resolveAgent(options.agentName, options.agentVersion);
+  const ci = ciPipelineAttributes(options.ciPipeline);
+  const recordExpected = options.recordExpected ?? true;
 
-  const tracer = trace.getTracer(TRACER_NAME);
-
-  const rootAttrs: Attributes = {
-    "test.suite.name": options.name,
-    "test.suite.run.id": runId,
-    "gen_ai.operation.name": "evaluation",
-    ...toAttributes(filteredMetadata),
-  };
-
-  const rootSpan = tracer.startSpan(`test_suite_run ${options.name}`, { attributes: rootAttrs });
-  const rootContext = trace.setSpan(otelContext.active(), rootSpan);
+  ensureGlobalTestCaseProcessor();
 
   for (const item of options.data) {
-    const caseId = item.caseId ?? makeCaseId(item.input);
-    const caseName = item.caseName;
+    const caseStart = performance.now();
+    const identity: CaseIdentity = {
+      suiteName: options.name,
+      runId,
+      caseId: item.caseId ?? makeCaseId(item.input),
+      caseName: item.caseName,
+      ci,
+    };
     const expected = item.expected;
+    const expectedAttrs = recordExpected ? expectedAttributes(expected) : undefined;
 
     let output: unknown;
     let error: string | undefined;
-    let caseStatus = 'pass';
+    let errorType: string | undefined;
     const caseScores: Record<string, number> = {};
-    const evalScores: EvalScore[] = [];
+    const scoreGroups: Array<{ scores: EvalScore[]; spec?: ScorerSpec; errorType?: string }> = [];
     const scorerErrors: string[] = [];
+
+    // Root spans get the declared agent (where they name none themselves).
+    const active: ActiveTestCase = {
+      attributes: { ...identityAttributes(identity), ...declaredAgent },
+      seen: new Set(),
+    };
 
     // Run task
     try {
-      output = options.task(item.input);
+      output = runInTestCase(active, () => otelContext.with(ROOT_CONTEXT, () => options.task(item.input)));
       if (output instanceof Promise) {
+        output.catch(() => {});
         throw new Error(
           "evaluate() does not support async task functions. " +
-          "The task returned a Promise — use a synchronous task or await the async call inside a sync wrapper."
+          "The task returned a Promise: use a synchronous task or await the async call inside a sync wrapper."
         );
       }
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
-      caseStatus = 'fail';
+      errorType = errorTypeOf(e);
     }
 
-    // Run scorers
-    if (caseStatus !== 'fail') {
-      for (const scorer of options.scores) {
-        try {
-          const result = scorer(item.input, output, expected);
-          if (typeof result === 'number') {
-            const scoreName = scorer.name || 'score';
-            const es: EvalScore = { name: scoreName, value: result };
-            evalScores.push(es);
-            caseScores[es.name] = es.value;
-          } else if (Array.isArray(result)) {
-            for (const es of result) {
-              evalScores.push(es);
-              caseScores[es.name] = es.value;
-            }
-          } else {
-            evalScores.push(result);
-            caseScores[result.name] = result.value;
-          }
-        } catch (e) {
-          const msg = e instanceof Error ? e.message : String(e);
-          scorerErrors.push(msg);
-        }
+    // The agent that ran: declared, else named on its root span, else the
+    // register() default.
+    identity.agent = resolveAgent(options.agentName, options.agentVersion, active.rootSpan);
+    identity.expected = expectedAttrs;
+
+    // Run scorers (outside the case: judge spans are not the agent run)
+    for (const scorer of options.scores) {
+      const spec = specOf(scorer);
+      // Evaluation name of number/boolean results and of the error result.
+      const evalName = spec?.name || scorer.name || 'score';
+      if (error !== undefined) {
+        // The task threw: one error result per scorer, without the exception message.
+        scoreGroups.push({ scores: [applySpec({ name: evalName }, spec)], spec, errorType });
+        continue;
       }
+      // Error result (error.type, no value, no explanation) under the evaluation
+      // name the scorer would have produced, so it is not a separate evaluation.
+      // The message stays local (scorerErrors): it can carry URLs, keys or bodies.
+      const scorerError = (message: string, type: string) => {
+        scorerErrors.push(message);
+        errorType ??= type;
+        scoreGroups.push({ scores: [applySpec({ name: evalName }, spec)], spec, errorType: type });
+      };
+      let result: unknown;
+      try {
+        result = scorer(item.input, output, expected);
+      } catch (e) {
+        scorerError(e instanceof Error ? e.message : String(e), errorTypeOf(e));
+        continue;
+      }
+      const produced = scorerResultScores(result, evalName);
+      if (typeof produced === 'string') {
+        console.warn(
+          `[opensearch-genai-observability-sdk-ts] evaluate(): scorer "${evalName}" ${produced}. ` +
+            `A scorer returns a finite number, a boolean, an EvalScore or an EvalScore[]; ` +
+            `recording an error result.`,
+        );
+        scorerError(`scorer "${evalName}" ${produced}`, INVALID_SCORER_RESULT);
+        continue;
+      }
+      const withSpec = produced.map(s => applySpec(s, spec));
+      for (const es of withSpec) {
+        if (es.value !== undefined) caseScores[es.name] = es.value;
+      }
+      scoreGroups.push({ scores: withSpec, spec });
     }
 
-    const spanAttrs: Attributes = {
-      "test.suite.name": options.name,
-      "test.suite.run.id": runId,
-      "test.case.id": caseId,
-      "test.case.result.status": caseStatus,
-      "gen_ai.operation.name": "evaluation",
-    };
-
-    if (caseName) spanAttrs["test.case.name"] = caseName;
-    if (error) spanAttrs["test.case.error"] = error;
-
-    if (recordIo) {
-      if (item.input !== undefined) spanAttrs["test.case.input"] = truncateIo(item.input);
-      if (output !== undefined) spanAttrs["test.case.output"] = truncateIo(output);
-      if (expected !== undefined) spanAttrs["test.case.expected"] = truncateIo(expected);
-    }
-
-    const caseSpan = tracer.startSpan(
-      "test_case",
-      { attributes: spanAttrs },
-      rootContext,
+    const verdicts = verdictsOf(
+      scoreGroups.filter(g => !g.errorType).flatMap(g => g.scores),
     );
-
-    addScoreEvents(caseSpan, evalScores);
-
-    if (caseStatus === 'fail') {
-      caseSpan.setStatus({ code: SpanStatusCode.ERROR, message: error });
+    const failed = hasFailVerdict(verdicts);
+    const resultStatus: TestCaseStatus = errorType ? 'error' : failed ? 'fail' : 'pass';
+    const status = resultStatus === 'pass' ? 'pass' : 'fail';
+    const root = active.root;
+    for (const group of scoreGroups) {
+      emitCaseScores(
+        group.scores,
+        identity,
+        { traceId: root?.traceId, spanId: root?.spanId },
+        filteredMetadata,
+        {
+          evaluator: group.spec?.evaluator,
+          evaluatorType: group.spec?.evaluatorType,
+          errorType: group.errorType,
+        },
+      );
     }
-
-    caseSpan.end();
 
     cases.push({
-      caseId,
-      caseName,
+      caseId: identity.caseId,
+      caseName: identity.caseName,
       input: item.input,
       output,
       expected,
       scores: caseScores,
       error,
-      status: caseStatus,
+      status,
+      resultStatus,
+      errorType,
+      durationMs: elapsedMs(caseStart),
+      traceId: root?.traceId,
+      spanId: root?.spanId,
       scorerErrors: scorerErrors.length > 0 ? scorerErrors : undefined,
+      verdicts: Object.keys(verdicts).length > 0 ? verdicts : undefined,
     });
   }
 
-  // Finalize root span
-  const errorCount = cases.filter(c => c.status === 'fail').length;
-  const suiteStatus = errorCount === 0 ? 'pass' : 'fail';
-  rootSpan.setAttribute("test.suite.run.status", suiteStatus);
-  if (errorCount > 0) {
-    rootSpan.setStatus({ code: SpanStatusCode.ERROR, message: `${errorCount} case(s) failed` });
-  }
-  rootSpan.end();
-
-  const summary = computeSummary(options.name, runId, cases, startTime);
+  const summary = computeSummary(options.name, runId, cases, elapsedMs(runStart));
   console.log(formatSummary(summary));
 
   return { summary, cases };

@@ -9,6 +9,13 @@ import {
   SimpleSpanProcessor,
   InMemorySpanExporter,
 } from '@opentelemetry/sdk-trace-base';
+import { logs } from '@opentelemetry/api-logs';
+import { TraceOnlyContextProcessor } from '../src/logs.js';
+import {
+  LoggerProvider,
+  SimpleLogRecordProcessor,
+  InMemoryLogRecordExporter,
+} from '@opentelemetry/sdk-logs';
 
 export const exporter = new InMemorySpanExporter();
 
@@ -21,10 +28,21 @@ const provider = new BasicTracerProvider({
 provider.addSpanProcessor(new SimpleSpanProcessor(exporter));
 provider.register();
 
+export const logExporter = new InMemoryLogRecordExporter();
+export const loggerProvider = new LoggerProvider({
+  processors: [new TraceOnlyContextProcessor(), new SimpleLogRecordProcessor({ exporter: logExporter })],
+});
+logs.setGlobalLoggerProvider(loggerProvider);
+
+export function getFinishedLogRecords() {
+  return logExporter.getFinishedLogRecords();
+}
+
 export function getFinishedSpans() {
   return exporter.getFinishedSpans();
 }
 
 export function clearSpans() {
   exporter.reset();
+  logExporter.reset();
 }

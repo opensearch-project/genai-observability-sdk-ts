@@ -44,13 +44,18 @@
     "url": "https://github.com/opensearch-project/genai-observability-sdk-ts"
   },
   "engines": {
-    "node": ">=18"
+    "node": "^18.19.0 || >=20.6.0"
   },
   "dependencies": {
+    "@grpc/grpc-js": "^1.14.4",
     "@opentelemetry/api": "^1.9.0",
+    "@opentelemetry/api-logs": "^0.223.0",
+    "@opentelemetry/exporter-logs-otlp-grpc": "^0.223.0",
+    "@opentelemetry/exporter-logs-otlp-proto": "^0.223.0",
     "@opentelemetry/exporter-trace-otlp-grpc": "^0.57.0",
-    "@opentelemetry/exporter-trace-otlp-http": "^0.57.0",
+    "@opentelemetry/exporter-trace-otlp-proto": "^0.57.0",
     "@opentelemetry/resources": "^1.30.0",
+    "@opentelemetry/sdk-logs": "^0.223.0",
     "@opentelemetry/sdk-trace-base": "^1.30.0"
   },
   "optionalDependencies": {

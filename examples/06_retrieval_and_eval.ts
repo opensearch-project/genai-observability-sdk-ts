@@ -12,10 +12,11 @@
  * - A running OpenSearch cluster with trace data
  */
 
-import { evaluate, score, register } from '../src/index.js';
+import { evaluate, register } from '../src/index.js';
+// import { score } from '../src/index.js'; // used in the commented retrieval section
 import type { EvalScore } from '../src/index.js';
 
-await register({
+const provider = await register({
   serviceName: 'eval-example',
   batch: false,
   autoInstrument: false,
@@ -51,7 +52,6 @@ const result = evaluate({
     { input: { query: 'everything' }, expected: 'The answer to "everything" is 42.' },
   ],
   scores: [exactMatch, containsKeyword],
-  recordIo: true,
 });
 
 console.log('\nEvaluation Results:');
@@ -85,3 +85,27 @@ for (const [name, scoreSummary] of Object.entries(result.summary.scores)) {
 //   maxResults: 10,
 // });
 // console.log(`Found ${rootSpans.length} root spans`);
+//
+// // Skip traces that already have results. This throws on auth or connection
+// // errors (only a missing evaluation index means "none evaluated"), so a
+// // failed lookup never re-runs the judges and writes duplicate results.
+// const evaluated = await retriever.findEvaluatedTraceIds(session.traces.map((t) => t.traceId));
+//
+// // Write scores back: one gen_ai.evaluation.result event per evaluated span,
+// // parented to that span (exported over OTLP logs to otel-v1-genai-evaluation)
+// for (const trace of session.traces.filter((t) => !evaluated.has(t.traceId))) {
+//   for (const span of trace.spans.filter((s) => s.operationName === 'invoke_agent')) {
+//     score({
+//       name: 'helpfulness',
+//       value: 0.8,
+//       traceId: span.traceId,
+//       spanId: span.spanId,
+//       agentName: span.agentName,
+//       evaluator: 'helpfulness_judge',
+//       evaluatorType: 'llm_judge',
+//     });
+//   }
+// }
+
+// Flush spans and evaluation events
+await provider.shutdown();
