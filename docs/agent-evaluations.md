@@ -86,7 +86,7 @@ Endpoints: each signal (traces, and logs for the evaluation events) is resolved 
 
 - Endpoint (code options always win over env vars): `tracesEndpoint` / `logsEndpoint` (full URL), else `endpoint` (base URL) + `/v1/traces` or `/v1/logs` over HTTP, as-is over gRPC, else `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` / `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` (full URL), else `OTEL_EXPORTER_OTLP_ENDPOINT` (base URL, same rule), else `http://localhost:4318` (`http://localhost:4317` over gRPC). For example `register({ endpoint: "http://collector:4318" })` sends logs to `http://collector:4318/v1/logs` even when `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` is set.
 - `endpoint` is always a base URL: a path ending in `/v1/traces` or `/v1/logs` throws. `tracesEndpoint` and `logsEndpoint` must be passed together (`logExporter` stands in for `logsEndpoint`), else `register()` throws.
-- Protocol: `protocol`, else a `grpc://` / `grpcs://` scheme on a URL passed in code, else `OTEL_EXPORTER_OTLP_<SIGNAL>_PROTOCOL`, else `OTEL_EXPORTER_OTLP_PROTOCOL`, else the URL scheme. Over gRPC, logs go to the same host and port as traces, and `headers` are sent as gRPC metadata with lowercased keys. OTLP/HTTP is always binary protobuf (`application/x-protobuf`): OTLP/JSON hex ids are corrupted by Data Prepper and OSIS, so `protocol: "http/json"` throws.
+- Protocol: `protocol`, else a `grpc://` / `grpcs://` scheme on a URL passed in code, else `OTEL_EXPORTER_OTLP_<SIGNAL>_PROTOCOL`, else `OTEL_EXPORTER_OTLP_PROTOCOL`, else the URL scheme. Over gRPC, logs go to the same host and port as traces, and `headers` are sent as gRPC metadata with lowercased keys. OTLP/HTTP is always binary protobuf (`application/x-protobuf`): OTLP/JSON hex ids are corrupted by Data Prepper and OSIS, so `protocol: "http/json"` throws. gRPC is for a local OTel Collector (default `localhost:4317`) or a self-hosted Data Prepper, whose OTLP sources accept framed gRPC natively; OSIS does not support it.
 - Compression: `compression: "none" | "gzip"`, else `OTEL_EXPORTER_OTLP_<SIGNAL>_COMPRESSION`, else `OTEL_EXPORTER_OTLP_COMPRESSION`, else none. It must match the pipeline: OSIS accepts only none or gzip and the client must use the pipeline's `compression`.
 - Request size: OSIS `otel_*` sources cap requests at 1 MB to 4 MB (1 MB by default with the persistent buffer). For large GenAI spans, lower `OTEL_BSP_MAX_EXPORT_BATCH_SIZE`.
 
@@ -422,6 +422,8 @@ genai-evaluation-pipeline:
 ### b) Amazon OpenSearch Ingestion (OSI)
 
 OSI does not have the evaluation index type yet. Use the same pipeline shape in an OSI pipeline and create the index template once before ingesting.
+
+OSI accepts OTLP/HTTP only (protobuf), signed with SigV4 service `osis`; gRPC is not supported. Use `https://` endpoints with `sigv4`. `register()` throws if `sigv4` is set and a signal resolves to gRPC (a `grpc://` / `grpcs://` URL, `protocol: "grpc"`, or a gRPC protocol env var).
 
 1. Create the index template on the domain, for example in Dashboards Dev Tools:
 

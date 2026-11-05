@@ -97,7 +97,9 @@ export interface RegisterOptions {
    * `"http"` (or `"http/protobuf"`) is OTLP/HTTP with binary protobuf
    * (`application/x-protobuf`). The SDK never sends OTLP/JSON: `"http/json"`,
    * as an option or env value, throws, because Data Prepper and OSIS read its
-   * hex ids as base64 and corrupt trace and span ids.
+   * hex ids as base64 and corrupt trace and span ids. `"grpc"` is for a local
+   * OTel Collector (`localhost:4317`) or a self-hosted Data Prepper, whose
+   * OTLP sources accept framed gRPC natively; OSIS does not support gRPC.
    */
   protocol?: OtlpProtocolOption;
   /**
@@ -118,7 +120,9 @@ export interface RegisterOptions {
   /**
    * Sign both signals with AWS SigV4: register() creates an
    * AWSSigV4OTLPExporter for traces and an AWSSigV4OTLPLogExporter for logs.
-   * OTLP/HTTP (protobuf) only.
+   * OTLP/HTTP (protobuf) only, which is all OSIS accepts (it has no gRPC
+   * endpoint): register() throws if a signal it builds an exporter for
+   * resolves to gRPC.
    */
   sigv4?: SigV4Options;
   projectName?: string;
@@ -583,6 +587,8 @@ async function tryAutoInstrument(): Promise<void> {
  * path ending in `/v1/traces` or `/v1/logs`, and when only one of
  * `tracesEndpoint` / `logsEndpoint` is passed (`exporter` and `logExporter`
  * stand in for them). There are no port options: the port is part of each URL.
+ * Also throws when `sigv4` is set and a signal resolves to gRPC: SigV4 signs
+ * OTLP/HTTP only, and OSIS accepts OTLP/HTTP only.
  *
  * Protocol, per signal: `protocol`, else a `grpc://` / `grpcs://` scheme on a
  * URL passed in code, else OTEL_EXPORTER_OTLP_<SIGNAL>_PROTOCOL, else

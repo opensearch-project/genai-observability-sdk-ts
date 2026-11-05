@@ -196,7 +196,7 @@ await register({ endpoint: "grpc://localhost:4317", serviceName: "my-app" });
 
 or with env vars only: `export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318`.
 
-**(b) One OSIS or Data Prepper `otlp` source** that serves both signals at `/<pipeline>/v1/traces` and `/<pipeline>/v1/logs`. Pass the base, path prefix included. For OSIS, sign with SigV4 service `osis`:
+**(b) One OSIS or Data Prepper `otlp` source** that serves both signals at `/<pipeline>/v1/traces` and `/<pipeline>/v1/logs`. Pass the base, path prefix included. For OSIS, sign with SigV4 service `osis`: OSIS accepts OTLP/HTTP only (protobuf), signed with SigV4, and does not support gRPC.
 
 ```typescript
 await register({
@@ -234,6 +234,7 @@ await register({ endpoint: "http://collector:4318" });
 
 - when `endpoint` (or `OTEL_EXPORTER_OTLP_ENDPOINT`) has a path ending in `/v1/traces` or `/v1/logs`: it is the OTLP base URL. Remove the suffix (`http://host:4318`), or pass `tracesEndpoint` and `logsEndpoint`.
 - when only one of `tracesEndpoint` / `logsEndpoint` is passed. `logExporter` (or `logs: false`) stands in for `logsEndpoint`, and `exporter` for `tracesEndpoint`.
+- when `sigv4` is set and a signal resolves to gRPC (a `grpc://` / `grpcs://` URL, `protocol: "grpc"`, or a gRPC protocol env var): SigV4 signs OTLP/HTTP only. Use an `https://` endpoint or `protocol: "http"`. A signal with its own `exporter` / `logExporter` is not checked.
 
 **Protocol per signal (priority order):**
 
@@ -242,6 +243,8 @@ await register({ endpoint: "http://collector:4318" });
 3. `OTEL_EXPORTER_OTLP_TRACES_PROTOCOL` / `OTEL_EXPORTER_OTLP_LOGS_PROTOCOL`
 4. `OTEL_EXPORTER_OTLP_PROTOCOL`
 5. URL scheme of that signal's endpoint (`grpc://` or `grpcs://` mean gRPC), else HTTP
+
+Use gRPC with a local OTel Collector (default `localhost:4317`) or a self-hosted Data Prepper, whose OTLP sources accept framed gRPC natively. OSIS does not support gRPC: use `https://` with `sigv4`.
 
 **OTLP/HTTP is binary protobuf** (`Content-Type: application/x-protobuf`), for every exporter `register()` builds, signed or not. The SDK never sends OTLP/JSON: Data Prepper and OSIS read OTLP/JSON hex trace and span ids as base64, which corrupts them so spans and evaluation results no longer match their traces. `protocol: "http/json"` (or `OTEL_EXPORTER_OTLP_PROTOCOL=http/json`) therefore throws; `http/protobuf` is the same as `http`.
 
