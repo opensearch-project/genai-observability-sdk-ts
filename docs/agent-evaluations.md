@@ -84,8 +84,8 @@ await provider.forceFlush();
 
 Endpoints: each signal (traces, and logs for the evaluation events) is resolved the same way, following the OTel exporter spec. See the [README](../README.md#endpoints-traces-and-evaluation-logs) for details.
 
-- Endpoint: `tracesEndpoint` / `logsEndpoint` (full URL), else `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` / `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`, else the base URL (`endpoint`, else `OTEL_EXPORTER_OTLP_ENDPOINT`) + `/v1/traces` or `/v1/logs` over HTTP, as-is over gRPC, else the local Data Prepper base `http://localhost:21890/opentelemetry`.
-- Protocol: `protocol`, else `OTEL_EXPORTER_OTLP_<SIGNAL>_PROTOCOL`, else `OTEL_EXPORTER_OTLP_PROTOCOL`, else the URL scheme (`grpc://` / `grpcs://` mean gRPC). Over gRPC, logs go to the same host and port as traces, and `headers` are sent as gRPC metadata with lowercased keys.
+- Endpoint (code options always win over env vars): `tracesEndpoint` / `logsEndpoint` (full URL), else `endpoint` (base URL) + `/v1/traces` or `/v1/logs` over HTTP, as-is over gRPC, else `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` / `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` (full URL), else `OTEL_EXPORTER_OTLP_ENDPOINT` (base URL, same rule), else the local Data Prepper base `http://localhost:21890/opentelemetry`. For example `register({ endpoint: "http://collector:4318" })` sends logs to `http://collector:4318/v1/logs` even when `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` is set.
+- Protocol: `protocol`, else a `grpc://` / `grpcs://` scheme on a URL passed in code, else `OTEL_EXPORTER_OTLP_<SIGNAL>_PROTOCOL`, else `OTEL_EXPORTER_OTLP_PROTOCOL`, else the URL scheme. Over gRPC, logs go to the same host and port as traces, and `headers` are sent as gRPC metadata with lowercased keys.
 - Amazon OpenSearch Ingestion has one pipeline per signal, so pass both URLs. With `sigv4`, both exporters sign their requests:
 
 ```typescript
@@ -731,7 +731,7 @@ explore.agentTraces.evaluations.enabled: true
 ## Troubleshooting
 
 - **No events at all.** `register()` was not called, or your own OTel setup has no global `LoggerProvider`. Short scripts: `await provider.forceFlush()` before the process exits.
-- **Traces arrive, results do not.** The logs endpoint points somewhere that does not accept OTLP logs (for example `tracesEndpoint` is set but the base URL is not a collector). Set `logsEndpoint` or `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`. With OSI, the logs pipeline must be a separate pipeline with an OTLP logs source. With a custom `exporter` and no logs destination, `register()` sets up no logs pipeline and warns once; pass `logsEndpoint` or `logExporter`.
+- **Traces arrive, results do not.** The logs endpoint points somewhere that does not accept OTLP logs (for example `tracesEndpoint` is set but the base URL is not a collector). Set `logsEndpoint`, or `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` when `endpoint` is not passed in code (`endpoint` wins over it). With OSI, the logs pipeline must be a separate pipeline with an OTLP logs source. With a custom `exporter` and no logs destination, `register()` sets up no logs pipeline and warns once; pass `logsEndpoint` or `logExporter`.
 - **Results have no trace link.** Pass `traceId` (and `spanId`) to `score()`; inline scoring needs an OTel context manager. In `evaluate()`, the task must start a span (for example with `observe()`) and be synchronous.
 - **Results land in the logs index.** The route did not match `eventName`. Check that the route uses `/eventName == "gen_ai.evaluation.result"` and that your Data Prepper version maps the OTLP `event_name` field to `eventName` (added in opensearch-project/data-prepper#7148).
 - **Field types look wrong** (strings as `text` with `.keyword` sub-fields, `time` not a date). The index was created before the index template. Create the template, then wait for the next daily index or reindex.

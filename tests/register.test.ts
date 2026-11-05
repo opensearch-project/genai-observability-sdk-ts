@@ -216,12 +216,45 @@ describe('resolveSignalEndpoint', () => {
   it('per-signal option, then per-signal env var, are full URLs used as-is', () => {
     process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT = 'http://env-traces/ingest';
     process.env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT = 'http://env-logs/ingest';
-    const base = { endpoint: 'http://base:4318' };
-    expect(resolveSignalEndpoint('traces', base).url).toBe('http://env-traces/ingest');
-    expect(resolveSignalEndpoint('logs', base).url).toBe('http://env-logs/ingest');
-    const own = { ...base, tracesEndpoint: 'http://t/x', logsEndpoint: 'http://l/y' };
+    process.env.OTEL_EXPORTER_OTLP_ENDPOINT = 'http://env-base:4318';
+    expect(resolveSignalEndpoint('traces', {}).url).toBe('http://env-traces/ingest');
+    expect(resolveSignalEndpoint('logs', {}).url).toBe('http://env-logs/ingest');
+    const own = { tracesEndpoint: 'http://t/x', logsEndpoint: 'http://l/y' };
     expect(resolveSignalEndpoint('traces', own).url).toBe('http://t/x');
     expect(resolveSignalEndpoint('logs', own).url).toBe('http://l/y');
+  });
+
+  it('endpoint beats OTEL_EXPORTER_OTLP_TRACES_ENDPOINT and OTEL_EXPORTER_OTLP_LOGS_ENDPOINT', () => {
+    process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT = 'http://env-traces/ingest';
+    process.env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT = 'http://env-logs/ingest';
+    process.env.OTEL_EXPORTER_OTLP_ENDPOINT = 'http://env-base:4318';
+    const options = { endpoint: 'http://base:4318' };
+    expect(resolveSignalEndpoint('traces', options)).toEqual({ url: 'http://base:4318/v1/traces', protocol: 'http' });
+    expect(resolveSignalEndpoint('logs', options)).toEqual({ url: 'http://base:4318/v1/logs', protocol: 'http' });
+  });
+
+  it('endpoint over gRPC beats the per-signal env vars too', () => {
+    process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT = 'http://env-traces:4317';
+    process.env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT = 'http://env-logs:4317';
+    const options = { endpoint: 'grpc://base:4317' };
+    expect(resolveSignalEndpoint('traces', options)).toEqual({ url: 'http://base:4317', protocol: 'grpc' });
+    expect(resolveSignalEndpoint('logs', options)).toEqual({ url: 'http://base:4317', protocol: 'grpc' });
+  });
+
+  it('a legacy traces URL in endpoint keeps the place of endpoint, ahead of the env vars', () => {
+    process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT = 'http://env-traces/ingest';
+    process.env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT = 'http://env-logs/ingest';
+    const options = { endpoint: 'https://gw/otlp/traces' };
+    expect(resolveSignalEndpoint('traces', options).url).toBe('https://gw/otlp/traces');
+    expect(resolveSignalEndpoint('logs', options).url).toBe('https://gw/otlp/logs');
+    expect(resolveSignalEndpoint('logs', { ...options, logsEndpoint: 'http://l/y' }).url).toBe('http://l/y');
+  });
+
+  it('a per-signal env var beats OTEL_EXPORTER_OTLP_ENDPOINT, which beats the default', () => {
+    process.env.OTEL_EXPORTER_OTLP_ENDPOINT = 'http://env-base:4318';
+    process.env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT = 'http://env-logs/ingest';
+    expect(resolveSignalEndpoint('traces', {}).url).toBe('http://env-base:4318/v1/traces');
+    expect(resolveSignalEndpoint('logs', {}).url).toBe('http://env-logs/ingest');
   });
 
   it('a per-signal URL for one signal leaves the other on the base', () => {
@@ -257,11 +290,25 @@ describe('resolveSignalEndpoint', () => {
     expect(resolveSignalEndpoint('logs', { ...options, protocol: 'grpc' }).protocol).toBe('grpc');
   });
 
-  it('a logs protocol that differs from the traces scheme does not throw', () => {
+  it('a grpc:// scheme passed in code beats the protocol env vars', () => {
     process.env.OTEL_EXPORTER_OTLP_LOGS_PROTOCOL = 'http/protobuf';
+    process.env.OTEL_EXPORTER_OTLP_PROTOCOL = 'http/protobuf';
     const options = { endpoint: 'grpc://c:4317' };
     expect(resolveSignalEndpoint('traces', options).protocol).toBe('grpc');
-    expect(resolveSignalEndpoint('logs', options)).toEqual({ url: 'http://c:4317/v1/logs', protocol: 'http' });
+    expect(resolveSignalEndpoint('logs', options)).toEqual({ url: 'http://c:4317', protocol: 'grpc' });
+    expect(resolveSignalEndpoint('logs', { logsEndpoint: 'grpc://l:4317' }).protocol).toBe('grpc');
+    // The protocol option still wins over the scheme.
+    expect(resolveSignalEndpoint('logs', { ...options, protocol: 'http' })).toEqual({
+      url: 'http://c:4317/v1/logs',
+      protocol: 'http',
+    });
+  });
+
+  it('a grpc:// scheme from an env var does not beat the protocol env vars', () => {
+    process.env.OTEL_EXPORTER_OTLP_ENDPOINT = 'grpc://c:4317';
+    process.env.OTEL_EXPORTER_OTLP_LOGS_PROTOCOL = 'http/protobuf';
+    expect(resolveSignalEndpoint('traces', {}).protocol).toBe('grpc');
+    expect(resolveSignalEndpoint('logs', {})).toEqual({ url: 'http://c:4317/v1/logs', protocol: 'http' });
   });
 
   it('warns on an unknown protocol value and falls through', () => {

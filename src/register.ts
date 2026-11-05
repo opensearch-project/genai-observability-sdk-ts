@@ -59,14 +59,20 @@ export interface RegisterOptions {
    * replaced by `logs`.
    */
   endpoint?: string;
-  /** Full OTLP traces URL, used as-is. Overrides `endpoint` for traces. */
+  /**
+   * Full OTLP traces URL, used as-is. Overrides `endpoint` and every
+   * OTEL_EXPORTER_OTLP_* endpoint env var for traces.
+   */
   tracesEndpoint?: string;
-  /** Full OTLP logs URL for evaluation events, used as-is. Overrides `endpoint` for logs. */
+  /**
+   * Full OTLP logs URL for evaluation events, used as-is. Overrides `endpoint`
+   * and every OTEL_EXPORTER_OTLP_* endpoint env var for logs.
+   */
   logsEndpoint?: string;
   /**
-   * Protocol for every signal. Default per signal:
-   * OTEL_EXPORTER_OTLP_<SIGNAL>_PROTOCOL, else OTEL_EXPORTER_OTLP_PROTOCOL,
-   * else the URL scheme (`grpc://` / `grpcs://` mean gRPC), else HTTP.
+   * Protocol for every signal. Default per signal: a `grpc://` / `grpcs://`
+   * scheme on the URL passed in code, else OTEL_EXPORTER_OTLP_<SIGNAL>_PROTOCOL,
+   * else OTEL_EXPORTER_OTLP_PROTOCOL, else the URL scheme, else HTTP.
    */
   protocol?: OtlpProtocol;
   /**
@@ -167,16 +173,25 @@ function schemeProtocol(url: string): OtlpProtocol {
 }
 
 /**
- * Protocol of one signal: `protocol` option, else
- * OTEL_EXPORTER_OTLP_<SIGNAL>_PROTOCOL, else OTEL_EXPORTER_OTLP_PROTOCOL, else
- * the scheme of `url` (`grpc://` / `grpcs://` mean gRPC), else HTTP.
+ * Protocol of one signal. Code options win over env vars:
+ *
+ * 1. `protocol` option
+ * 2. a `grpc://` / `grpcs://` scheme on `url`, when `url` came from code
+ *    (`fromCode`)
+ * 3. OTEL_EXPORTER_OTLP_<SIGNAL>_PROTOCOL, then OTEL_EXPORTER_OTLP_PROTOCOL
+ * 4. the scheme of `url` (`grpc://` / `grpcs://` mean gRPC), else HTTP
+ *
+ * An http:// or https:// scheme does not select HTTP over the env vars: the
+ * OTel JS gRPC exporters take http(s):// URLs too.
  */
 export function resolveSignalProtocol(
   signal: OtlpSignal,
   options: Pick<RegisterOptions, "protocol">,
   url: string,
+  fromCode = false,
 ): OtlpProtocol {
   if (options.protocol) return options.protocol;
+  if (fromCode && schemeProtocol(url) === "grpc") return "grpc";
   const signalEnv = `OTEL_EXPORTER_OTLP_${signal.toUpperCase()}_PROTOCOL`;
   return (
     parseProtocol(process.env[signalEnv], signalEnv) ??
@@ -192,12 +207,15 @@ export interface SignalEndpoint {
 }
 
 /**
- * Endpoint and protocol of one signal, following the OTel exporter spec:
+ * Endpoint and protocol of one signal (traces or logs). Code options always
+ * win over env vars, as in the OTel SDK exporters:
  *
  * 1. `tracesEndpoint` / `logsEndpoint` (full URL, used as-is)
- * 2. OTEL_EXPORTER_OTLP_<SIGNAL>_ENDPOINT (full URL, used as-is)
- * 3. Base URL (`endpoint`, else OTEL_EXPORTER_OTLP_ENDPOINT, else
- *    DEFAULT_BASE_ENDPOINT) + `/v1/<signal>` over HTTP, as-is over gRPC
+ * 2. `endpoint` (base URL) + `/v1/<signal>` over HTTP, as-is over gRPC. The
+ *    deprecated traces URL form of `endpoint` takes this place too.
+ * 3. OTEL_EXPORTER_OTLP_<SIGNAL>_ENDPOINT (full URL, used as-is)
+ * 4. OTEL_EXPORTER_OTLP_ENDPOINT (base URL, same rule as `endpoint`)
+ * 5. DEFAULT_BASE_ENDPOINT (base URL, same rule)
  *
  * The protocol comes from resolveSignalProtocol() on the chosen URL. The
  * returned URL has an http:// or https:// scheme (`grpc://` and `grpcs://`
@@ -208,30 +226,50 @@ export function resolveSignalEndpoint(
   options: Pick<RegisterOptions, "endpoint" | "tracesEndpoint" | "logsEndpoint" | "protocol">,
 ): SignalEndpoint {
   const own = signal === "traces" ? options.tracesEndpoint : options.logsEndpoint;
-  const explicit = own || process.env[`OTEL_EXPORTER_OTLP_${signal.toUpperCase()}_ENDPOINT`];
-  if (explicit) {
-    return { url: httpScheme(explicit), protocol: resolveSignalProtocol(signal, options, explicit) };
+  if (own) return fullUrl(signal, options, own, true);
+
+  if (options.endpoint) {
+    const protocol = resolveSignalProtocol(signal, options, options.endpoint, true);
+    // Deprecated: `endpoint` written as a full traces URL (see RegisterOptions.endpoint).
+    const legacy = protocol === "http" ? legacyTracesEndpoint(options.endpoint) : null;
+    if (legacy) return { url: httpScheme(signal === "traces" ? legacy.traces : legacy.logs), protocol };
+    return baseUrl(signal, options.endpoint, protocol);
   }
 
-  const base = options.endpoint || process.env.OTEL_EXPORTER_OTLP_ENDPOINT || DEFAULT_BASE_ENDPOINT;
-  const protocol = resolveSignalProtocol(signal, options, base);
+  const envFull = process.env[`OTEL_EXPORTER_OTLP_${signal.toUpperCase()}_ENDPOINT`];
+  if (envFull) return fullUrl(signal, options, envFull, false);
+
+  const base = process.env.OTEL_EXPORTER_OTLP_ENDPOINT || DEFAULT_BASE_ENDPOINT;
+  return baseUrl(signal, base, resolveSignalProtocol(signal, options, base));
+}
+
+/** A full signal URL, used as-is. */
+function fullUrl(
+  signal: OtlpSignal,
+  options: Pick<RegisterOptions, "protocol">,
+  url: string,
+  fromCode: boolean,
+): SignalEndpoint {
+  return { url: httpScheme(url), protocol: resolveSignalProtocol(signal, options, url, fromCode) };
+}
+
+/** A base URL: `/v1/<signal>` appended over HTTP, as-is over gRPC. */
+function baseUrl(signal: OtlpSignal, base: string, protocol: OtlpProtocol): SignalEndpoint {
   if (protocol === "grpc") return { url: httpScheme(base), protocol };
-  // Deprecated: `endpoint` written as a full traces URL (see RegisterOptions.endpoint).
-  const legacy = options.endpoint ? legacyTracesEndpoint(options.endpoint) : null;
-  if (legacy) return { url: httpScheme(signal === "traces" ? legacy.traces : legacy.logs), protocol };
   return { url: `${httpScheme(base).replace(/\/+$/, "")}/v1/${signal}`, protocol };
 }
 
 /**
- * True when a logs destination is configured: `logsEndpoint`, `endpoint`,
- * OTEL_EXPORTER_OTLP_LOGS_ENDPOINT or OTEL_EXPORTER_OTLP_ENDPOINT. False means
- * the logs endpoint would be the Data Prepper default.
+ * True when a logs destination is configured, that is when
+ * resolveSignalEndpoint("logs") would not fall back to the Data Prepper
+ * default: `logsEndpoint`, `endpoint`, OTEL_EXPORTER_OTLP_LOGS_ENDPOINT or
+ * OTEL_EXPORTER_OTLP_ENDPOINT (same order).
  */
 function hasLogsDestination(options: RegisterOptions): boolean {
   return Boolean(
     options.logsEndpoint ||
-      process.env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT ||
       options.endpoint ||
+      process.env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT ||
       process.env.OTEL_EXPORTER_OTLP_ENDPOINT,
   );
 }
@@ -427,6 +465,31 @@ async function tryAutoInstrument(): Promise<void> {
   }
 }
 
+/**
+ * Set up the OTel traces pipeline and the logs pipeline that carries
+ * evaluation events (`gen_ai.evaluation.result`).
+ *
+ * Endpoint resolution, per signal (traces and logs). Code options always win
+ * over env vars, as in the OTel SDK exporters:
+ *
+ * 1. `tracesEndpoint` / `logsEndpoint`: full URL, used as-is
+ * 2. `endpoint`: base URL, `/v1/<signal>` appended over HTTP, as-is over gRPC
+ *    (the deprecated traces URL form of `endpoint` takes this place)
+ * 3. OTEL_EXPORTER_OTLP_TRACES_ENDPOINT / OTEL_EXPORTER_OTLP_LOGS_ENDPOINT:
+ *    full URL, used as-is
+ * 4. OTEL_EXPORTER_OTLP_ENDPOINT: base URL, same rule as `endpoint`
+ * 5. the Data Prepper base DEFAULT_BASE_ENDPOINT, same rule
+ *
+ * Protocol, per signal: `protocol`, else a `grpc://` / `grpcs://` scheme on a
+ * URL passed in code, else OTEL_EXPORTER_OTLP_<SIGNAL>_PROTOCOL, else
+ * OTEL_EXPORTER_OTLP_PROTOCOL, else the URL scheme, else HTTP.
+ *
+ * @example
+ * // OTEL_EXPORTER_OTLP_LOGS_ENDPOINT=http://env-logs:4318/v1/logs is set.
+ * await register({ endpoint: "http://collector:4318" });
+ * // traces -> http://collector:4318/v1/traces
+ * // logs   -> http://collector:4318/v1/logs (endpoint beats the env var)
+ */
 export async function register(
   options: RegisterOptions = {},
 ): Promise<BasicTracerProvider> {
