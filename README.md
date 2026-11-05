@@ -167,7 +167,7 @@ An unknown agent is left out, never invented. `evaluate()` also stamps the agent
 | `serviceVersion` | `string` | none | `service.version` resource attribute |
 | `batch` | `boolean` | `true` | Use BatchSpanProcessor when true |
 | `autoInstrument` | `boolean` | `true` | Discover and activate instrumentor packages |
-| `exporter` | `SpanExporter` | none | Custom span exporter, used as given (traces only) |
+| `exporter` | `SpanExporter` | none | Custom span exporter, used as given (traces only). Without a logs destination, no logs pipeline is set up (see [Endpoints](#endpoints-traces-and-evaluation-logs)) |
 | `headers` | `Record<string, string>` | none | Headers for every export (traces and logs). Over gRPC they are sent as gRPC metadata with lowercased keys (gRPC rejects uppercase keys) |
 | `logs` | `boolean` | `true` | Set up a LoggerProvider for evaluation events |
 | `logExporter` | `LogRecordExporter` | none | Custom log exporter, used as given (logs only) |
@@ -192,7 +192,7 @@ Spans and evaluation events (`gen_ai.evaluation.result`) are separate OTLP signa
 3. `OTEL_EXPORTER_OTLP_PROTOCOL`
 4. URL scheme of that signal's endpoint (`grpc://` or `grpcs://` mean gRPC, mapped to `http://` / `https://`), else HTTP
 
-Every signal always has an endpoint, so evaluation events are never dropped for lack of a logs URL. `exporter` and `logExporter` are escape hatches: each replaces one signal's exporter and nothing is derived from it.
+`exporter` and `logExporter` are escape hatches: each replaces one signal's exporter and nothing is derived from it. Without `exporter`, every signal has an endpoint (the Data Prepper default at worst). With `exporter` and no logs destination (`logExporter`, `logsEndpoint`, `endpoint`, `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` or `OTEL_EXPORTER_OTLP_ENDPOINT`), `register()` does not set up a logs pipeline: it warns once, and evaluation events go to the global `LoggerProvider` (a no-op unless you registered one). Pass `logsEndpoint` or `logExporter` to export them.
 
 **Local OTel Collector or Data Prepper.** One base URL serves both signals:
 
@@ -222,7 +222,7 @@ await register({
 });
 ```
 
-**Migrating from a traces URL in `endpoint`.** Before this release `endpoint` was the full traces URL. An `endpoint` that ends in `/v1/traces` is still accepted for one release: traces go to it, logs go to its base + `/v1/logs`, and `register()` prints a deprecation warning. Pass the base URL (or `tracesEndpoint`) instead.
+**Migrating from a traces URL in `endpoint`.** Before this release `endpoint` was the full traces URL. An `endpoint` whose path ends in `traces` (for example `http://c:4318/v1/traces` or `https://gw/otlp/traces`) is still accepted for one release: over HTTP traces go to it as-is, logs go to the same URL with that last segment replaced by `logs` (`/v1/logs`, `/otlp/logs`), and `register()` prints a deprecation warning. Pass the base URL, or `tracesEndpoint` and `logsEndpoint`, instead.
 
 **Scores over gRPC.** The OTLP/HTTP log exporters send whole-number scores as `doubleValue` (see [Scores are doubles](#score)); the gRPC log exporter sends them as `intValue`. The evaluation index maps them as `double` either way.
 

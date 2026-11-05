@@ -730,7 +730,7 @@ explore.agentTraces.evaluations.enabled: true
 ## Troubleshooting
 
 - **No events at all.** `register()` was not called, or your own OTel setup has no global `LoggerProvider`. Short scripts: `await provider.forceFlush()` before the process exits.
-- **Traces arrive, results do not.** The logs endpoint points somewhere that does not accept OTLP logs (for example `tracesEndpoint` is set but the base URL is not a collector). Set `logsEndpoint` or `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`. With OSI, the logs pipeline must be a separate pipeline with an OTLP logs source.
+- **Traces arrive, results do not.** The logs endpoint points somewhere that does not accept OTLP logs (for example `tracesEndpoint` is set but the base URL is not a collector). Set `logsEndpoint` or `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`. With OSI, the logs pipeline must be a separate pipeline with an OTLP logs source. With a custom `exporter` and no logs destination, `register()` sets up no logs pipeline and warns once; pass `logsEndpoint` or `logExporter`.
 - **Results have no trace link.** Pass `traceId` (and `spanId`) to `score()`; inline scoring needs an OTel context manager. In `evaluate()`, the task must start a span (for example with `observe()`) and be synchronous.
 - **Results land in the logs index.** The route did not match `eventName`. Check that the route uses `/eventName == "gen_ai.evaluation.result"` and that your Data Prepper version maps the OTLP `event_name` field to `eventName` (added in opensearch-project/data-prepper#7148).
 - **Field types look wrong** (strings as `text` with `.keyword` sub-fields, `time` not a date). The index was created before the index template. Create the template, then wait for the next daily index or reindex.

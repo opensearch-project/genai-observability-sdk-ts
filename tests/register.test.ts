@@ -19,6 +19,7 @@ import {
   createSpanExporter,
   resolveSignalEndpoint,
   grpcMetadata,
+  resetRegisterWarnings,
   DEFAULT_BASE_ENDPOINT,
   DEFAULT_ENDPOINT,
   DEFAULT_LOGS_ENDPOINT,
@@ -276,6 +277,27 @@ describe('resolveSignalEndpoint', () => {
     expect(resolveSignalEndpoint('traces', options).url).toBe('http://c:4318/v1/traces');
     expect(resolveSignalEndpoint('logs', options).url).toBe('http://c:4318/v1/logs');
   });
+
+  it('a legacy endpoint whose last path segment is traces is the traces URL; logs replace that segment', () => {
+    const options = { endpoint: 'https://gw/otlp/traces' };
+    expect(resolveSignalEndpoint('traces', options)).toEqual({ url: 'https://gw/otlp/traces', protocol: 'http' });
+    expect(resolveSignalEndpoint('logs', options)).toEqual({ url: 'https://gw/otlp/logs', protocol: 'http' });
+    const trailing = { endpoint: 'https://gw/traces/' };
+    expect(resolveSignalEndpoint('traces', trailing).url).toBe('https://gw/traces/');
+    expect(resolveSignalEndpoint('logs', trailing).url).toBe('https://gw/logs');
+  });
+
+  it('a base URL that only contains traces elsewhere in the path is not legacy', () => {
+    const options = { endpoint: 'https://gw/traces/otlp' };
+    expect(resolveSignalEndpoint('traces', options).url).toBe('https://gw/traces/otlp/v1/traces');
+    expect(resolveSignalEndpoint('logs', options).url).toBe('https://gw/traces/otlp/v1/logs');
+  });
+
+  it('a legacy traces URL over gRPC is used as-is for both signals', () => {
+    const options = { endpoint: 'grpc://c:4317/otlp/traces' };
+    expect(resolveSignalEndpoint('traces', options)).toEqual({ url: 'http://c:4317/otlp/traces', protocol: 'grpc' });
+    expect(resolveSignalEndpoint('logs', options)).toEqual({ url: 'http://c:4317/otlp/traces', protocol: 'grpc' });
+  });
 });
 
 describe('register - exporters', () => {
@@ -402,6 +424,129 @@ describe('register - exporters', () => {
     });
     expect(warnSpy).toHaveBeenCalledTimes(1);
     expect(warnSpy).toHaveBeenCalledWith(expect.stringMatching(/endpoint is now the OTLP base URL/));
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('pass the base ("http://custom:4318")'));
+    warnSpy.mockRestore();
+    await provider.shutdown();
+  });
+
+  it('warns about a legacy traces URL whose path ends in traces without /v1', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const provider = await register({
+      endpoint: 'https://gw/otlp/traces',
+      logExporter: new InMemoryLogRecordExporter(),
+      setGlobal: false,
+      autoInstrument: false,
+    });
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    const message = String(warnSpy.mock.calls[0][0]);
+    expect(message).toMatch(/endpoint is now the OTLP base URL/);
+    expect(message).toContain('logs sent to "https://gw/otlp/logs"');
+    expect(message).toContain('pass tracesEndpoint ("https://gw/otlp/traces") and logsEndpoint');
+    warnSpy.mockRestore();
+    await provider.shutdown();
+  });
+
+  it('does not warn for a base URL', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const provider = await register({
+      endpoint: 'http://collector:4318',
+      logExporter: new InMemoryLogRecordExporter(),
+      setGlobal: false,
+      autoInstrument: false,
+    });
+    expect(warnSpy).not.toHaveBeenCalled();
+    warnSpy.mockRestore();
+    await provider.shutdown();
+  });
+});
+
+describe('register - custom span exporter without a logs destination', () => {
+  const originalEnv = process.env;
+
+  beforeEach(() => {
+    process.env = { ...originalEnv };
+    for (const key of OTLP_ENV) delete process.env[key];
+    resetRegisterWarnings();
+  });
+
+  afterEach(() => {
+    process.env = originalEnv;
+    logs.disable();
+    setSdkLoggerProvider(undefined);
+  });
+
+  const NO_LOGS_WARNING = /no logs destination is configured.*pass logsEndpoint or logExporter/;
+
+  it('skips the logs pipeline and warns once', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const first = await register({ exporter: new InMemorySpanExporter(), autoInstrument: false });
+    expect(getSdkLoggerProvider()).toBeUndefined();
+    const second = await register({ exporter: new InMemorySpanExporter(), setGlobal: false, autoInstrument: false });
+    expect(getSdkLoggerProvider()).toBeUndefined();
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringMatching(NO_LOGS_WARNING));
+    warnSpy.mockRestore();
+    await first.shutdown();
+    await second.shutdown();
+  });
+
+  it('score() events then go to the global LoggerProvider', async () => {
+    const userExporter = new InMemoryLogRecordExporter();
+    const userProvider = new LoggerProvider({
+      processors: [new SimpleLogRecordProcessor({ exporter: userExporter })],
+    });
+    logs.setGlobalLoggerProvider(userProvider);
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const provider = await register({ exporter: new InMemorySpanExporter(), setGlobal: false, autoInstrument: false });
+    expect(getSdkLoggerProvider()).toBeUndefined();
+    score({ name: 'x', value: 1 });
+    expect(userExporter.getFinishedLogRecords()).toHaveLength(1);
+    warnSpy.mockRestore();
+    await provider.shutdown();
+    await userProvider.shutdown();
+  });
+
+  it('drops the LoggerProvider of a previous register()', async () => {
+    const earlier = new InMemoryLogRecordExporter();
+    await register({ exporter: new InMemorySpanExporter(), logExporter: earlier, batch: false, autoInstrument: false });
+    const sdkProvider = getSdkLoggerProvider();
+    expect(logs.getLoggerProvider()).toBe(sdkProvider);
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const provider = await register({ exporter: new InMemorySpanExporter(), batch: false, autoInstrument: false });
+    expect(getSdkLoggerProvider()).toBeUndefined();
+    expect(logs.getLoggerProvider()).not.toBe(sdkProvider);
+    score({ name: 'x', value: 1 });
+    expect(earlier.getFinishedLogRecords()).toHaveLength(0);
+    warnSpy.mockRestore();
+    await provider.shutdown();
+  });
+
+  it.each([
+    ['logExporter', { logExporter: new InMemoryLogRecordExporter() }, {}],
+    ['logsEndpoint', { logsEndpoint: 'http://c:4318/v1/logs' }, {}],
+    ['endpoint', { endpoint: 'http://c:4318' }, {}],
+    ['OTEL_EXPORTER_OTLP_LOGS_ENDPOINT', {}, { OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: 'http://c:4318/v1/logs' }],
+    ['OTEL_EXPORTER_OTLP_ENDPOINT', {}, { OTEL_EXPORTER_OTLP_ENDPOINT: 'http://c:4318' }],
+  ])('keeps the logs pipeline with %s', async (_name, extra, env) => {
+    Object.assign(process.env, env);
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const provider = await register({
+      exporter: new InMemorySpanExporter(),
+      setGlobal: false,
+      autoInstrument: false,
+      ...extra,
+    });
+    expect(getSdkLoggerProvider()).toBeDefined();
+    expect(warnSpy).not.toHaveBeenCalled();
+    warnSpy.mockRestore();
+    await provider.shutdown();
+  });
+
+  it('without a custom exporter, keeps the default logs pipeline', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const provider = await register({ setGlobal: false, autoInstrument: false });
+    expect(getSdkLoggerProvider()).toBeDefined();
+    expect(warnSpy).not.toHaveBeenCalled();
     warnSpy.mockRestore();
     await provider.shutdown();
   });

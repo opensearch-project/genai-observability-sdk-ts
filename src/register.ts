@@ -52,8 +52,11 @@ export interface RegisterOptions {
   /**
    * OTLP base URL for all signals (same meaning as OTEL_EXPORTER_OTLP_ENDPOINT).
    * Over HTTP the SDK appends `/v1/traces` and `/v1/logs`; over gRPC the URL is
-   * used as-is for both. A URL ending in `/v1/traces` is still accepted as the
-   * traces URL (its base is used for logs), with a deprecation warning.
+   * used as-is for both. Deprecated form, accepted for one release with a
+   * warning: a full traces URL, whose path ends in `traces` (for example
+   * `http://c:4318/v1/traces` or `https://gw/otlp/traces`). Over HTTP it is then
+   * used as-is for traces, and logs go to the same URL with that last segment
+   * replaced by `logs`.
    */
   endpoint?: string;
   /** Full OTLP traces URL, used as-is. Overrides `endpoint` for traces. */
@@ -77,7 +80,14 @@ export interface RegisterOptions {
   serviceVersion?: string;
   batch?: boolean;
   autoInstrument?: boolean;
-  /** Custom span exporter. Replaces the traces endpoint, protocol and sigv4 for traces only. */
+  /**
+   * Custom span exporter. Replaces the traces endpoint, protocol and sigv4 for
+   * traces only. With `exporter` and no logs destination (`logExporter`,
+   * `logsEndpoint`, `endpoint`, OTEL_EXPORTER_OTLP_LOGS_ENDPOINT or
+   * OTEL_EXPORTER_OTLP_ENDPOINT), register() does not set up the logs pipeline
+   * and warns once: evaluation events then go to the global LoggerProvider
+   * (a no-op unless you registered one).
+   */
   exporter?: SpanExporter;
   setGlobal?: boolean;
   /**
@@ -107,11 +117,37 @@ const INSTRUMENTOR_PACKAGES = [
   "@opentelemetry/instrumentation-openai",
 ];
 
-const LEGACY_TRACES_SUFFIX_RE = /\/v1\/traces\/?$/;
+/** Traces and logs URLs of an `endpoint` option written as a full traces URL (deprecated form). */
+interface LegacyTracesEndpoint {
+  traces: string;
+  logs: string;
+  /** The base URL, when the path ends in `/v1/traces`. */
+  base?: string;
+}
 
-/** The base URL of an `endpoint` option written as a full traces URL (deprecated form). */
-function legacyBase(endpoint: string): string | null {
-  return LEGACY_TRACES_SUFFIX_RE.test(endpoint) ? endpoint.replace(LEGACY_TRACES_SUFFIX_RE, "") : null;
+/**
+ * Parse the deprecated form of `endpoint`: a full traces URL, whose path's last
+ * segment is `traces`. Null for a base URL.
+ */
+function legacyTracesEndpoint(endpoint: string): LegacyTracesEndpoint | null {
+  const traces = endpoint.trim();
+  let url: URL;
+  try {
+    url = new URL(traces);
+  } catch {
+    return null;
+  }
+  const segments = url.pathname.replace(/\/+$/, "").split("/");
+  if (segments[segments.length - 1] !== "traces") return null;
+  const parent = segments.slice(0, -1);
+  url.pathname = [...parent, "logs"].join("/");
+  const logsUrl = url.toString();
+  let base: string | undefined;
+  if (parent[parent.length - 1] === "v1") {
+    url.pathname = parent.slice(0, -1).join("/");
+    base = url.toString().replace(/\/+$/, "");
+  }
+  return { traces, logs: logsUrl, base };
 }
 
 function parseProtocol(value: string | undefined, source: string): OtlpProtocol | undefined {
@@ -177,13 +213,46 @@ export function resolveSignalEndpoint(
     return { url: httpScheme(explicit), protocol: resolveSignalProtocol(signal, options, explicit) };
   }
 
-  const base =
-    (options.endpoint && (legacyBase(options.endpoint) ?? options.endpoint)) ||
-    process.env.OTEL_EXPORTER_OTLP_ENDPOINT ||
-    DEFAULT_BASE_ENDPOINT;
+  const base = options.endpoint || process.env.OTEL_EXPORTER_OTLP_ENDPOINT || DEFAULT_BASE_ENDPOINT;
   const protocol = resolveSignalProtocol(signal, options, base);
   if (protocol === "grpc") return { url: httpScheme(base), protocol };
+  // Deprecated: `endpoint` written as a full traces URL (see RegisterOptions.endpoint).
+  const legacy = options.endpoint ? legacyTracesEndpoint(options.endpoint) : null;
+  if (legacy) return { url: httpScheme(signal === "traces" ? legacy.traces : legacy.logs), protocol };
   return { url: `${httpScheme(base).replace(/\/+$/, "")}/v1/${signal}`, protocol };
+}
+
+/**
+ * True when a logs destination is configured: `logsEndpoint`, `endpoint`,
+ * OTEL_EXPORTER_OTLP_LOGS_ENDPOINT or OTEL_EXPORTER_OTLP_ENDPOINT. False means
+ * the logs endpoint would be the Data Prepper default.
+ */
+function hasLogsDestination(options: RegisterOptions): boolean {
+  return Boolean(
+    options.logsEndpoint ||
+      process.env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT ||
+      options.endpoint ||
+      process.env.OTEL_EXPORTER_OTLP_ENDPOINT,
+  );
+}
+
+let warnedNoLogsDestination = false;
+
+function warnNoLogsDestinationOnce(): void {
+  if (warnedNoLogsDestination) return;
+  warnedNoLogsDestination = true;
+  console.warn(
+    "[opensearch-genai-observability-sdk-ts] register(): a custom exporter was passed and no " +
+      "logs destination is configured, so the SDK does not set up a logs pipeline and " +
+      "evaluation events go to the global LoggerProvider (a no-op unless you registered one). " +
+      "To export them, pass logsEndpoint or logExporter (or endpoint, or set " +
+      "OTEL_EXPORTER_OTLP_LOGS_ENDPOINT).",
+  );
+}
+
+/** Test hook: let the next register() warn again about a missing logs destination. */
+export function resetRegisterWarnings(): void {
+  warnedNoLogsDestination = false;
 }
 
 /**
@@ -237,6 +306,8 @@ export async function createSpanExporter(options: RegisterOptions): Promise<Span
 /**
  * The log exporter for evaluation events: `logExporter`, else one built from
  * the logs endpoint (resolved like traces, so it always has an endpoint).
+ * register() does not call it when `exporter` is set and no logs destination
+ * is configured.
  */
 export async function createLogExporter(options: RegisterOptions): Promise<LogRecordExporter> {
   if (options.logExporter) return options.logExporter;
@@ -282,6 +353,18 @@ async function setupLogs(
   const globalIsOurs = previous !== undefined && logs.getLoggerProvider() === previous;
   if (setGlobal && hasGlobalLoggerProvider() && !globalIsOurs) {
     // Respect a user-configured global LoggerProvider; score() emits through it.
+    return null;
+  }
+
+  if (options.exporter && !options.logExporter && !hasLogsDestination(options)) {
+    // Do not export evaluation events to the default localhost URL behind a
+    // custom span exporter. Drop a provider left over from a previous register().
+    warnNoLogsDestinationOnce();
+    if (previous instanceof LoggerProvider) {
+      await previous.shutdown().catch(() => {});
+    }
+    if (globalIsOurs) logs.disable();
+    setSdkLoggerProvider(undefined);
     return null;
   }
 
@@ -348,11 +431,16 @@ export async function register(
   options: RegisterOptions = {},
 ): Promise<BasicTracerProvider> {
   setAgentDefaults(options.agentName, options.agentVersion);
-  if (options.endpoint && legacyBase(options.endpoint) !== null) {
+  const legacy = options.endpoint ? legacyTracesEndpoint(options.endpoint) : null;
+  if (legacy) {
+    const fix = legacy.base
+      ? `pass the base ("${legacy.base}"), or tracesEndpoint and logsEndpoint`
+      : `pass tracesEndpoint ("${legacy.traces}") and logsEndpoint`;
     console.warn(
       `[opensearch-genai-observability-sdk-ts] register(): endpoint "${options.endpoint}" is a ` +
-        `traces URL. endpoint is now the OTLP base URL for all signals; pass the base ` +
-        `("${legacyBase(options.endpoint)}") or tracesEndpoint. This form is removed in a future release.`,
+        `traces URL. endpoint is now the OTLP base URL for all signals. For this release it is ` +
+        `still used as the traces URL over HTTP, with logs sent to "${legacy.logs}"; ${fix}. ` +
+        `This form is removed in a future release.`,
     );
   }
 
