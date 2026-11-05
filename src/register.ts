@@ -17,6 +17,12 @@ import {
   type LoggerProviderConfig,
 } from "@opentelemetry/sdk-logs";
 import { AWSSigV4OTLPExporter, AWSSigV4OTLPLogExporter, sendScoresAsDouble } from "./exporters.js";
+import {
+  resolveCompression,
+  resolveTimeoutMillis,
+  type OtlpCompression,
+  type OtlpSignal,
+} from "./otlp-env.js";
 import { installTestCaseProcessor } from "./testcase.js";
 import { setAgentDefaults } from "./internal.js";
 import {
@@ -44,8 +50,13 @@ export const DEFAULT_LOGS_ENDPOINT = `${DEFAULT_BASE_ENDPOINT}/v1/logs`;
 
 export type OtlpProtocol = "http" | "grpc";
 
-/** An OTLP signal the SDK exports: spans, and evaluation events as logs. */
-export type OtlpSignal = "traces" | "logs";
+/**
+ * Values accepted for the `protocol` option: `"http"` and `"http/protobuf"`
+ * both mean OTLP/HTTP with binary protobuf. `"http/json"` is rejected.
+ */
+export type OtlpProtocolOption = OtlpProtocol | "http/protobuf";
+
+export type { OtlpSignal, OtlpCompression } from "./otlp-env.js";
 
 /** Sign OTLP/HTTP requests with AWS SigV4 (for example an OSIS pipeline). */
 export interface SigV4Options {
@@ -83,11 +94,27 @@ export interface RegisterOptions {
    * Protocol for every signal. Default per signal: a `grpc://` / `grpcs://`
    * scheme on the URL passed in code, else OTEL_EXPORTER_OTLP_<SIGNAL>_PROTOCOL,
    * else OTEL_EXPORTER_OTLP_PROTOCOL, else the URL scheme, else HTTP.
-   * `"http"` is OTLP/HTTP with binary protobuf (`application/x-protobuf`);
-   * the SDK never sends OTLP/JSON, and an env value of `http/json` is sent as
-   * protobuf too.
+   * `"http"` (or `"http/protobuf"`) is OTLP/HTTP with binary protobuf
+   * (`application/x-protobuf`). The SDK never sends OTLP/JSON: `"http/json"`,
+   * as an option or env value, throws, because Data Prepper and OSIS read its
+   * hex ids as base64 and corrupt trace and span ids.
    */
-  protocol?: OtlpProtocol;
+  protocol?: OtlpProtocolOption;
+  /**
+   * OTLP request compression for every exporter register() builds (OTLP/HTTP,
+   * SigV4 and gRPC): `"none"` or `"gzip"`. Default per signal:
+   * OTEL_EXPORTER_OTLP_<SIGNAL>_COMPRESSION, else
+   * OTEL_EXPORTER_OTLP_COMPRESSION, else `"none"`. It must match the receiving
+   * pipeline: OSIS accepts only none or gzip, and the client must use the
+   * pipeline's `compression`.
+   */
+  compression?: OtlpCompression;
+  /**
+   * Timeout of each export request, in milliseconds. Default per signal:
+   * OTEL_EXPORTER_OTLP_<SIGNAL>_TIMEOUT, else OTEL_EXPORTER_OTLP_TIMEOUT,
+   * else 10000.
+   */
+  timeoutMillis?: number;
   /**
    * Sign both signals with AWS SigV4: register() creates an
    * AWSSigV4OTLPExporter for traces and an AWSSigV4OTLPLogExporter for logs.
@@ -172,16 +199,34 @@ function assertSignalEndpointsPaired(options: RegisterOptions): void {
   );
 }
 
+function rejectJson(source: string): never {
+  throw new Error(
+    `register(): ${source}="http/json" is not supported. OTLP/JSON sends hex trace and span ids ` +
+      `that Data Prepper and OSIS read as base64, corrupting them. Use "http/protobuf" (or "http") or "grpc".`,
+  );
+}
+
 function parseProtocol(value: string | undefined, source: string): OtlpProtocol | undefined {
   const v = value?.trim().toLowerCase();
   if (!v) return undefined;
   if (v === "grpc") return "grpc";
-  if (v === "http" || v === "http/protobuf" || v === "http/json") return "http";
+  if (v === "http" || v === "http/protobuf") return "http";
+  if (v === "http/json") rejectJson(source);
   console.warn(
     `[opensearch-genai-observability-sdk-ts] register(): ignoring ${source}="${value}" ` +
-      `(expected grpc, http/protobuf or http/json)`,
+      `(expected grpc or http/protobuf)`,
   );
   return undefined;
+}
+
+/** The `protocol` option, normalized. Throws on http/json or an unknown value. */
+function protocolOption(value: string | undefined): OtlpProtocol | undefined {
+  if (value === undefined) return undefined;
+  const v = value.trim().toLowerCase();
+  if (v === "grpc") return "grpc";
+  if (v === "http" || v === "http/protobuf") return "http";
+  if (v === "http/json") rejectJson("protocol");
+  throw new Error(`register(): protocol must be "http", "http/protobuf" or "grpc"; got "${value}"`);
 }
 
 function schemeProtocol(url: string): OtlpProtocol {
@@ -206,7 +251,8 @@ export function resolveSignalProtocol(
   url: string,
   fromCode = false,
 ): OtlpProtocol {
-  if (options.protocol) return options.protocol;
+  const option = protocolOption(options.protocol);
+  if (option) return option;
   if (fromCode && schemeProtocol(url) === "grpc") return "grpc";
   const signalEnv = `OTEL_EXPORTER_OTLP_${signal.toUpperCase()}_PROTOCOL`;
   return (
@@ -344,22 +390,49 @@ function requireHttpForSigV4(signal: OtlpSignal, endpoint: SignalEndpoint): void
   }
 }
 
+/** Compression and timeout of one signal (code beats env vars). */
+interface TransportOptions {
+  compression: OtlpCompression;
+  timeoutMillis: number;
+}
+
+function transportOptions(signal: OtlpSignal, options: RegisterOptions): TransportOptions {
+  return {
+    compression: resolveCompression(signal, options.compression),
+    timeoutMillis: resolveTimeoutMillis(signal, options.timeoutMillis),
+  };
+}
+
+/**
+ * The same settings for the OTel JS exporters. Their CompressionAlgorithm
+ * enum has the string values "none" and "gzip"; the enum type is not
+ * exported by a package this SDK depends on, hence the cast.
+ */
+function otelTransport(transport: TransportOptions): { compression: never; timeoutMillis: number } {
+  return { compression: transport.compression as never, timeoutMillis: transport.timeoutMillis };
+}
+
 /** The span exporter register() uses: `exporter`, else one built from the traces endpoint. */
 export async function createSpanExporter(options: RegisterOptions): Promise<SpanExporter> {
   if (options.exporter) return options.exporter;
   const endpoint = resolveSignalEndpoint("traces", options);
+  const transport = transportOptions("traces", options);
   if (options.sigv4) {
     requireHttpForSigV4("traces", endpoint);
-    return new AWSSigV4OTLPExporter({ endpoint: endpoint.url, ...options.sigv4 });
+    return new AWSSigV4OTLPExporter({ endpoint: endpoint.url, ...options.sigv4, ...transport, headers: options.headers });
   }
   if (endpoint.protocol === "grpc") {
     const { OTLPTraceExporter } = await import("@opentelemetry/exporter-trace-otlp-grpc");
-    return new OTLPTraceExporter({ url: endpoint.url, metadata: await grpcMetadata(options.headers) });
+    return new OTLPTraceExporter({
+      url: endpoint.url,
+      metadata: await grpcMetadata(options.headers),
+      ...otelTransport(transport),
+    });
   }
   // OTLP/HTTP is binary protobuf: OTLP/JSON hex ids are misread as base64 by
   // some receivers (Data Prepper, OSIS), corrupting trace and span ids.
   const { OTLPTraceExporter } = await import("@opentelemetry/exporter-trace-otlp-proto");
-  return new OTLPTraceExporter({ url: endpoint.url, headers: options.headers });
+  return new OTLPTraceExporter({ url: endpoint.url, headers: options.headers, ...otelTransport(transport) });
 }
 
 /**
@@ -371,16 +444,21 @@ export async function createSpanExporter(options: RegisterOptions): Promise<Span
 export async function createLogExporter(options: RegisterOptions): Promise<LogRecordExporter> {
   if (options.logExporter) return options.logExporter;
   const endpoint = resolveSignalEndpoint("logs", options);
+  const transport = transportOptions("logs", options);
   if (options.sigv4) {
     requireHttpForSigV4("logs", endpoint);
-    return new AWSSigV4OTLPLogExporter({ endpoint: endpoint.url, ...options.sigv4 });
+    return new AWSSigV4OTLPLogExporter({ endpoint: endpoint.url, ...options.sigv4, ...transport, headers: options.headers });
   }
   if (endpoint.protocol === "grpc") {
     const { OTLPLogExporter } = await import("@opentelemetry/exporter-logs-otlp-grpc");
-    return new OTLPLogExporter({ url: endpoint.url, metadata: await grpcMetadata(options.headers) });
+    return new OTLPLogExporter({
+      url: endpoint.url,
+      metadata: await grpcMetadata(options.headers),
+      ...otelTransport(transport),
+    });
   }
   const { OTLPLogExporter } = await import("@opentelemetry/exporter-logs-otlp-proto");
-  const exporter = new OTLPLogExporter({ url: endpoint.url, headers: options.headers });
+  const exporter = new OTLPLogExporter({ url: endpoint.url, headers: options.headers, ...otelTransport(transport) });
   sendScoresAsDouble(exporter);
   return exporter;
 }

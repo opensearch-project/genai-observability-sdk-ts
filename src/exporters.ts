@@ -2,6 +2,14 @@
 // Copyright OpenSearch Contributors
 
 import { createRequire } from 'module';
+import { gzipSync } from 'zlib';
+import {
+  resolveCompression,
+  resolveHeaders,
+  resolveTimeoutMillis,
+  type OtlpCompression,
+  type OtlpSignal,
+} from './otlp-env.js';
 import type { ReadableSpan, SpanExporter } from '@opentelemetry/sdk-trace-base';
 import type { LogRecordExporter, ReadableLogRecord } from '@opentelemetry/sdk-logs';
 
@@ -11,10 +19,33 @@ type ExportResult =
   | { code: typeof ExportResultCode.SUCCESS }
   | { code: typeof ExportResultCode.FAILED; error?: Error };
 
-interface SigV4Options {
+/** Options of AWSSigV4OTLPExporter and AWSSigV4OTLPLogExporter. */
+export interface SigV4ExporterOptions {
+  /** Full OTLP/HTTP URL of the signal, port included, used as-is. */
   endpoint: string;
+  /** AWS service name to sign for. Default `"osis"`. */
   service?: string;
+  /** AWS region. Default: AWS_DEFAULT_REGION, else AWS_REGION. */
   region?: string;
+  /**
+   * `"none"` or `"gzip"`. Default: OTEL_EXPORTER_OTLP_<SIGNAL>_COMPRESSION,
+   * else OTEL_EXPORTER_OTLP_COMPRESSION, else `"none"`. Must match the
+   * pipeline's `compression`. With gzip the body is compressed first, sent
+   * with `Content-Encoding: gzip`, and the signature covers the gzip bytes.
+   */
+  compression?: OtlpCompression;
+  /**
+   * Extra request headers, merged over OTEL_EXPORTER_OTLP_HEADERS and
+   * OTEL_EXPORTER_OTLP_<SIGNAL>_HEADERS. They are signed too. Content-Type,
+   * Content-Encoding and Host are set by the exporter.
+   */
+  headers?: Record<string, string>;
+  /**
+   * Timeout of each request attempt, in milliseconds. Default:
+   * OTEL_EXPORTER_OTLP_<SIGNAL>_TIMEOUT, else OTEL_EXPORTER_OTLP_TIMEOUT,
+   * else 10000.
+   */
+  timeoutMillis?: number;
 }
 
 function resolveRegion(region?: string): string {
@@ -32,53 +63,123 @@ function resolveRegion(region?: string): string {
 /** Content type of every OTLP/HTTP request the SDK sends: binary protobuf. */
 export const OTLP_PROTOBUF_CONTENT_TYPE = 'application/x-protobuf';
 
-/**
- * POST an OTLP protobuf body to `endpoint`, signed with AWS SigV4. The
- * signature covers exactly the bytes sent.
- */
-async function signAndPost(
-  endpoint: string,
-  service: string,
-  region: string,
-  serialized: Uint8Array,
-): Promise<void> {
-  const body = Buffer.from(serialized);
-  const url = new URL(endpoint);
+/** At most this many attempts per export (the first try plus two retries). */
+export const MAX_EXPORT_ATTEMPTS = 3;
 
-  const { fromNodeProviderChain } = await import('@aws-sdk/credential-providers');
-  const credentials = await fromNodeProviderChain()();
+/** Backoff between attempts. Mutable for tests only. */
+export const RETRY_BACKOFF = { initialMillis: 1000, maxMillis: 5000 };
 
-  const aws4Module = await import('aws4');
-  const aws4 = aws4Module.default ?? aws4Module;
-  const signed = aws4.sign(
-    {
-      service,
-      region,
-      method: 'POST',
-      path: url.pathname + url.search,
-      host: url.host,
-      headers: {
-        'Content-Type': OTLP_PROTOBUF_CONTENT_TYPE,
-        Host: url.host,
-      },
-      body,
-    },
-    {
-      accessKeyId: credentials.accessKeyId,
-      secretAccessKey: credentials.secretAccessKey,
-      sessionToken: credentials.sessionToken,
-    },
-  );
+/** Transient statuses retried with backoff (OTLP/HTTP spec, plus 507). */
+function isRetryableStatus(status: number): boolean {
+  return status === 408 || status === 429 || (status >= 500 && status <= 599);
+}
 
-  const response = await fetch(url.toString(), {
-    method: 'POST',
-    headers: signed.headers as Record<string, string>,
-    body,
-  });
+function backoffMillis(attempt: number, retryAfter: string | null): number {
+  const seconds = retryAfter !== null ? Number(retryAfter) : NaN;
+  if (Number.isFinite(seconds) && seconds >= 0) return Math.min(seconds * 1000, RETRY_BACKOFF.maxMillis);
+  const base = RETRY_BACKOFF.initialMillis * 2 ** (attempt - 1);
+  // +/-20% jitter so that shards do not retry in lockstep.
+  return Math.min(base * (0.8 + Math.random() * 0.4), RETRY_BACKOFF.maxMillis);
+}
 
-  if (!response.ok) {
-    throw new Error(`Export failed: ${response.status} ${response.statusText}`);
+const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
+
+/** Everything a signed export needs, resolved once per exporter. */
+class SignedPost {
+  readonly endpoint: string;
+  readonly service: string;
+  readonly region: string;
+  readonly compression: OtlpCompression;
+  readonly headers: Record<string, string>;
+  readonly timeoutMillis: number;
+
+  constructor(signal: OtlpSignal, options: SigV4ExporterOptions) {
+    this.endpoint = options.endpoint;
+    this.service = options.service ?? 'osis';
+    this.region = resolveRegion(options.region);
+    this.compression = resolveCompression(signal, options.compression);
+    this.headers = resolveHeaders(signal, options.headers);
+    this.timeoutMillis = resolveTimeoutMillis(signal, options.timeoutMillis);
   }
+
+  /**
+   * POST an OTLP protobuf body, gzipped first when compression is gzip, and
+   * signed with AWS SigV4 over exactly the bytes sent. Retries 408, 429 and
+   * 5xx (and network errors or timeouts) with backoff, up to
+   * MAX_EXPORT_ATTEMPTS attempts; any other failure is final.
+   */
+  async send(serialized: Uint8Array): Promise<void> {
+    const body = this.compression === 'gzip' ? gzipSync(serialized) : Buffer.from(serialized);
+    const url = new URL(this.endpoint);
+
+    const { fromNodeProviderChain } = await import('@aws-sdk/credential-providers');
+    const credentials = await fromNodeProviderChain()();
+    const aws4Module = await import('aws4');
+    const aws4 = aws4Module.default ?? aws4Module;
+
+    for (let attempt = 1; ; attempt++) {
+      const headers: Record<string, string> = { ...withoutReserved(this.headers) };
+      headers['Content-Type'] = OTLP_PROTOBUF_CONTENT_TYPE;
+      if (this.compression === 'gzip') headers['Content-Encoding'] = 'gzip';
+      headers.Host = url.host;
+      // Sign each attempt: the signature carries the request time.
+      const signed = aws4.sign(
+        {
+          service: this.service,
+          region: this.region,
+          method: 'POST',
+          path: url.pathname + url.search,
+          host: url.host,
+          headers,
+          body,
+        },
+        {
+          accessKeyId: credentials.accessKeyId,
+          secretAccessKey: credentials.secretAccessKey,
+          sessionToken: credentials.sessionToken,
+        },
+      );
+
+      let response: Response;
+      try {
+        response = await fetch(url.toString(), {
+          method: 'POST',
+          headers: signed.headers as Record<string, string>,
+          body,
+          signal: AbortSignal.timeout(this.timeoutMillis),
+        });
+      } catch (error) {
+        if (attempt < MAX_EXPORT_ATTEMPTS) {
+          await sleep(backoffMillis(attempt, null));
+          continue;
+        }
+        throw error instanceof Error ? error : new Error(String(error));
+      }
+
+      if (response.ok) return;
+      if (isRetryableStatus(response.status) && attempt < MAX_EXPORT_ATTEMPTS) {
+        await sleep(backoffMillis(attempt, response.headers.get('retry-after')));
+        continue;
+      }
+      if (response.status === 413) {
+        console.warn(
+          `[opensearch-genai-observability-sdk-ts] export to ${this.endpoint} was rejected as too ` +
+            `large (413). Raise the pipeline source's max_request_length, or lower the batch size ` +
+            `(OTEL_BSP_MAX_EXPORT_BATCH_SIZE for spans).`,
+        );
+      }
+      throw new Error(`Export failed: ${response.status} ${response.statusText}`);
+    }
+  }
+}
+
+const RESERVED_HEADERS = new Set(['content-type', 'content-encoding', 'host', 'content-length', 'authorization']);
+
+/** User headers minus the ones the exporter sets or signing produces. */
+function withoutReserved(headers: Record<string, string>): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(headers).filter(([key]) => !RESERVED_HEADERS.has(key.toLowerCase()) && !/^x-amz-/i.test(key)),
+  );
 }
 
 function toCallback(
@@ -109,27 +210,27 @@ async function drain(pending: Set<Promise<void>>): Promise<void> {
  * raw bytes, to an AWS endpoint (for example an OSIS pipeline).
  */
 export class AWSSigV4OTLPExporter implements SpanExporter {
-  private _endpoint: string;
-  private _service: string;
-  private _region: string;
+  private _post: SignedPost;
   private _pending = new Set<Promise<void>>();
 
-  constructor(options: SigV4Options) {
-    this._endpoint = options.endpoint;
-    this._service = options.service ?? 'osis';
-    this._region = resolveRegion(options.region);
+  constructor(options: SigV4ExporterOptions) {
+    this._post = new SignedPost('traces', options);
   }
 
   get endpoint(): string {
-    return this._endpoint;
+    return this._post.endpoint;
   }
 
   get service(): string {
-    return this._service;
+    return this._post.service;
   }
 
   get region(): string {
-    return this._region;
+    return this._post.region;
+  }
+
+  get compression(): OtlpCompression {
+    return this._post.compression;
   }
 
   export(
@@ -152,7 +253,7 @@ export class AWSSigV4OTLPExporter implements SpanExporter {
     if (!serialized) {
       throw new Error('Failed to serialize spans');
     }
-    await signAndPost(this._endpoint, this._service, this._region, serialized);
+    await this._post.send(serialized);
   }
 }
 
@@ -385,19 +486,19 @@ export function sendScoresAsDouble(exporter: unknown): boolean {
  * endpoint (for example an OSIS logs pipeline).
  */
 export class AWSSigV4OTLPLogExporter implements LogRecordExporter {
-  private _endpoint: string;
-  private _service: string;
-  private _region: string;
+  private _post: SignedPost;
   private _pending = new Set<Promise<void>>();
 
-  constructor(options: SigV4Options) {
-    this._endpoint = options.endpoint;
-    this._service = options.service ?? 'osis';
-    this._region = resolveRegion(options.region);
+  constructor(options: SigV4ExporterOptions) {
+    this._post = new SignedPost('logs', options);
   }
 
   get endpoint(): string {
-    return this._endpoint;
+    return this._post.endpoint;
+  }
+
+  get compression(): OtlpCompression {
+    return this._post.compression;
   }
 
   export(
@@ -420,6 +521,6 @@ export class AWSSigV4OTLPLogExporter implements LogRecordExporter {
     if (!serialized) {
       throw new Error('Failed to serialize log records');
     }
-    await signAndPost(this._endpoint, this._service, this._region, serialized);
+    await this._post.send(serialized);
   }
 }

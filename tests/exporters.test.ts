@@ -14,12 +14,15 @@ import { createRequire } from 'module';
 import { OTLPLogExporter } from '@opentelemetry/exporter-logs-otlp-proto';
 import { BasicTracerProvider, SimpleSpanProcessor } from '@opentelemetry/sdk-trace-base';
 import aws4 from 'aws4';
+import { createHash } from 'crypto';
+import { gunzipSync } from 'zlib';
 import {
   AWSSigV4OTLPExporter,
   AWSSigV4OTLPLogExporter,
   forceDoubleAttributes,
   sendScoresAsDouble,
   OTLP_PROTOBUF_CONTENT_TYPE,
+  RETRY_BACKOFF,
 } from '../src/exporters.js';
 
 // Independent decoder for the tests: the protobufjs root generated in the
@@ -332,5 +335,172 @@ describe('double-typed attributes over OTLP protobuf', () => {
     await provider.shutdown();
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
+  });
+});
+
+describe('AWSSigV4 exporters: compression, headers, timeout and retries', () => {
+  const originalEnv = process.env;
+  const savedBackoff = { ...RETRY_BACKOFF };
+
+  beforeEach(() => {
+    process.env = { ...originalEnv };
+    for (const key of Object.keys(process.env)) {
+      if (key.startsWith('OTEL_EXPORTER_OTLP_')) delete process.env[key];
+    }
+    RETRY_BACKOFF.initialMillis = 1;
+    RETRY_BACKOFF.maxMillis = 5;
+    credentialsMock();
+  });
+
+  afterEach(() => {
+    process.env = originalEnv;
+    Object.assign(RETRY_BACKOFF, savedBackoff);
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  });
+
+  /** Export one span through `exporter`; resolves with the export result code. */
+  async function exportSpan(exporter: AWSSigV4OTLPExporter): Promise<{ code: number; error?: Error }> {
+    const provider = new BasicTracerProvider();
+    const tracer = provider.getTracer('t');
+    const parent = trace.setSpanContext(ROOT_CONTEXT, { traceId: TRACE_ID, spanId: SPAN_ID, traceFlags: TraceFlags.SAMPLED });
+    const span = tracer.startSpan('s', {}, parent);
+    span.end();
+    return new Promise(resolve => exporter.export([span as never], resolve));
+  }
+
+  const ENDPOINT = 'https://pipe.us-east-1.osis.amazonaws.com/p/v1/traces';
+
+  it('gzip: compresses the protobuf body, sets Content-Encoding and signs the gzip bytes', async () => {
+    const fetchMock = vi.fn(async () => new Response('', { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const exporter = new AWSSigV4OTLPExporter({ endpoint: ENDPOINT, region: 'us-east-1', compression: 'gzip' });
+    expect(exporter.compression).toBe('gzip');
+    expect((await exportSpan(exporter)).code).toBe(0);
+
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    const headers = init.headers as Record<string, string>;
+    const sent = Buffer.from(init.body as Uint8Array);
+    expect(headers['Content-Encoding']).toBe('gzip');
+    expect(headers['Content-Type']).toBe('application/x-protobuf');
+    expect(headers.Authorization).toMatch(/SignedHeaders=[^,]*content-encoding/);
+    // The body is gzip(protobuf), with the ids intact.
+    const span = decode('trace', gunzipSync(sent)).resourceSpans[0].scopeSpans[0].spans[0];
+    expect(hex(span.traceId)).toBe(TRACE_ID);
+    // The signed payload hash is SHA-256 of the gzip bytes, as OSIS checks it.
+    const u = new URL(url);
+    const signer = new (aws4 as unknown as {
+      RequestSigner: new (r: object, c: object) => { canonicalString(): string };
+    }).RequestSigner(
+      {
+        service: 'osis', region: 'us-east-1', method: 'POST', host: u.host, path: u.pathname, body: sent,
+        headers: {
+          'Content-Type': headers['Content-Type'], 'Content-Encoding': 'gzip', Host: u.host, 'X-Amz-Date': headers['X-Amz-Date'],
+        },
+      },
+      { accessKeyId: 'AKIDEXAMPLE', secretAccessKey: 'secret' },
+    );
+    expect(signer.canonicalString().split('\n').pop()).toBe(createHash('sha256').update(sent).digest('hex'));
+  });
+
+  it('compression comes from OTEL_EXPORTER_OTLP_<SIGNAL>_COMPRESSION when not passed; code wins', () => {
+    process.env.OTEL_EXPORTER_OTLP_LOGS_COMPRESSION = 'gzip';
+    expect(new AWSSigV4OTLPLogExporter({ endpoint: 'https://x/v1/logs', region: 'us-east-1' }).compression).toBe('gzip');
+    expect(new AWSSigV4OTLPExporter({ endpoint: ENDPOINT, region: 'us-east-1' }).compression).toBe('none');
+    expect(
+      new AWSSigV4OTLPLogExporter({ endpoint: 'https://x/v1/logs', region: 'us-east-1', compression: 'none' }).compression,
+    ).toBe('none');
+  });
+
+  it('sends and signs options.headers merged over OTEL_EXPORTER_OTLP_HEADERS; reserved ones are ignored', async () => {
+    process.env.OTEL_EXPORTER_OTLP_HEADERS = 'x-tenant=env,x-env-only=1';
+    const fetchMock = vi.fn(async () => new Response('', { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+    const exporter = new AWSSigV4OTLPExporter({
+      endpoint: ENDPOINT,
+      region: 'us-east-1',
+      headers: { 'x-tenant': 'code', 'Content-Type': 'application/json', Authorization: 'nope' },
+    });
+    await exportSpan(exporter);
+    const headers = (fetchMock.mock.calls[0] as unknown as [string, RequestInit])[1].headers as Record<string, string>;
+    expect(headers['x-tenant']).toBe('code');
+    expect(headers['x-env-only']).toBe('1');
+    expect(headers['Content-Type']).toBe('application/x-protobuf');
+    expect(headers.Authorization).toMatch(/^AWS4-HMAC-SHA256 .*SignedHeaders=[^,]*x-env-only;x-tenant/);
+  });
+
+  it('aborts an attempt after timeoutMillis and retries, then fails after 3 attempts', async () => {
+    const fetchMock = vi.fn(
+      (_url: string, init: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          init.signal!.addEventListener('abort', () => reject(init.signal!.reason));
+        }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    const exporter = new AWSSigV4OTLPExporter({ endpoint: ENDPOINT, region: 'us-east-1', timeoutMillis: 20 });
+    const result = await exportSpan(exporter);
+    expect(result.code).toBe(1);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it('timeout defaults to OTEL_EXPORTER_OTLP_TIMEOUT', async () => {
+    process.env.OTEL_EXPORTER_OTLP_TIMEOUT = '15';
+    const fetchMock = vi.fn(
+      (_url: string, init: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          init.signal!.addEventListener('abort', () => reject(init.signal!.reason));
+        }),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    const started = Date.now();
+    expect((await exportSpan(new AWSSigV4OTLPExporter({ endpoint: ENDPOINT, region: 'us-east-1' }))).code).toBe(1);
+    expect(Date.now() - started).toBeLessThan(5000);
+  });
+
+  it.each([408, 429, 500, 502, 503, 507])('retries %i with backoff and succeeds', async (status) => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response('', { status }))
+      .mockResolvedValueOnce(new Response('', { status }))
+      .mockResolvedValueOnce(new Response('', { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+    expect((await exportSpan(new AWSSigV4OTLPExporter({ endpoint: ENDPOINT, region: 'us-east-1' }))).code).toBe(0);
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    // Each attempt is signed again.
+    const auth = fetchMock.mock.calls.map(c => (c[1] as RequestInit).headers as Record<string, string>);
+    expect(auth.every(h => h.Authorization.startsWith('AWS4-HMAC-SHA256'))).toBe(true);
+  });
+
+  it('gives up after 3 attempts on a retryable status', async () => {
+    const fetchMock = vi.fn(async () => new Response('', { status: 503, statusText: 'Service Unavailable' }));
+    vi.stubGlobal('fetch', fetchMock);
+    const result = await exportSpan(new AWSSigV4OTLPExporter({ endpoint: ENDPOINT, region: 'us-east-1' }));
+    expect(result.code).toBe(1);
+    expect(result.error?.message).toBe('Export failed: 503 Service Unavailable');
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it.each([400, 401, 403, 413, 415])('does not retry %i', async (status) => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const fetchMock = vi.fn(async () => new Response('', { status }));
+    vi.stubGlobal('fetch', fetchMock);
+    const result = await exportSpan(new AWSSigV4OTLPExporter({ endpoint: ENDPOINT, region: 'us-east-1' }));
+    expect(result.code).toBe(1);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    if (status === 413) {
+      expect(warn).toHaveBeenCalledWith(expect.stringMatching(/413.*max_request_length.*OTEL_BSP_MAX_EXPORT_BATCH_SIZE/));
+    } else {
+      expect(warn).not.toHaveBeenCalled();
+    }
+  });
+
+  it('retries a network error', async () => {
+    const fetchMock = vi
+      .fn()
+      .mockRejectedValueOnce(new TypeError('fetch failed'))
+      .mockResolvedValueOnce(new Response('', { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
+    expect((await exportSpan(new AWSSigV4OTLPExporter({ endpoint: ENDPOINT, region: 'us-east-1' }))).code).toBe(0);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 });

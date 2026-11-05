@@ -45,7 +45,19 @@ const OTLP_ENV = [
   'OTEL_EXPORTER_OTLP_PROTOCOL',
   'OTEL_EXPORTER_OTLP_TRACES_PROTOCOL',
   'OTEL_EXPORTER_OTLP_LOGS_PROTOCOL',
+  'OTEL_EXPORTER_OTLP_COMPRESSION',
+  'OTEL_EXPORTER_OTLP_TRACES_COMPRESSION',
+  'OTEL_EXPORTER_OTLP_LOGS_COMPRESSION',
+  'OTEL_EXPORTER_OTLP_TIMEOUT',
+  'OTEL_EXPORTER_OTLP_TRACES_TIMEOUT',
+  'OTEL_EXPORTER_OTLP_LOGS_TIMEOUT',
 ];
+
+/** Transport parameters of an OTel JS exporter (HTTP: wrapped once more than gRPC). */
+function transportParams(exporter: unknown): Record<string, unknown> {
+  const t = (exporter as { _delegate: { _transport: Record<string, any> } })._delegate._transport; // eslint-disable-line @typescript-eslint/no-explicit-any
+  return t._transport?._parameters ?? t._parameters;
+}
 
 describe('register', () => {
   const originalEnv = process.env;
@@ -441,6 +453,75 @@ describe('register - exporters', () => {
     expect(((await createLogExporter(options)) as AWSSigV4OTLPLogExporter).endpoint).toBe(
       'https://pipe.example.com/v1/logs',
     );
+  });
+
+  it('OTLP/HTTP exporters are the protobuf ones (application/x-protobuf)', async () => {
+    const spans = await createSpanExporter({});
+    const logExporter = await createLogExporter({});
+    for (const e of [spans, logExporter]) {
+      const headers = await (transportParams(e).headers as () => Record<string, string> | Promise<Record<string, string>>)();
+      expect(headers['Content-Type']).toBe('application/x-protobuf');
+    }
+  });
+
+  it('compression and timeoutMillis reach the OTLP/HTTP, gRPC and SigV4 exporters', async () => {
+    const http = { endpoint: 'http://c:4318', compression: 'gzip' as const, timeoutMillis: 1234 };
+    const grpc = { endpoint: 'grpc://c:4317', compression: 'gzip' as const, timeoutMillis: 1234 };
+    for (const e of [
+      await createSpanExporter(http),
+      await createLogExporter(http),
+      await createSpanExporter(grpc),
+      await createLogExporter(grpc),
+    ]) {
+      expect(transportParams(e).compression).toBe('gzip');
+      await e.shutdown();
+    }
+    const httpParams = transportParams(await createSpanExporter(http));
+    expect(httpParams.timeoutMillis).toBe(1234);
+    const sigv4 = { endpoint: 'https://pipe.example.com/p', sigv4: { region: 'us-east-1' }, compression: 'gzip' as const };
+    expect(((await createSpanExporter(sigv4)) as AWSSigV4OTLPExporter).compression).toBe('gzip');
+    expect(((await createLogExporter(sigv4)) as AWSSigV4OTLPLogExporter).compression).toBe('gzip');
+  });
+
+  it('compression: code beats OTEL_EXPORTER_OTLP_<SIGNAL>_COMPRESSION, which beats the general one; default none', async () => {
+    expect(transportParams(await createSpanExporter({})).compression).toBe('none');
+    process.env.OTEL_EXPORTER_OTLP_COMPRESSION = 'gzip';
+    process.env.OTEL_EXPORTER_OTLP_LOGS_COMPRESSION = 'none';
+    expect(transportParams(await createSpanExporter({})).compression).toBe('gzip');
+    expect(transportParams(await createLogExporter({})).compression).toBe('none');
+    expect(transportParams(await createSpanExporter({ compression: 'none' })).compression).toBe('none');
+    expect(transportParams(await createLogExporter({ compression: 'gzip' })).compression).toBe('gzip');
+  });
+
+  it('an invalid compression option throws', async () => {
+    await expect(createSpanExporter({ compression: 'br' as never })).rejects.toThrow(/"none" or "gzip"/);
+  });
+
+  it('protocol "http/protobuf" means OTLP/HTTP protobuf', () => {
+    expect(resolveSignalEndpoint('traces', { protocol: 'http/protobuf' })).toEqual({
+      url: 'http://localhost:4318/v1/traces',
+      protocol: 'http',
+    });
+    process.env.OTEL_EXPORTER_OTLP_PROTOCOL = 'http/protobuf';
+    expect(resolveSignalEndpoint('logs', {}).protocol).toBe('http');
+  });
+
+  it('protocol "http/json" is rejected, as an option or env value', () => {
+    expect(() => resolveSignalEndpoint('traces', { protocol: 'http/json' as never })).toThrow(
+      /protocol="http\/json" is not supported.*corrupting/,
+    );
+    process.env.OTEL_EXPORTER_OTLP_LOGS_PROTOCOL = 'http/json';
+    expect(() => resolveSignalEndpoint('logs', {})).toThrow(/OTEL_EXPORTER_OTLP_LOGS_PROTOCOL="http\/json"/);
+  });
+
+  it('register() rejects protocol "http/json"', async () => {
+    await expect(register({ protocol: 'http/json' as never, autoInstrument: false, setGlobal: false })).rejects.toThrow(
+      /http\/json/,
+    );
+  });
+
+  it('an unknown protocol option throws', () => {
+    expect(() => resolveSignalEndpoint('traces', { protocol: 'carrier-pigeon' as never })).toThrow(/protocol must be/);
   });
 
   it('sigv4 over gRPC throws', async () => {

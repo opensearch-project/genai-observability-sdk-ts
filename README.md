@@ -161,7 +161,9 @@ An unknown agent is left out, never invented. `evaluate()` also stamps the agent
 | `endpoint` | `string` | `http://localhost:4318` (see [Endpoints](#endpoints-traces-and-evaluation-logs)) | OTLP base URL for all signals, port included (same as `OTEL_EXPORTER_OTLP_ENDPOINT`). A path ending in `/v1/traces` or `/v1/logs` throws |
 | `tracesEndpoint` | `string` | none | Full traces URL, used as-is. Pass with `logsEndpoint` (or `logExporter`) |
 | `logsEndpoint` | `string` | none | Full logs URL for evaluation events, used as-is. Pass with `tracesEndpoint` (or `exporter`) |
-| `protocol` | `"http" \| "grpc"` | Auto-detected per signal | Export protocol for all signals |
+| `protocol` | `"http" \| "http/protobuf" \| "grpc"` | Auto-detected per signal | Export protocol for all signals. HTTP is always protobuf; `"http/json"` throws |
+| `compression` | `"none" \| "gzip"` | `OTEL_EXPORTER_OTLP_<SIGNAL>_COMPRESSION`, else `OTEL_EXPORTER_OTLP_COMPRESSION`, else `"none"` | Request compression for every exporter (OTLP/HTTP, SigV4, gRPC). Must match the pipeline's `compression` |
+| `timeoutMillis` | `number` | `OTEL_EXPORTER_OTLP_<SIGNAL>_TIMEOUT`, else `OTEL_EXPORTER_OTLP_TIMEOUT`, else `10000` | Timeout of each export request |
 | `sigv4` | `{ service?, region? }` | none | Sign traces and logs with AWS SigV4 (OTLP/HTTP protobuf only) |
 | `serviceName` | `string` | `"unknown_service"` | `service.name` resource attribute |
 | `serviceVersion` | `string` | none | `service.version` resource attribute |
@@ -241,7 +243,13 @@ await register({ endpoint: "http://collector:4318" });
 4. `OTEL_EXPORTER_OTLP_PROTOCOL`
 5. URL scheme of that signal's endpoint (`grpc://` or `grpcs://` mean gRPC), else HTTP
 
-**OTLP/HTTP is binary protobuf** (`Content-Type: application/x-protobuf`), for every exporter `register()` builds, signed or not. The SDK never sends OTLP/JSON: Data Prepper and OSIS read OTLP/JSON hex trace and span ids as base64, which corrupts them so spans and evaluation results no longer match their traces.
+**OTLP/HTTP is binary protobuf** (`Content-Type: application/x-protobuf`), for every exporter `register()` builds, signed or not. The SDK never sends OTLP/JSON: Data Prepper and OSIS read OTLP/JSON hex trace and span ids as base64, which corrupts them so spans and evaluation results no longer match their traces. `protocol: "http/json"` (or `OTEL_EXPORTER_OTLP_PROTOCOL=http/json`) therefore throws; `http/protobuf` is the same as `http`.
+
+**Compression.** `compression: "gzip"` (or `OTEL_EXPORTER_OTLP_COMPRESSION=gzip`) compresses every export, gRPC included. It must match the receiving pipeline: OSIS accepts only `none` or `gzip`, and the client must use the pipeline source's `compression` setting. A Data Prepper source with `compression: none` rejects gzip bodies.
+
+**Request size.** OSIS `otel_*` sources cap each request at 1 MB to 4 MB (1 MB by default with the persistent buffer), and Data Prepper sources at their `max_request_length`. Large GenAI spans (prompts, completions) can exceed that: lower the batch size with `OTEL_BSP_MAX_EXPORT_BATCH_SIZE`. A rejected request gets a 413, which `AWSSigV4OTLPExporter` logs with this hint.
+
+**Self-hosted Data Prepper.** For OTLP/HTTP straight from the SDK, set `unframed_requests: true` and the source paths (`traces_path` / `logs_path` on `otlp`, `path` on `otel_trace_source` / `otel_logs_source`). Use `ssl: false` for plain `http://`, or a certificate your process trusts: for `https://`, add your CA with `NODE_EXTRA_CA_CERTS=/path/to/ca.pem`.
 
 `grpc://` and `grpcs://` are mapped to `http://` / `https://` once the protocol is known. An `http://` or `https://` scheme does not select HTTP over the env vars (the OTel JS gRPC exporters take `http(s)://` URLs too).
 
@@ -665,7 +673,12 @@ const exporter = new AWSSigV4OTLPExporter({
 });
 ```
 
-`AWSSigV4OTLPLogExporter` takes the same options and signs OTLP/HTTP protobuf log exports (evaluation events). Both send `Content-Type: application/x-protobuf` and sign exactly the bytes sent. `register({ sigv4 })` creates both for you; construct them yourself only to pass as `exporter` / `logExporter`.
+`AWSSigV4OTLPLogExporter` takes the same options and signs OTLP/HTTP protobuf log exports (evaluation events). Both send `Content-Type: application/x-protobuf` and sign exactly the bytes sent. Other options:
+
+- `compression`: `"none"` or `"gzip"` (default from `OTEL_EXPORTER_OTLP_<SIGNAL>_COMPRESSION` / `OTEL_EXPORTER_OTLP_COMPRESSION`, else none). With gzip the protobuf body is gzipped first, sent with `Content-Encoding: gzip`, and the signature's payload hash is the SHA-256 of the gzip bytes. Match the pipeline's `compression`.
+- `headers`: merged over `OTEL_EXPORTER_OTLP_HEADERS` / `OTEL_EXPORTER_OTLP_<SIGNAL>_HEADERS` and signed. `Content-Type`, `Content-Encoding`, `Host`, `Authorization` and `X-Amz-*` are set by the exporter.
+- `timeoutMillis`: per attempt (default `OTEL_EXPORTER_OTLP_<SIGNAL>_TIMEOUT` / `OTEL_EXPORTER_OTLP_TIMEOUT`, else 10 s).
+- Retries: 408, 429 and 5xx (507 included), network errors and timeouts are retried with exponential backoff (honoring `Retry-After`), up to 3 attempts. 400, 401, 403, 413 and 415 are not retried; a 413 logs a hint about the pipeline's `max_request_length`. `register({ sigv4 })` creates both for you; construct them yourself only to pass as `exporter` / `logExporter`.
 
 Requires `@aws-sdk/credential-providers` and `aws4` packages.
 
@@ -676,9 +689,13 @@ Requires `@aws-sdk/credential-providers` and `aws4` packages.
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | Base OTLP URL for all signals (`/v1/traces` and `/v1/logs` appended over HTTP, as-is over gRPC). `endpoint` wins over it | `http://localhost:4318` |
 | `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | Full OTLP traces URL. `tracesEndpoint` and `endpoint` win over it | none |
 | `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` | Full OTLP logs URL for evaluation events. `logsEndpoint` and `endpoint` win over it | none |
-| `OTEL_EXPORTER_OTLP_PROTOCOL` | Protocol for all signals (`grpc`, `http/protobuf`, `http/json`) | none |
+| `OTEL_EXPORTER_OTLP_PROTOCOL` | Protocol for all signals (`grpc` or `http/protobuf`; `http/json` throws). `protocol` wins over it | none |
 | `OTEL_EXPORTER_OTLP_TRACES_PROTOCOL` | Protocol for traces | none |
 | `OTEL_EXPORTER_OTLP_LOGS_PROTOCOL` | Protocol for evaluation logs | none |
+| `OTEL_EXPORTER_OTLP_COMPRESSION` / `OTEL_EXPORTER_OTLP_<SIGNAL>_COMPRESSION` | `none` or `gzip`. `compression` wins over them | `none` |
+| `OTEL_EXPORTER_OTLP_TIMEOUT` / `OTEL_EXPORTER_OTLP_<SIGNAL>_TIMEOUT` | Timeout of each export request, in milliseconds. `timeoutMillis` wins over them | `10000` |
+| `OTEL_EXPORTER_OTLP_HEADERS` / `OTEL_EXPORTER_OTLP_<SIGNAL>_HEADERS` | Extra headers (`key=value,key2=value2`). `headers` wins per key; the SigV4 exporters sign them | none |
+| `OTEL_BSP_MAX_EXPORT_BATCH_SIZE` | Spans per export batch. Lower it when large GenAI spans exceed a pipeline's request limit | `512` |
 | `AWS_DEFAULT_REGION` | AWS region for SigV4 signing | — |
 | `AWS_REGION` | AWS region for SigV4 signing (fallback) | — |
 

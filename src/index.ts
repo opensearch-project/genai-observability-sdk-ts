@@ -8,7 +8,14 @@ export {
   DEFAULT_ENDPOINT,
   DEFAULT_LOGS_ENDPOINT,
 } from './register.js';
-export type { RegisterOptions, SigV4Options, OtlpProtocol, OtlpSignal } from './register.js';
+export type {
+  RegisterOptions,
+  SigV4Options,
+  OtlpProtocol,
+  OtlpProtocolOption,
+  OtlpSignal,
+  OtlpCompression,
+} from './register.js';
 export { observe, withObserve, Op } from './observe.js';
 export type { ObserveOptions } from './observe.js';
 export { enrich, markAgentRoot, AGENT_ROOT_ATTRIBUTE } from './enrich.js';
@@ -51,4 +58,5 @@ export type {
   SessionRecord,
 } from './retrieval.js';
 export { AWSSigV4OTLPExporter, AWSSigV4OTLPLogExporter } from './exporters.js';
+export type { SigV4ExporterOptions } from './exporters.js';
 export { SDK_SCOPE_NAME, SDK_VERSION } from './version.js';

@@ -86,7 +86,9 @@ Endpoints: each signal (traces, and logs for the evaluation events) is resolved 
 
 - Endpoint (code options always win over env vars): `tracesEndpoint` / `logsEndpoint` (full URL), else `endpoint` (base URL) + `/v1/traces` or `/v1/logs` over HTTP, as-is over gRPC, else `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` / `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` (full URL), else `OTEL_EXPORTER_OTLP_ENDPOINT` (base URL, same rule), else `http://localhost:4318` (`http://localhost:4317` over gRPC). For example `register({ endpoint: "http://collector:4318" })` sends logs to `http://collector:4318/v1/logs` even when `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` is set.
 - `endpoint` is always a base URL: a path ending in `/v1/traces` or `/v1/logs` throws. `tracesEndpoint` and `logsEndpoint` must be passed together (`logExporter` stands in for `logsEndpoint`), else `register()` throws.
-- Protocol: `protocol`, else a `grpc://` / `grpcs://` scheme on a URL passed in code, else `OTEL_EXPORTER_OTLP_<SIGNAL>_PROTOCOL`, else `OTEL_EXPORTER_OTLP_PROTOCOL`, else the URL scheme. Over gRPC, logs go to the same host and port as traces, and `headers` are sent as gRPC metadata with lowercased keys. OTLP/HTTP is always binary protobuf (`application/x-protobuf`): OTLP/JSON hex ids are corrupted by Data Prepper and OSIS.
+- Protocol: `protocol`, else a `grpc://` / `grpcs://` scheme on a URL passed in code, else `OTEL_EXPORTER_OTLP_<SIGNAL>_PROTOCOL`, else `OTEL_EXPORTER_OTLP_PROTOCOL`, else the URL scheme. Over gRPC, logs go to the same host and port as traces, and `headers` are sent as gRPC metadata with lowercased keys. OTLP/HTTP is always binary protobuf (`application/x-protobuf`): OTLP/JSON hex ids are corrupted by Data Prepper and OSIS, so `protocol: "http/json"` throws.
+- Compression: `compression: "none" | "gzip"`, else `OTEL_EXPORTER_OTLP_<SIGNAL>_COMPRESSION`, else `OTEL_EXPORTER_OTLP_COMPRESSION`, else none. It must match the pipeline: OSIS accepts only none or gzip and the client must use the pipeline's `compression`.
+- Request size: OSIS `otel_*` sources cap requests at 1 MB to 4 MB (1 MB by default with the persistent buffer). For large GenAI spans, lower `OTEL_BSP_MAX_EXPORT_BATCH_SIZE`.
 
 Pick the setup that matches your ingestion (see [Ingestion](#ingestion) for the pipelines):
 
@@ -107,7 +109,7 @@ await register({
 });
 ```
 
-(c) Separate `otel_trace_source` and `otel_logs_source` pipelines: pass both full URLs. On Data Prepper the default ports are 21890 (traces) and 21892 (logs); set `path:` on each source and `unframed_requests: true`. On OSIS, add `sigv4: { service: "osis", region }`.
+(c) Separate `otel_trace_source` and `otel_logs_source` pipelines: pass both full URLs. On Data Prepper the default ports are 21890 (traces) and 21892 (logs); set `path:` on each source and `unframed_requests: true`, and `ssl: false` for `http://` or a CA your process trusts (`NODE_EXTRA_CA_CERTS`) for `https://`. On OSIS, add `sigv4: { service: "osis", region }`.
 
 ```typescript
 await register({
@@ -356,7 +358,7 @@ Evaluation events arrive on the OTLP logs path. Route them to their own index so
 
 ### a) Self-managed Data Prepper
 
-Route `gen_ai.evaluation.result` log events from the OTLP source to their own sub-pipeline and copy `time` to `@timestamp`. `unframed_requests: true` with `traces_path` and `logs_path` lets the source take plain OTLP/HTTP requests, so the SDK can send to it directly with `register({ endpoint: "http://data-prepper:21890" })` (setup (b) with an empty prefix):
+Route `gen_ai.evaluation.result` log events from the OTLP source to their own sub-pipeline and copy `time` to `@timestamp`. `unframed_requests: true` with `traces_path` and `logs_path` lets the source take plain OTLP/HTTP requests, so the SDK can send to it directly with `register({ endpoint: "http://data-prepper:21890" })` (setup (b) with an empty prefix). `ssl: false` serves plain `http://`; with TLS, make the SDK process trust the certificate (`NODE_EXTRA_CA_CERTS=/path/to/ca.pem`). The source's `compression` (default none) must match `register({ compression })`:
 
 ```yaml
 otlp-pipeline:
