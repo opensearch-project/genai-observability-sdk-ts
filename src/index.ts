@@ -57,6 +57,6 @@ export type {
   TraceRecord,
   SessionRecord,
 } from './retrieval.js';
-export { AWSSigV4OTLPExporter, AWSSigV4OTLPLogExporter } from './exporters.js';
+export { AWSSigV4OTLPExporter, AWSSigV4OTLPLogExporter, sendScoresAsDouble } from './exporters.js';
 export type { SigV4ExporterOptions } from './exporters.js';
 export { SDK_SCOPE_NAME, SDK_VERSION } from './version.js';

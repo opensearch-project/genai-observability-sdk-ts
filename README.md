@@ -260,7 +260,7 @@ Use gRPC with a local OTel Collector (default `localhost:4317`) or a self-hosted
 
 **Migrating from a traces URL in `endpoint`.** Before this release `endpoint` was the full traces URL and the default was `http://localhost:21890/opentelemetry/v1/traces`. `endpoint` is now always the base URL, and a value ending in `/v1/traces` throws. Pass the base (`http://host:4318`), or `tracesEndpoint` and `logsEndpoint`. To keep sending to a Data Prepper `otlp` source on its old default, pass `endpoint: "http://localhost:21890"` and set `traces_path` / `logs_path` and `unframed_requests: true` on the source (see the [guide](docs/agent-evaluations.md#ingestion)).
 
-**Scores over gRPC.** The OTLP/HTTP log exporters send whole-number scores as `doubleValue` (see [Scores are doubles](#score)); the gRPC log exporter sends them as `intValue`. The evaluation index maps them as `double` either way.
+**Scores over gRPC.** The gRPC log exporter, like the OTLP/HTTP ones, sends whole-number scores as `doubleValue` (see [Scores are doubles](#score)).
 
 ### `observe()`
 
@@ -435,7 +435,15 @@ score({ name: "task_success", value: 1, traceId: "6ebb9835f43af1552f2cebb9f5165e
 
 The instrumentation scope is the library that emitted the event: every SDK event (`gen_ai.evaluation.result`) has scope `opensearch-genai-observability-sdk-ts` with the SDK version, and no scope attributes. The evaluator is data about the result and goes in `opensearch.gen_ai.evaluation.evaluator.*`. The timestamp is the time `score()` is called.
 
-**Scores are doubles.** `gen_ai.evaluation.score.value` is a double in the OTel semantic conventions, but OTel JS encodes any whole JS number (for example `1`) as an OTLP `intValue`, and the logs API has no way to request a double. The SDK's own log exporters (the OTLP/HTTP exporter `register()` creates, and `AWSSigV4OTLPLogExporter`; not the gRPC one) re-encode whole-number `gen_ai.evaluation.score.value`, `opensearch.gen_ai.evaluation.score.min` / `.max` / `.threshold` as `doubleValue`. With your own `logExporter` or a global `LoggerProvider` you configured, whole numbers are sent as `intValue`. The OpenSearch evaluation index maps the field as `double`, so stored values are the same either way.
+**Scores are doubles.** `gen_ai.evaluation.score.value` is a double in the OTel semantic conventions, but OTel JS encodes any whole JS number (for example `1`) as an OTLP `intValue`, and the logs API has no way to request a double. The log exporters `register()` uses re-encode whole-number `gen_ai.evaluation.score.value`, `opensearch.gen_ai.evaluation.score.min` / `.max` / `.threshold` as `doubleValue`: the OTLP/HTTP and gRPC exporters it creates, `AWSSigV4OTLPLogExporter`, and an OpenTelemetry OTLP exporter (protobuf or gRPC) you pass as `logExporter`. With a global `LoggerProvider` you configured yourself, call `sendScoresAsDouble(exporter)` on its OTLP log exporter; otherwise whole numbers are sent as `intValue`, and an index that maps the score dynamically can store it as an integer.
+
+```typescript
+import { OTLPLogExporter } from "@opentelemetry/exporter-logs-otlp-grpc";
+import { sendScoresAsDouble } from "@opensearch-project/genai-observability-sdk-ts";
+
+const exporter = new OTLPLogExporter({ url: "http://localhost:4317" });
+sendScoresAsDouble(exporter); // returns false, and changes nothing, for an exporter it cannot wrap
+```
 
 **Parameters:**
 

@@ -151,7 +151,12 @@ export interface RegisterOptions {
    * registered (it is never replaced; score() then uses it).
    */
   logs?: boolean;
-  /** Custom log exporter. Replaces the logs endpoint, protocol and sigv4 for logs only. */
+  /**
+   * Custom log exporter. Replaces the logs endpoint, protocol and sigv4 for logs only.
+   * An OpenTelemetry OTLP log exporter (protobuf or gRPC) is made to send
+   * whole-number scores as `doubleValue` (see `sendScoresAsDouble`); any other
+   * exporter is used as is.
+   */
   logExporter?: LogRecordExporter;
   /**
    * Name of the agent this process evaluates. Stamped as `gen_ai.agent.name` on
@@ -446,7 +451,10 @@ export async function createSpanExporter(options: RegisterOptions): Promise<Span
  * is configured.
  */
 export async function createLogExporter(options: RegisterOptions): Promise<LogRecordExporter> {
-  if (options.logExporter) return options.logExporter;
+  if (options.logExporter) {
+    sendScoresAsDouble(options.logExporter);
+    return options.logExporter;
+  }
   const endpoint = resolveSignalEndpoint("logs", options);
   const transport = transportOptions("logs", options);
   if (options.sigv4) {
@@ -455,11 +463,14 @@ export async function createLogExporter(options: RegisterOptions): Promise<LogRe
   }
   if (endpoint.protocol === "grpc") {
     const { OTLPLogExporter } = await import("@opentelemetry/exporter-logs-otlp-grpc");
-    return new OTLPLogExporter({
+    const grpcExporter = new OTLPLogExporter({
       url: endpoint.url,
       metadata: await grpcMetadata(options.headers),
       ...otelTransport(transport),
     });
+    // Same protobuf serializer as OTLP/HTTP, so the same re-encoding applies.
+    sendScoresAsDouble(grpcExporter);
+    return grpcExporter;
   }
   const { OTLPLogExporter } = await import("@opentelemetry/exporter-logs-otlp-proto");
   const exporter = new OTLPLogExporter({ url: endpoint.url, headers: options.headers, ...otelTransport(transport) });
