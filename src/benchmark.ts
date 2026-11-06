@@ -87,6 +87,13 @@ export interface EvalScore {
   scoreMax?: number;
   /** `opensearch.gen_ai.evaluation.judge.trace_id`: the trace of the LLM judge call that produced this score. */
   judgeTraceId?: string;
+  /**
+   * `opensearch.gen_ai.evaluation.evaluator.name` of this score (for example
+   * in `Benchmark.log()`). Default: the scorer's `defineScorer()` declaration.
+   */
+  evaluator?: string;
+  /** `opensearch.gen_ai.evaluation.evaluator.type` of this score. Default: the scorer's declaration. */
+  evaluatorType?: EvaluatorType;
   /** Judge / evaluator context; unset fields fall back to the scorer's `defineScorer()` declaration. */
   /**
    * `opensearch.gen_ai.evaluation.evaluator.description`: what the evaluator
@@ -433,8 +440,8 @@ function emitCaseScores(
       scoreMin: s.scoreMin,
       scoreMax: s.scoreMax,
       threshold: s.threshold,
-      evaluator: extra.evaluator,
-      evaluatorType: extra.evaluatorType,
+      evaluator: s.evaluator ?? extra.evaluator,
+      evaluatorType: s.evaluatorType ?? extra.evaluatorType,
       errorType: extra.errorType,
       judgeTraceId: s.judgeTraceId,
       ...judgeContextOf(s),

@@ -245,3 +245,33 @@ describe('judge / evaluator context on defineScorer()', () => {
     expect(r.attributes['opensearch.test.suite.run.name']).toBe('r');
   });
 });
+
+describe('evaluator on EvalScore', () => {
+  it('Benchmark.log() records evaluator name and type per score', () => {
+    const bm = new Benchmark('suite');
+    bm.log({
+      traceId: TRACE_ID,
+      spanId: SPAN_ID,
+      scores: [
+        { name: 'q', value: 4, evaluator: 'answer_quality_judge', evaluatorType: 'llm_judge' },
+        { name: 'c', value: 1 },
+      ],
+    });
+    bm.close();
+    const [q, c] = getFinishedLogRecords();
+    expect(q.attributes['opensearch.gen_ai.evaluation.evaluator.name']).toBe('answer_quality_judge');
+    expect(q.attributes['opensearch.gen_ai.evaluation.evaluator.type']).toBe('llm_judge');
+    expect(c.attributes['opensearch.gen_ai.evaluation.evaluator.name']).toBeUndefined();
+  });
+
+  it('a returned EvalScore evaluator wins over the declaration', () => {
+    const s = defineScorer(
+      { name: 'q', evaluator: 'declared', evaluatorType: 'code' },
+      function q() { return { name: 'q', value: 1, evaluator: 'actual' }; },
+    );
+    evaluate({ name: 'suite', task: tracedTask, data: [{ input: 'a' }], scores: [s] });
+    const [r] = getFinishedLogRecords();
+    expect(r.attributes['opensearch.gen_ai.evaluation.evaluator.name']).toBe('actual');
+    expect(r.attributes['opensearch.gen_ai.evaluation.evaluator.type']).toBe('code');
+  });
+});
