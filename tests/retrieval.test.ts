@@ -270,3 +270,20 @@ describe('findEvaluatedTraceIds', () => {
     expect(called).toBe(false);
   });
 });
+
+describe('listRootSpans', () => {
+  it('filters services on the span index serviceName field', async () => {
+    const retriever = new OpenSearchTraceRetriever();
+    const search = vi.fn().mockResolvedValue({ body: { hits: { hits: [] } } });
+    (retriever as unknown as { _clientPromise: Promise<unknown> })._clientPromise = Promise.resolve({ search });
+    const since = new Date('2026-01-01T00:00:00Z');
+    await retriever.listRootSpans({ services: ['observability-assistant'], since, maxResults: 5 });
+    const body = search.mock.calls[0][0].body;
+    expect(body.size).toBe(5);
+    expect(body.query.bool.filter).toEqual([
+      { term: { parentSpanId: '' } },
+      { terms: { serviceName: ['observability-assistant'] } },
+      { range: { startTime: { gte: since.toISOString() } } },
+    ]);
+  });
+});

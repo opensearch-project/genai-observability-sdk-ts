@@ -10,6 +10,8 @@ This guide covers the full path of an evaluation result: what the SDK sends, how
 - [Verify](#verify)
 - [Troubleshooting](#troubleshooting)
 
+New to agent evaluations? Start with [Getting started with agent evaluations](getting-started-evaluations.md).
+
 Agent evaluations are experimental. Attribute names and index mappings may change before a stable release.
 
 ## What gets stored
@@ -50,13 +52,21 @@ Attributes (each is set only when it has a value):
 | `opensearch.gen_ai.evaluation.score.threshold` | OpenSearch | all | Pass threshold |
 | `opensearch.gen_ai.evaluation.score.direction` | OpenSearch | all | `maximize` or `minimize` |
 | `opensearch.gen_ai.evaluation.judge.trace_id` | OpenSearch | all | Trace of the judge's own run |
+| `opensearch.gen_ai.evaluation.evaluator.description` | OpenSearch | all | What the evaluator checks (criteria or rubric summary) |
+| `gen_ai.request.model` | OTel | all | Model used by the LLM judge |
+| `gen_ai.prompt.name` | OTel | all | Name of the judge prompt template |
+| `gen_ai.prompt.version` | OTel | all | Version of the judge prompt |
+| `gen_ai.system_instructions` | OTel | all, opt-in | The judge's system prompt, up to 8192 characters. Only when you pass `judgeSystemInstructions` |
+| `opensearch.gen_ai.evaluation.system_instructions_truncated` | OpenSearch | all | `true` when the system instructions were cut |
+| `opensearch.test.suite.run.name` | OpenSearch | offline | Human-readable run name, for example `v5 with shorter prompt` |
+| `opensearch.test.suite.run.description` | OpenSearch | offline | Free text about the run, up to 1024 characters |
 | `opensearch.test.case.expected` | OpenSearch | offline | Expected output of the case, up to 4096 characters |
 | `opensearch.test.case.expected_truncated` | OpenSearch | offline | `true` when the expected output was cut |
 
 - "OTel" names are in the OTel semantic conventions registry. `test.suite.run.id` and `test.case.id` are proposed in [semantic-conventions#1262](https://github.com/open-telemetry/semantic-conventions/issues/1262) and [semantic-conventions-genai#79](https://github.com/open-telemetry/semantic-conventions-genai/issues/79).
 - `opensearch.gen_ai.evaluation.*` names mirror the OTel `gen_ai.evaluation.*` names for fields OTel does not define yet.
 - "offline" means `evaluate()` and `Benchmark.log()`. `score()` sets the `test.*` and `opensearch.test.case.*` keys only if you pass them in `attributes`.
-- Run and case metadata you pass are added to the events too. Metadata cannot set `test.suite.*`, `test.case.*`, `cicd.pipeline.*`, `error.type` or `opensearch.test.case.*`: those keys are dropped with a warning.
+- Run and case metadata you pass are added to the events too. Metadata cannot set `test.suite.*`, `test.case.*`, `cicd.pipeline.*`, `error.type`, `opensearch.test.case.*` or `opensearch.test.suite.run.*`: those keys are dropped with a warning.
 
 ## Setup
 
@@ -181,7 +191,40 @@ So the stored label always matches the local case status of `evaluate()` and `Be
 
 - `scoreMin` / `scoreMax` record the scale (`opensearch.gen_ai.evaluation.score.min` / `.max`), so a 1 to 5 judge and a 0 to 1 check can be read side by side.
 - `evaluator`, `evaluatorVersion` and `evaluatorType` name the evaluator (`opensearch.gen_ai.evaluation.evaluator.*`). The instrumentation scope is always the SDK.
-- `attributes` adds your own keys. Keys the SDK sets (`gen_ai.evaluation.*`, `opensearch.gen_ai.evaluation.*`, `error.type`, `gen_ai.response.id`, `gen_ai.conversation.id`, `gen_ai.agent.*`) are dropped with a warning; use the `score()` options for them.
+- `attributes` adds your own keys. Keys the SDK sets (`gen_ai.evaluation.*`, `opensearch.gen_ai.evaluation.*`, `error.type`, `gen_ai.response.id`, `gen_ai.conversation.id`, `gen_ai.agent.*`, `gen_ai.request.model`, `gen_ai.prompt.name` / `.version`, `gen_ai.system_instructions`) are dropped with a warning; use the `score()` options for them.
+
+### Judge context
+
+Record how an LLM judge graded, so a reader can tell two judge setups apart:
+
+| Option | Attribute |
+|---|---|
+| `evaluatorDescription` | `opensearch.gen_ai.evaluation.evaluator.description`: what the evaluator checks |
+| `judgeModel` | `gen_ai.request.model`: the judge model |
+| `judgePromptName` | `gen_ai.prompt.name`: the judge prompt template |
+| `judgePromptVersion` | `gen_ai.prompt.version`: its version |
+| `judgeSystemInstructions` | `gen_ai.system_instructions`: the judge's system prompt, opt-in |
+
+They are `score()` options and `defineScorer()` fields (also `EvalScore` fields, which win over the declaration). The system prompt may contain sensitive data, so it is only recorded when you pass `judgeSystemInstructions`. Text is kept as is, other values are `JSON.stringify`'d, and anything over 8192 characters is cut, with `opensearch.gen_ai.evaluation.system_instructions_truncated = true`.
+
+```typescript
+import { score } from "@opensearch-project/genai-observability-sdk-ts";
+
+score({
+  name: "helpfulness",
+  value: 4,
+  scoreMin: 1,
+  scoreMax: 5,
+  threshold: 4,
+  traceId: "6ebb9835f43af1552f2cebb9f5165e39",
+  evaluator: "helpfulness_judge",
+  evaluatorType: "llm_judge",
+  evaluatorDescription: "Rates whether the answer is grounded in the tool results",
+  judgeModel: "us.anthropic.claude-haiku-4-5-20251001-v1:0",
+  judgePromptName: "helpfulness_judge",
+  judgePromptVersion: "2",
+});
+```
 
 ### Judge trace and errors
 
@@ -326,6 +369,17 @@ const runId = `travel-capitals-${process.env.GITHUB_RUN_ID ?? "local"}`;
 const b = new Benchmark("travel-capitals", { runId });
 ```
 
+### Run names
+
+`runName` sets `opensearch.test.suite.run.name` and `runDescription` sets `opensearch.test.suite.run.description` on every result of the run, in `evaluate()` and `new Benchmark()`. Both are optional: without a name, readers show the short run id. The description is cut at 1024 characters.
+
+```typescript
+const b = new Benchmark("observability-assistant", {
+  runName: "v5 with shorter prompt",
+  runDescription: "Shorter system prompt, same tools and model",
+});
+```
+
 ### CI pipeline attributes
 
 Inside CI, results and agent root spans also get `cicd.pipeline.name`, `cicd.pipeline.run.id` and `cicd.pipeline.run.url.full`. Outside CI nothing is added.
@@ -348,7 +402,7 @@ For another CI system pass `ciPipeline: { "cicd.pipeline.run.id": "...", ... }` 
 
 The summary is computed in your process and is not sent. `evaluate()` prints it and returns a `BenchmarkResult`; `Benchmark.close()` prints and returns the `BenchmarkSummary`.
 
-- `BenchmarkSummary`: `benchmarkName`, `runId`, `totalCases`, `passCount`, `failCount`, `errorCount`, `durationMs`, and `scores` (per name: `avg`, `min`, `max`, `count`).
+- `BenchmarkSummary`: `benchmarkName`, `runId`, `runName` (when given), `totalCases`, `passCount`, `failCount`, `errorCount`, `durationMs`, and `scores` (per name: `avg`, `min`, `max`, `count`).
 - `TestCaseResult` (`result.cases`): `caseId`, `caseName`, `input`, `output`, `expected`, `scores`, `verdicts`, `resultStatus`, `status`, `error`, `errorType`, `scorerErrors`, `durationMs`, and `traceId` / `spanId` of the agent root span.
 - Case `resultStatus`: `error` if the task or a scorer threw; else `fail` if any score has a `fail` verdict; else `pass`.
 
