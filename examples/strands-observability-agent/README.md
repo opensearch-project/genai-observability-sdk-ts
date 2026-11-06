@@ -2,7 +2,7 @@
 
 A real agent, evaluated for real. The **observability assistant** is a [Strands Agents](https://strandsagents.com) TypeScript agent that answers questions about your own OpenSearch cluster with read-only tools (`@opensearch-project/opensearch` against your cluster). It is instrumented with this SDK, evaluated offline with two test suites whose ground truth is computed live, and evaluated online by sampling its traces back out of OpenSearch. Nothing is mocked.
 
-The walkthrough that goes with it is [docs/getting-started-evaluations.md](../../docs/getting-started-evaluations.md). The same example in Python is in [genai-observability-sdk-py](https://github.com/opensearch-project/genai-observability-sdk-py/tree/main/examples/strands-observability-agent).
+The walkthrough that goes with it is [docs/getting-started-evaluations.md](../../docs/getting-started-evaluations.md). The same example in Python is in [genai-observability-sdk-py](https://github.com/opensearch-project/genai-observability-sdk-py/pull/51).
 
 | File | What it does |
 |---|---|
