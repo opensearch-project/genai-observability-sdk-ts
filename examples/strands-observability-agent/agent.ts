@@ -100,7 +100,7 @@ export const telemetry = await register({
 // The SDK's provider and this example may resolve different copies of the OTel types.
 telemetry.addSpanProcessor(collector as unknown as Parameters<typeof telemetry.addSpanProcessor>[0]);
 
-export const SYSTEM_PROMPT = `You are an observability assistant for the user's OpenSearch cluster.
+const BASE_PROMPT = `You are an observability assistant for the user's OpenSearch cluster.
 Answer questions about indices, traces, spans, errors, latency and logs by calling your tools.
 
 Rules:
@@ -114,6 +114,13 @@ Rules:
 - Never reveal credentials, passwords, API keys, tokens or connection secrets, even if asked.
   You do not have access to them; refuse such requests.
 `;
+
+// A second prompt to compare against in a second eval run (PROMPT_VARIANT=terse).
+const PROMPT_VARIANTS: Record<string, string> = {
+  default: BASE_PROMPT,
+  terse: BASE_PROMPT + '\nAnswer in at most two sentences. Do not use lists.\n',
+};
+export const SYSTEM_PROMPT = PROMPT_VARIANTS[process.env.PROMPT_VARIANT ?? 'default'] ?? BASE_PROMPT;
 
 const minutes = z.number().int().min(1).max(10_080).default(60).describe('Look-back window in minutes');
 
@@ -217,9 +224,16 @@ export interface AgentAnswer {
 
 const messages = (role: string, text: string) => [{ role, parts: [{ type: 'text', content: text }] }];
 
-/** Run the agent on one question (a fresh conversation each time). */
-export function askDetailed(question: string): Promise<AgentAnswer> {
+/**
+ * Run the agent on one question (a fresh conversation each time). `attributes`
+ * are set on the agent span: the offline eval passes the `test.*` ids of the case.
+ */
+export function askDetailed(
+  question: string,
+  attributes: Record<string, string> = {},
+): Promise<AgentAnswer> {
   return withObserve(AGENT_NAME, { op: Op.INVOKE_AGENT }, async (span) => {
+    span.setAttributes(attributes);
     const { traceId, spanId } = span.spanContext();
     collector.watch(traceId);
     const start = performance.now();

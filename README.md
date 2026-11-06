@@ -723,6 +723,7 @@ See the [`examples/`](examples/) directory:
 | [`05_openai_auto_instrument.ts`](examples/05_openai_auto_instrument.ts) | OpenAI auto-instrumentation via `register()` |
 | [`06_retrieval_and_eval.ts`](examples/06_retrieval_and_eval.ts) | Retrieve traces from OpenSearch, evaluate, write scores back |
 | [`07_benchmarks.ts`](examples/07_benchmarks.ts) | `evaluate()` with scorers, `Benchmark` with manual logging |
+| [`strands-observability-agent/`](examples/strands-observability-agent/) | A Strands Agents observability assistant on your own OpenSearch cluster, with an offline eval (two suites, live ground truth, an LLM judge) and an online eval (sample traces, judge, post back) |
 
 ## Python SDK
 
