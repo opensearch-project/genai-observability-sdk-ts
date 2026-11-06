@@ -2,7 +2,7 @@
 
 This guide takes a TypeScript agent from its first instrumented trace to evaluation results in OpenSearch Dashboards, offline and online. It is the short path; [agent-evaluations.md](agent-evaluations.md) is the full reference (every attribute, ingestion pipelines, index templates).
 
-A complete, runnable version of everything below (a Strands agent with real OpenSearch tools, an offline test suite, an online evaluator and a traffic generator) is in [examples/strands-observability-agent](../examples/strands-observability-agent/).
+A complete, runnable version of everything below (a Strands agent with real OpenSearch tools, an offline test suite, an online evaluator and a traffic generator) is in the Strands observability example ([#101](https://github.com/opensearch-project/genai-observability-sdk-ts/pull/101)).
 
 - [0. Where to start](#0-where-to-start)
 - [1. Define goals](#1-define-goals)
@@ -303,7 +303,7 @@ Offline evals catch regressions before a release; online evals catch what the su
 
 ## Eval cookbook
 
-Copy and adapt. Each scorer returns an `EvalScore` (or a number or boolean) and works with `Benchmark.log({ scores })`; the synchronous ones also work as `evaluate()` scorers through `defineScorer()`. Runnable versions are in the [example](../examples/strands-observability-agent/). `AgentRun` is whatever your `ask()` returns, plus the spans of its trace (from `OpenSearchTraceRetriever.getTraces(traceId)` or your own span processor).
+Copy and adapt. Each scorer returns an `EvalScore` (or a number or boolean) and works with `Benchmark.log({ scores })`; the synchronous ones also work as `evaluate()` scorers through `defineScorer()`. Runnable versions are in the Strands observability example ([#101](https://github.com/opensearch-project/genai-observability-sdk-ts/pull/101)). `AgentRun` is whatever your `ask()` returns, plus the spans of its trace (from `OpenSearchTraceRetriever.getTraces(traceId)` or your own span processor).
 
 ```typescript
 import { defineScorer, type EvalScore, type SpanRecord } from "@opensearch-project/genai-observability-sdk-ts";
