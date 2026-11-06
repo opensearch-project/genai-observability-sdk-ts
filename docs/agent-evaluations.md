@@ -10,6 +10,8 @@ This guide covers the full path of an evaluation result: what the SDK sends, how
 - [Verify](#verify)
 - [Troubleshooting](#troubleshooting)
 
+New to agent evaluations? Start with the [onboarding guide](agent-evaluations-onboarding.md).
+
 Agent evaluations are experimental. Attribute names and index mappings may change before a stable release.
 
 ## What gets stored

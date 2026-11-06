@@ -16,6 +16,7 @@ OTel-native tracing and scoring for LLM applications. Instrument your AI workflo
 - **Auto-instrumentation** — automatically discovers and activates installed instrumentor packages (OpenAI, etc.)
 - **Scoring**: `score()` emits each evaluation result as an OTel `gen_ai.evaluation.result` log event, parented to the evaluated span
 - **Benchmarks**: `evaluate()` runs your agent against a dataset with scorers; `Benchmark` uploads results from any eval framework. Each case is its own agent trace plus one `gen_ai.evaluation.result` log event per score
+- **Agent evaluations onboarding**: [docs/agent-evaluations-onboarding.md](docs/agent-evaluations-onboarding.md) walks through the online path (sample traces, judge them, post results back) and the offline path (test suites and runs), with Dashboards deep links and copyable LLM prompts
 - **Agent evaluations guide**: [docs/agent-evaluations.md](docs/agent-evaluations.md) covers what gets stored, online and offline evaluation, ingestion (Data Prepper and Amazon OpenSearch Ingestion), verification and troubleshooting
 - **AWS SigV4** — built-in SigV4 signing for AWS-hosted OpenSearch and Data Prepper endpoints
 - **Streaming** — full support for sync/async functions, generators, and async generators
