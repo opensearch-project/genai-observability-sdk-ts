@@ -460,7 +460,12 @@ The instrumentation scope is the library that emitted the event: every SDK event
 | `agentVersion` | `string` | `gen_ai.agent.version` | Its version. Default: the active span's, else `register({ agentVersion })` |
 | `errorType` | `string` | `error.type` | Set when the evaluator failed |
 | `judgeTraceId` | `string` | `opensearch.gen_ai.evaluation.judge.trace_id` | The judge's own trace |
-| `attributes` | `Record<string, unknown>` | | Extra string, number, or boolean attributes. SDK keys (`gen_ai.evaluation.*`, `opensearch.gen_ai.evaluation.*`, `error.type`, `gen_ai.response.id`, `gen_ai.conversation.id`, `gen_ai.agent.*`) are dropped with a warning; the options win |
+| `evaluatorDescription` | `string` | `opensearch.gen_ai.evaluation.evaluator.description` | What the evaluator checks (criteria or rubric summary) |
+| `judgeModel` | `string` | `gen_ai.request.model` | Model used by the LLM judge |
+| `judgePromptName` | `string` | `gen_ai.prompt.name` | Name of the judge prompt template |
+| `judgePromptVersion` | `string` | `gen_ai.prompt.version` | Version of the judge prompt |
+| `judgeSystemInstructions` | `unknown` | `gen_ai.system_instructions` | The judge's system prompt. Opt-in (may hold sensitive data); text as is, other values `JSON.stringify`'d; cut at 8192 characters with `opensearch.gen_ai.evaluation.system_instructions_truncated = true` |
+| `attributes` | `Record<string, unknown>` | | Extra string, number, or boolean attributes. SDK keys (`gen_ai.evaluation.*`, `opensearch.gen_ai.evaluation.*`, `error.type`, `gen_ai.response.id`, `gen_ai.conversation.id`, `gen_ai.agent.*`, `gen_ai.request.model`, `gen_ai.prompt.*`, `gen_ai.system_instructions`) are dropped with a warning; the options win |
 
 `opensearch.gen_ai.evaluation.*` attributes are OpenSearch extensions for fields that are still proposals in the GenAI semantic conventions. They will move to `gen_ai.*` names when those proposals merge.
 
@@ -539,13 +544,15 @@ const provider = new BasicTracerProvider({
 | `data` | `Array<{ input, expected?, caseId?, caseName? }>` | Test cases |
 | `scores` | `Array<ScorerFn \| Scorer>` | Scorer functions: `(input, output, expected)` returning, synchronously, `EvalScore`, `EvalScore[]`, a finite `number`, or `boolean`. Anything else logs a warning and emits an error result. Optionally wrapped with `defineScorer()` |
 | `metadata` | `Record<string, unknown>` | Copied to every `gen_ai.evaluation.result` of the run. Reserved keys are filtered |
+| `runName` | `string` | `opensearch.test.suite.run.name` on every result: a readable run name, for example `"v5 with shorter prompt"`. Also a `new Benchmark()` option |
+| `runDescription` | `string` | `opensearch.test.suite.run.description` on every result (cut at 1024 characters). Also a `new Benchmark()` option |
 | `runId` | `string` | `test.suite.run.id` (default: generated). Use the same id from every CI shard so they report into one run, or an existing run's id to re-score it (send new results with the same run id). Empty or whitespace-only throws |
 | `ciPipeline` | `Record<string, string>` | Set or override `cicd.pipeline.name` / `.run.id` / `.run.url.full` (read from the CI environment by default; nothing outside CI) |
 | `recordExpected` | `boolean` | Export each case's `expected` as `opensearch.test.case.expected` (default `true`). Pass `false` if test sets hold sensitive data. Also a `new Benchmark()` option |
 
 Each `TestCaseResult` has `status` (`pass`, or `fail` when the case errored or failed a verdict), `resultStatus` (`pass` | `fail` | `error`), `errorType`, `durationMs`, `verdicts` (evaluation name to verdict), and the `traceId` / `spanId` of the agent root span when the task created one.
 
-**Declaring rules.** Wrap a scorer with `defineScorer(spec, fn)` to declare its evaluation name and pass rule up front. A scorer may also return a `boolean` (a verdict) or an `EvalScore` with `label` (`"pass"` / `"fail"`), `passed`, `threshold`, `direction`, `scoreMin`, `scoreMax`, `judgeTraceId` (the LLM judge's own trace, sent as `opensearch.gen_ai.evaluation.judge.trace_id`); fields set on the `EvalScore` win over the declaration.
+**Declaring rules.** Wrap a scorer with `defineScorer(spec, fn)` to declare its evaluation name and pass rule up front. A scorer may also return a `boolean` (a verdict) or an `EvalScore` with `label` (`"pass"` / `"fail"`), `passed`, `threshold`, `direction`, `scoreMin`, `scoreMax`, `judgeTraceId` (the LLM judge's own trace, sent as `opensearch.gen_ai.evaluation.judge.trace_id`); fields set on the `EvalScore` win over the declaration. `defineScorer()` and `EvalScore` also take the judge context of `score()`: `evaluatorDescription`, `judgeModel`, `judgePromptName`, `judgePromptVersion` and the opt-in `judgeSystemInstructions`.
 
 ```typescript
 import { defineScorer } from "@opensearch-project/genai-observability-sdk-ts";

@@ -20,7 +20,24 @@ export { observe, withObserve, Op } from './observe.js';
 export type { ObserveOptions } from './observe.js';
 export { enrich, markAgentRoot, AGENT_ROOT_ATTRIBUTE } from './enrich.js';
 export type { EnrichOptions } from './enrich.js';
-export { score, labelVerdict, thresholdVerdict, EVALUATION_RESULT_EVENT } from './score.js';
+export {
+  score,
+  labelVerdict,
+  thresholdVerdict,
+  EVALUATION_RESULT_EVENT,
+  EVALUATOR_DESCRIPTION_KEY,
+  JUDGE_MODEL_KEY,
+  JUDGE_PROMPT_NAME_KEY,
+  JUDGE_PROMPT_VERSION_KEY,
+  JUDGE_SYSTEM_INSTRUCTIONS_KEY,
+  SYSTEM_INSTRUCTIONS_TRUNCATED_KEY,
+  SYSTEM_INSTRUCTIONS_LIMIT,
+} from './score.js';
+export {
+  TEST_SUITE_RUN_NAME_KEY,
+  TEST_SUITE_RUN_DESCRIPTION_KEY,
+  RUN_DESCRIPTION_LIMIT,
+} from './internal.js';
 export type {
   ScoreOptions,
   Verdict,
