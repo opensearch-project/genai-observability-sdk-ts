@@ -1,0 +1,32 @@
+{
+  "name": "strands-observability-agent",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Observability assistant on Strands Agents (TypeScript), with offline and online evaluations",
+  "type": "module",
+  "scripts": {
+    "agent": "tsx agent.ts",
+    "offline-eval": "tsx offlineEval.ts",
+    "online-eval": "tsx onlineEval.ts",
+    "traffic": "tsx traffic.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@opensearch-project/genai-observability-sdk-ts": "link:../..",
+    "@opensearch-project/opensearch": "^2.12.0",
+    "@strands-agents/sdk": "^1.24.0",
+    "zod": "^4.5.4",
+    "@opentelemetry/api": "1.9.1",
+    "@opentelemetry/context-async-hooks": "^1.30.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.17.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  },
+  "pnpm": {
+    "overrides": {
+      "@opentelemetry/api": "1.9.1"
+    }
+  }
+}

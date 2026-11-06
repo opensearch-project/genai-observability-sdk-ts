@@ -28,6 +28,22 @@ export const EVALUATION_RESULT_EVENT = "gen_ai.evaluation.result";
  */
 export const JUDGE_LABEL_KEY = "opensearch.gen_ai.evaluation.judge_label";
 
+/** What the evaluator checks (its criteria or rubric summary). */
+export const EVALUATOR_DESCRIPTION_KEY = "opensearch.gen_ai.evaluation.evaluator.description";
+/** Model used by the LLM judge (standard GenAI semconv name). */
+export const JUDGE_MODEL_KEY = "gen_ai.request.model";
+/** Name of the judge prompt template (standard GenAI semconv name). */
+export const JUDGE_PROMPT_NAME_KEY = "gen_ai.prompt.name";
+/** Version of the judge prompt (standard GenAI semconv name). */
+export const JUDGE_PROMPT_VERSION_KEY = "gen_ai.prompt.version";
+/** The judge's system prompt (standard GenAI semconv name). Opt-in only. */
+export const JUDGE_SYSTEM_INSTRUCTIONS_KEY = "gen_ai.system_instructions";
+/** `true` when `gen_ai.system_instructions` was truncated. */
+export const SYSTEM_INSTRUCTIONS_TRUNCATED_KEY =
+  "opensearch.gen_ai.evaluation.system_instructions_truncated";
+/** Maximum length of `gen_ai.system_instructions`, in characters. */
+export const SYSTEM_INSTRUCTIONS_LIMIT = 8192;
+
 /** Exact attribute keys score() owns; `attributes` cannot set them. */
 const SDK_OWNED_KEYS: ReadonlySet<string> = new Set([
   "error.type",
@@ -35,6 +51,10 @@ const SDK_OWNED_KEYS: ReadonlySet<string> = new Set([
   "gen_ai.conversation.id",
   AGENT_NAME_KEY,
   AGENT_VERSION_KEY,
+  JUDGE_MODEL_KEY,
+  JUDGE_PROMPT_NAME_KEY,
+  JUDGE_PROMPT_VERSION_KEY,
+  JUDGE_SYSTEM_INSTRUCTIONS_KEY,
 ]);
 /** Attribute namespaces score() owns: `gen_ai.evaluation.*` and `opensearch.gen_ai.evaluation.*`. */
 const SDK_OWNED_PREFIXES = ["gen_ai.evaluation.", "opensearch.gen_ai.evaluation."];
@@ -87,6 +107,24 @@ export interface ScoreOptions {
   evaluatorVersion?: string;
   /** `opensearch.gen_ai.evaluation.evaluator.type`. */
   evaluatorType?: EvaluatorType;
+  /**
+   * `opensearch.gen_ai.evaluation.evaluator.description`: what the evaluator
+   * checks (its criteria or rubric summary).
+   */
+  evaluatorDescription?: string;
+  /** `gen_ai.request.model`: the model used by the LLM judge. */
+  judgeModel?: string;
+  /** `gen_ai.prompt.name`: the name of the judge prompt template. */
+  judgePromptName?: string;
+  /** `gen_ai.prompt.version`: the version of the judge prompt. */
+  judgePromptVersion?: string;
+  /**
+   * `gen_ai.system_instructions`: the judge's system prompt (text, or a value
+   * that is JSON.stringify'd). It may contain sensitive data, so it is only
+   * recorded when passed. Truncated to 8192 characters, with
+   * `opensearch.gen_ai.evaluation.system_instructions_truncated=true` when cut.
+   */
+  judgeSystemInstructions?: unknown;
   /** `opensearch.gen_ai.evaluation.score.direction`. */
   direction?: ScoreDirection;
   /** `opensearch.gen_ai.evaluation.score.min`. */
@@ -116,7 +154,8 @@ export interface ScoreOptions {
    * Extra attributes (string, number, boolean), for example `test.*` grouping
    * keys. Keys the SDK sets itself (`gen_ai.evaluation.*`,
    * `opensearch.gen_ai.evaluation.*`, `error.type`, `gen_ai.response.id`,
-   * `gen_ai.conversation.id`, `gen_ai.agent.*`) are dropped with a warning:
+   * `gen_ai.conversation.id`, `gen_ai.agent.*`, `gen_ai.request.model`,
+   * `gen_ai.prompt.name` / `.version`, `gen_ai.system_instructions`) are dropped with a warning:
    * use the options instead.
    */
   attributes?: Record<string, unknown>;
@@ -270,6 +309,51 @@ function buildAttributes(options: ScoreOptions, target: Target, verdict?: Verdic
     ),
   );
   if (options.judgeTraceId) attrs["opensearch.gen_ai.evaluation.judge.trace_id"] = options.judgeTraceId;
+  Object.assign(attrs, judgeAttributes(options));
+  return attrs;
+}
+
+/** Judge / evaluator context fields of a score, as event attributes (only those set). */
+export interface JudgeContext {
+  evaluatorDescription?: string;
+  judgeModel?: string;
+  judgePromptName?: string;
+  judgePromptVersion?: string;
+  judgeSystemInstructions?: unknown;
+}
+
+function instructionsText(value: unknown): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value === "string") return value;
+  try {
+    return JSON.stringify(value) ?? String(value);
+  } catch {
+    return String(value);
+  }
+}
+
+/**
+ * @internal The judge / evaluator context attributes: evaluator description,
+ * judge model, prompt name and version, and (opt-in) the judge's system
+ * instructions, truncated to 8192 characters with the `_truncated` flag.
+ */
+export function judgeAttributes(ctx: JudgeContext): Attributes {
+  const attrs: Attributes = {};
+  if (ctx.evaluatorDescription) attrs[EVALUATOR_DESCRIPTION_KEY] = ctx.evaluatorDescription;
+  if (ctx.judgeModel) attrs[JUDGE_MODEL_KEY] = ctx.judgeModel;
+  if (ctx.judgePromptName) attrs[JUDGE_PROMPT_NAME_KEY] = ctx.judgePromptName;
+  if (ctx.judgePromptVersion) attrs[JUDGE_PROMPT_VERSION_KEY] = ctx.judgePromptVersion;
+  const text = instructionsText(ctx.judgeSystemInstructions);
+  if (text) {
+    // Count characters (code points), not UTF-16 units.
+    const chars = Array.from(text);
+    if (chars.length <= SYSTEM_INSTRUCTIONS_LIMIT) {
+      attrs[JUDGE_SYSTEM_INSTRUCTIONS_KEY] = text;
+    } else {
+      attrs[JUDGE_SYSTEM_INSTRUCTIONS_KEY] = chars.slice(0, SYSTEM_INSTRUCTIONS_LIMIT).join("");
+      attrs[SYSTEM_INSTRUCTIONS_TRUNCATED_KEY] = true;
+    }
+  }
   return attrs;
 }
 

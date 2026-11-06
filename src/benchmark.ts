@@ -33,12 +33,14 @@ import {
   normalizeSpanId,
   normalizeTraceId,
   resolveAgent,
+  runAttributes,
   validateMetadataKeys,
 } from './internal.js';
 import { ciPipelineAttributes } from './cicd.js';
 import {
   emitScore,
   labelVerdict,
+  type JudgeContext,
   thresholdVerdict,
   type Verdict,
   type EvaluatorType,
@@ -85,6 +87,31 @@ export interface EvalScore {
   scoreMax?: number;
   /** `opensearch.gen_ai.evaluation.judge.trace_id`: the trace of the LLM judge call that produced this score. */
   judgeTraceId?: string;
+  /**
+   * `opensearch.gen_ai.evaluation.evaluator.name` of this score (for example
+   * in `Benchmark.log()`). Default: the scorer's `defineScorer()` declaration.
+   */
+  evaluator?: string;
+  /** `opensearch.gen_ai.evaluation.evaluator.type` of this score. Default: the scorer's declaration. */
+  evaluatorType?: EvaluatorType;
+  /** Judge / evaluator context; unset fields fall back to the scorer's `defineScorer()` declaration. */
+  /**
+   * `opensearch.gen_ai.evaluation.evaluator.description`: what the evaluator
+   * checks (its criteria or rubric summary).
+   */
+  evaluatorDescription?: string;
+  /** `gen_ai.request.model`: the model used by the LLM judge. */
+  judgeModel?: string;
+  /** `gen_ai.prompt.name`: the name of the judge prompt template. */
+  judgePromptName?: string;
+  /** `gen_ai.prompt.version`: the version of the judge prompt. */
+  judgePromptVersion?: string;
+  /**
+   * `gen_ai.system_instructions`: the judge's system prompt. Opt-in (it may
+   * contain sensitive data); truncated to 8192 characters with
+   * `opensearch.gen_ai.evaluation.system_instructions_truncated=true`.
+   */
+  judgeSystemInstructions?: unknown;
 }
 
 /** What a scorer declares about the evaluation it produces (see `defineScorer`). */
@@ -102,6 +129,23 @@ export interface ScorerSpec {
   /** `opensearch.gen_ai.evaluation.evaluator.name` of every result the scorer produces. */
   evaluator?: string;
   evaluatorType?: EvaluatorType;
+  /**
+   * `opensearch.gen_ai.evaluation.evaluator.description`: what the evaluator
+   * checks (its criteria or rubric summary).
+   */
+  evaluatorDescription?: string;
+  /** `gen_ai.request.model`: the model used by the LLM judge. */
+  judgeModel?: string;
+  /** `gen_ai.prompt.name`: the name of the judge prompt template. */
+  judgePromptName?: string;
+  /** `gen_ai.prompt.version`: the version of the judge prompt. */
+  judgePromptVersion?: string;
+  /**
+   * `gen_ai.system_instructions`: the judge's system prompt. Opt-in (it may
+   * contain sensitive data); truncated to 8192 characters with
+   * `opensearch.gen_ai.evaluation.system_instructions_truncated=true`.
+   */
+  judgeSystemInstructions?: unknown;
 }
 
 export type ScorerFn = (
@@ -169,6 +213,21 @@ function applySpec(s: EvalScore, spec?: ScorerSpec): EvalScore {
     direction: s.direction ?? spec.direction,
     scoreMin: s.scoreMin ?? spec.scoreMin,
     scoreMax: s.scoreMax ?? spec.scoreMax,
+    evaluatorDescription: s.evaluatorDescription ?? spec.evaluatorDescription,
+    judgeModel: s.judgeModel ?? spec.judgeModel,
+    judgePromptName: s.judgePromptName ?? spec.judgePromptName,
+    judgePromptVersion: s.judgePromptVersion ?? spec.judgePromptVersion,
+    judgeSystemInstructions: s.judgeSystemInstructions ?? spec.judgeSystemInstructions,
+  };
+}
+
+function judgeContextOf(s: EvalScore): JudgeContext {
+  return {
+    evaluatorDescription: s.evaluatorDescription,
+    judgeModel: s.judgeModel,
+    judgePromptName: s.judgePromptName,
+    judgePromptVersion: s.judgePromptVersion,
+    judgeSystemInstructions: s.judgeSystemInstructions,
   };
 }
 
@@ -211,6 +270,8 @@ const CASE_STATUSES: readonly TestCaseStatus[] = ["pass", "fail", "error"];
 export interface BenchmarkSummary {
   benchmarkName: string;
   runId: string;
+  /** `opensearch.test.suite.run.name` of the run, when given. */
+  runName?: string;
   totalCases: number;
   /** Cases whose task raised or a result errored (status `error`). */
   errorCount: number;
@@ -333,6 +394,8 @@ interface CaseIdentity {
   ci?: Record<string, string>;
   /** `opensearch.test.case.expected` (+ `_truncated`), when the case has an expected output. */
   expected?: Record<string, string | boolean>;
+  /** `opensearch.test.suite.run.name` / `.description`, when given. */
+  run?: Record<string, string>;
 }
 
 function identityAttributes(identity: CaseIdentity): Record<string, string> {
@@ -364,7 +427,7 @@ function emitCaseScores(
   // agent identity is passed as score() options, not as extra attributes.
   const { [AGENT_NAME_KEY]: _name, [AGENT_VERSION_KEY]: _version, ...identityAttrs } =
     identityAttributes(identity);
-  const testAttrs = { ...identityAttrs, ...(identity.expected ?? {}) };
+  const testAttrs = { ...identityAttrs, ...(identity.run ?? {}), ...(identity.expected ?? {}) };
   const errored = extra.errorType !== undefined;
   for (const s of scores) {
     const scoreMeta = s.metadata ? toAttributes(safeMetadata(s.metadata, `score:${s.name}`)) : {};
@@ -377,10 +440,11 @@ function emitCaseScores(
       scoreMin: s.scoreMin,
       scoreMax: s.scoreMax,
       threshold: s.threshold,
-      evaluator: extra.evaluator,
-      evaluatorType: extra.evaluatorType,
+      evaluator: s.evaluator ?? extra.evaluator,
+      evaluatorType: s.evaluatorType ?? extra.evaluatorType,
       errorType: extra.errorType,
       judgeTraceId: s.judgeTraceId,
+      ...judgeContextOf(s),
       agentName: identity.agent?.[AGENT_NAME_KEY],
       agentVersion: identity.agent?.[AGENT_VERSION_KEY],
       attributes: { ...metadata, ...scoreMeta, ...testAttrs },
@@ -405,6 +469,7 @@ function computeSummary(
   runId: string,
   cases: TestCaseResult[],
   durationMs: number,
+  runName?: string,
 ): BenchmarkSummary {
   const scoreAcc: Record<string, { sum: number; min: number; max: number; count: number }> = {};
   for (const c of cases) {
@@ -435,6 +500,7 @@ function computeSummary(
   return {
     benchmarkName: name,
     runId,
+    ...(runName ? { runName } : {}),
     totalCases: cases.length,
     errorCount: cases.filter(c => c.resultStatus === 'error').length,
     passCount: cases.filter(c => c.resultStatus === 'pass').length,
@@ -448,6 +514,7 @@ function formatSummary(summary: BenchmarkSummary): string {
   const lines: string[] = [];
   lines.push(`Benchmark: ${summary.benchmarkName}`);
   lines.push(`Run ID:    ${summary.runId}`);
+  if (summary.runName) lines.push(`Run name:  ${summary.runName}`);
   lines.push(`Cases:     ${summary.totalCases} (${summary.errorCount} errors)`);
   lines.push(`Duration:  ${Math.round(summary.durationMs)}ms`);
 
@@ -481,6 +548,17 @@ export interface BenchmarkOptions {
    * be empty or whitespace.
    */
   runId?: string;
+  /**
+   * `opensearch.test.suite.run.name`: a human-readable name for the run, for
+   * example `"v5 with shorter prompt"`, on every result of the run. Optional;
+   * readers fall back to the short run id.
+   */
+  runName?: string;
+  /**
+   * `opensearch.test.suite.run.description`: free text about the run, on every
+   * result of the run. Optional; truncated to 1024 characters.
+   */
+  runDescription?: string;
   /** `gen_ai.agent.name` of the agent under test. Default: `register({ agentName })`. */
   agentName?: string;
   /** `gen_ai.agent.version` of the agent under test. Default: `register({ agentVersion })`. */
@@ -514,10 +592,12 @@ export class Benchmark {
   private _agent: Record<string, string>;
   private _ci: Record<string, string>;
   private _recordExpected: boolean;
+  private _run: Record<string, string>;
 
   constructor(name: string, options?: BenchmarkOptions) {
     this._name = name;
     this._runId = makeRunId(options?.runId);
+    this._run = runAttributes(options?.runName, options?.runDescription);
     // Declared agent, else the register() default (never invented).
     this._agent = resolveAgent(options?.agentName, options?.agentVersion);
     this._metadata = safeMetadata(options?.metadata, `benchmark:${name}`);
@@ -532,6 +612,11 @@ export class Benchmark {
 
   get runId(): string {
     return this._runId;
+  }
+
+  /** `opensearch.test.suite.run.name` of the run, when given. */
+  get runName(): string | undefined {
+    return this._run["opensearch.test.suite.run.name"];
   }
 
   log(options: {
@@ -586,6 +671,7 @@ export class Benchmark {
       agent: this._agent,
       ci: this._ci,
       expected: this._recordExpected ? expectedAttributes(options.expected) : undefined,
+      run: this._run,
     };
     if (options.status !== undefined && !CASE_STATUSES.includes(options.status)) {
       throw new Error(`status must be one of ${CASE_STATUSES.join(', ')}; got "${options.status}"`);
@@ -637,7 +723,13 @@ export class Benchmark {
     }
     this._closed = true;
 
-    const summary = computeSummary(this._name, this._runId, this._cases, elapsedMs(this._start));
+    const summary = computeSummary(
+      this._name,
+      this._runId,
+      this._cases,
+      elapsedMs(this._start),
+      this.runName,
+    );
     console.log(formatSummary(summary));
     return summary;
   }
@@ -726,6 +818,17 @@ export interface EvaluateOptions {
    */
   runId?: string;
   /**
+   * `opensearch.test.suite.run.name`: a human-readable name for the run, for
+   * example `"v5 with shorter prompt"`, on every result of the run. Optional;
+   * readers fall back to the short run id.
+   */
+  runName?: string;
+  /**
+   * `opensearch.test.suite.run.description`: free text about the run, on every
+   * result of the run. Optional; truncated to 1024 characters.
+   */
+  runDescription?: string;
+  /**
    * `gen_ai.agent.name` of the agent under test. Stamped on the agent root spans
    * that name none themselves and on every evaluation result.
    * When omitted, each case uses the agent its root span names, else
@@ -774,6 +877,7 @@ export interface EvaluateOptions {
  */
 export function evaluate(options: EvaluateOptions): BenchmarkResult {
   const runId = makeRunId(options.runId);
+  const run = runAttributes(options.runName, options.runDescription);
   const filteredMetadata = toAttributes(safeMetadata(options.metadata, `evaluate:${options.name}`));
   const runStart = performance.now();
   const cases: TestCaseResult[] = [];
@@ -791,6 +895,7 @@ export function evaluate(options: EvaluateOptions): BenchmarkResult {
       caseId: item.caseId ?? makeCaseId(item.input),
       caseName: item.caseName,
       ci,
+      run,
     };
     const expected = item.expected;
     const expectedAttrs = recordExpected ? expectedAttributes(expected) : undefined;
@@ -910,7 +1015,13 @@ export function evaluate(options: EvaluateOptions): BenchmarkResult {
     });
   }
 
-  const summary = computeSummary(options.name, runId, cases, elapsedMs(runStart));
+  const summary = computeSummary(
+    options.name,
+    runId,
+    cases,
+    elapsedMs(runStart),
+    run["opensearch.test.suite.run.name"],
+  );
   console.log(formatSummary(summary));
 
   return { summary, cases };

@@ -312,6 +312,7 @@ export class OpenSearchTraceRetriever {
   }
 
   async listRootSpans(options?: {
+    /** Only spans of these services (the span index's `serviceName`). */
     services?: string[];
     since?: Date;
     maxResults?: number;
@@ -328,7 +329,7 @@ export class OpenSearchTraceRetriever {
 
     if (options?.services && options.services.length > 0) {
       filters.push({
-        terms: { 'resource.service.name': options.services },
+        terms: { serviceName: options.services },
       });
     }
 
