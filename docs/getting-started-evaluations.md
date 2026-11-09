@@ -62,7 +62,7 @@ For the example observability assistant:
 
 Traces and evaluation events need somewhere to go:
 
-- **Local:** the [OpenSearch observability stack](https://github.com/opensearch-project/observability-stack) (`docker compose up -d`). It runs an OTel Collector on `http://localhost:4318`, Data Prepper, OpenSearch on `https://localhost:9200` and OpenSearch Dashboards on `http://localhost:5601`, and routes `gen_ai.evaluation.result` events to `otel-v1-genai-evaluation-*`.
+- **Local:** the [OpenSearch observability stack](https://github.com/opensearch-project/observability-stack) (`docker compose up -d`). It runs an OTel Collector on `http://localhost:4318`, Data Prepper, OpenSearch on `https://localhost:9200` and OpenSearch Dashboards on `http://localhost:5601`, and routes `gen_ai.evaluation.result` events to the `otel-v1-genai-evaluation` index.
 - **Managed:** an Amazon OpenSearch Service domain plus Amazon OpenSearch Ingestion (OSI) pipelines for traces and logs. See [8. Ship and monitor](#8-ship-and-monitor) and [Ingestion](agent-evaluations.md#ingestion).
 
 ```bash
@@ -334,7 +334,7 @@ async function answerCorrectness(run: AgentRun): Promise<EvalScore> {
 
 ### answerCorrectness (LLM judge)
 
-An async judge goes through `Benchmark.log()` or `score()`. Record the judge model, prompt name and version, and what it checks:
+An async judge goes through `Benchmark.log()` or `score()`. Record the judge model, prompt name and version, and what it checks. Results carry the prompt's name and version (`answer-quality@v1`); the full `JUDGE_PROMPT` goes on the judge's own LLM span as `gen_ai.system_instructions` (recorded by the judge's instrumentation, or `enrich({ systemInstructions: JUDGE_PROMPT })` inside a `withObserve()` judge call), never on the result:
 
 ```typescript
 const JUDGE_PROMPT = "You grade answers of an observability assistant. Reply with JSON {\"score\": 1-5, \"reason\": \"...\"}.";
@@ -354,7 +354,6 @@ async function answerQualityJudge(question: string, answer: string): Promise<Eva
     judgeModel: "us.anthropic.claude-haiku-4-5-20251001-v1:0",
     judgePromptName: "answer-quality",
     judgePromptVersion: "v1",
-    judgeSystemInstructions: JUDGE_PROMPT, // opt-in: only recorded when passed
   };
 }
 ```
@@ -515,8 +514,10 @@ SDK (Benchmark, EvalScore; evaluate() and defineScorer() only if the agent is sy
   EvalScore with passed.
 - One LLM-judge scorer (evaluatorType "llm_judge") for answer quality on a 1 to 5 scale with
   threshold 4, using the same model provider as the agent. Set evaluatorDescription,
-  judgeModel, judgePromptName, judgePromptVersion and judgeSystemInstructions on the
-  EvalScore, and put the judge's reason in explanation.
+  judgeModel, judgePromptName and judgePromptVersion on the EvalScore (bump the version
+  when the prompt text changes), and put the judge's reason in explanation. Do not put
+  the judge prompt on the result: it belongs on the judge's LLM span
+  (gen_ai.system_instructions).
 - new Benchmark(<suite>, { runName, runDescription, agentName, agentVersion }); for each case
   await the agent, then bench.log({ caseId, caseName, input, output, expected, traceId, spanId,
   scores }). Take runName from the command line.
@@ -557,7 +558,8 @@ Add an online evaluator for this TypeScript agent with the OpenSearch GenAI obse
 | A trace is graded twice | Two passes overlapped, or ran before the last results were indexed | Run one pass at a time, wait for the pipeline flush interval |
 | Runs show an id instead of a name | No `runName` | Pass `runName` to `evaluate()` or `new Benchmark()` |
 | Judge model or prompt version missing | Not set on the score | Set `judgeModel`, `judgePromptName`, `judgePromptVersion` (on `EvalScore`, `score()` or `defineScorer()`) |
-| Judge system prompt not stored or not searchable | It is opt-in; long strings exceed the template's `ignore_above` | Pass `judgeSystemInstructions`; values over 8192 characters are cut and flagged with `opensearch.gen_ai.evaluation.system_instructions_truncated` |
+| The judge prompt is not on the result | By design: results carry `gen_ai.prompt.name` / `.version` only | Open the judge trace (`judgeTraceId`); the prompt is on its LLM span as `gen_ai.system_instructions` |
+| A long expected output does not match a filter | String attributes longer than the template's `ignore_above` (256) are stored but not indexed | Expected. They are still shown on the result |
 | OSIS rejects the payload | gRPC, unsigned requests, or a compression mismatch | OTLP over HTTP with `sigv4: { service: "osis", region }`, and `compression` equal to the pipeline's |
 | Evaluations page missing | Feature flags off | Set `explore.agentTraces.enabled` and `explore.agentTraces.evaluations.enabled` |
 

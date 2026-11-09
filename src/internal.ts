@@ -52,7 +52,7 @@ export const TEST_CASE_EXPECTED_KEY = "opensearch.test.case.expected";
 /** `true` when `opensearch.test.case.expected` was truncated. */
 export const TEST_CASE_EXPECTED_TRUNCATED_KEY = "opensearch.test.case.expected_truncated";
 /** Maximum length of `opensearch.test.case.expected`, in characters. */
-export const EXPECTED_LIMIT = 4096;
+export const EXPECTED_LIMIT = 32768;
 
 /**
  * @internal `opensearch.test.case.expected` (and `_truncated` when cut) for a

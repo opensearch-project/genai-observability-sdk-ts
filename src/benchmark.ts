@@ -106,12 +106,6 @@ export interface EvalScore {
   judgePromptName?: string;
   /** `gen_ai.prompt.version`: the version of the judge prompt. */
   judgePromptVersion?: string;
-  /**
-   * `gen_ai.system_instructions`: the judge's system prompt. Opt-in (it may
-   * contain sensitive data); truncated to 8192 characters with
-   * `opensearch.gen_ai.evaluation.system_instructions_truncated=true`.
-   */
-  judgeSystemInstructions?: unknown;
 }
 
 /** What a scorer declares about the evaluation it produces (see `defineScorer`). */
@@ -140,12 +134,6 @@ export interface ScorerSpec {
   judgePromptName?: string;
   /** `gen_ai.prompt.version`: the version of the judge prompt. */
   judgePromptVersion?: string;
-  /**
-   * `gen_ai.system_instructions`: the judge's system prompt. Opt-in (it may
-   * contain sensitive data); truncated to 8192 characters with
-   * `opensearch.gen_ai.evaluation.system_instructions_truncated=true`.
-   */
-  judgeSystemInstructions?: unknown;
 }
 
 export type ScorerFn = (
@@ -217,7 +205,6 @@ function applySpec(s: EvalScore, spec?: ScorerSpec): EvalScore {
     judgeModel: s.judgeModel ?? spec.judgeModel,
     judgePromptName: s.judgePromptName ?? spec.judgePromptName,
     judgePromptVersion: s.judgePromptVersion ?? spec.judgePromptVersion,
-    judgeSystemInstructions: s.judgeSystemInstructions ?? spec.judgeSystemInstructions,
   };
 }
 
@@ -227,7 +214,6 @@ function judgeContextOf(s: EvalScore): JudgeContext {
     judgeModel: s.judgeModel,
     judgePromptName: s.judgePromptName,
     judgePromptVersion: s.judgePromptVersion,
-    judgeSystemInstructions: s.judgeSystemInstructions,
   };
 }
 
@@ -625,7 +611,7 @@ export class Benchmark {
     /**
      * Expected output. Sent on every result of the case as
      * `opensearch.test.case.expected` (strings as is, other values
-     * JSON.stringify'd, truncated to 4096 characters), unless the Benchmark
+     * JSON.stringify'd, truncated to 32768 characters), unless the Benchmark
      * was created with `recordExpected: false`.
      */
     expected?: unknown;

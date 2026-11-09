@@ -36,13 +36,13 @@ export const JUDGE_MODEL_KEY = "gen_ai.request.model";
 export const JUDGE_PROMPT_NAME_KEY = "gen_ai.prompt.name";
 /** Version of the judge prompt (standard GenAI semconv name). */
 export const JUDGE_PROMPT_VERSION_KEY = "gen_ai.prompt.version";
-/** The judge's system prompt (standard GenAI semconv name). Opt-in only. */
-export const JUDGE_SYSTEM_INSTRUCTIONS_KEY = "gen_ai.system_instructions";
-/** `true` when `gen_ai.system_instructions` was truncated. */
-export const SYSTEM_INSTRUCTIONS_TRUNCATED_KEY =
-  "opensearch.gen_ai.evaluation.system_instructions_truncated";
-/** Maximum length of `gen_ai.system_instructions`, in characters. */
-export const SYSTEM_INSTRUCTIONS_LIMIT = 8192;
+/**
+ * The judge's full system prompt. Never set on a result event: it belongs on
+ * the judge's own LLM span (its OTel location), recorded by the judge's
+ * instrumentation or `enrich({ systemInstructions })`. Reserved here so
+ * `attributes` cannot add it to a result either.
+ */
+const JUDGE_SYSTEM_INSTRUCTIONS_KEY = "gen_ai.system_instructions";
 
 /** Exact attribute keys score() owns; `attributes` cannot set them. */
 const SDK_OWNED_KEYS: ReadonlySet<string> = new Set([
@@ -116,15 +116,13 @@ export interface ScoreOptions {
   judgeModel?: string;
   /** `gen_ai.prompt.name`: the name of the judge prompt template. */
   judgePromptName?: string;
-  /** `gen_ai.prompt.version`: the version of the judge prompt. */
-  judgePromptVersion?: string;
   /**
-   * `gen_ai.system_instructions`: the judge's system prompt (text, or a value
-   * that is JSON.stringify'd). It may contain sensitive data, so it is only
-   * recorded when passed. Truncated to 8192 characters, with
-   * `opensearch.gen_ai.evaluation.system_instructions_truncated=true` when cut.
+   * `gen_ai.prompt.version`: the version of the judge prompt. With
+   * `judgePromptName` it identifies the prompt (`name@version`). The full
+   * prompt text is not put on the result: it goes on the judge's own LLM span
+   * as `gen_ai.system_instructions`.
    */
-  judgeSystemInstructions?: unknown;
+  judgePromptVersion?: string;
   /** `opensearch.gen_ai.evaluation.score.direction`. */
   direction?: ScoreDirection;
   /** `opensearch.gen_ai.evaluation.score.min`. */
@@ -319,23 +317,11 @@ export interface JudgeContext {
   judgeModel?: string;
   judgePromptName?: string;
   judgePromptVersion?: string;
-  judgeSystemInstructions?: unknown;
-}
-
-function instructionsText(value: unknown): string | undefined {
-  if (value === undefined || value === null) return undefined;
-  if (typeof value === "string") return value;
-  try {
-    return JSON.stringify(value) ?? String(value);
-  } catch {
-    return String(value);
-  }
 }
 
 /**
  * @internal The judge / evaluator context attributes: evaluator description,
- * judge model, prompt name and version, and (opt-in) the judge's system
- * instructions, truncated to 8192 characters with the `_truncated` flag.
+ * judge model, prompt name and version. Never the judge's system prompt.
  */
 export function judgeAttributes(ctx: JudgeContext): Attributes {
   const attrs: Attributes = {};
@@ -343,17 +329,6 @@ export function judgeAttributes(ctx: JudgeContext): Attributes {
   if (ctx.judgeModel) attrs[JUDGE_MODEL_KEY] = ctx.judgeModel;
   if (ctx.judgePromptName) attrs[JUDGE_PROMPT_NAME_KEY] = ctx.judgePromptName;
   if (ctx.judgePromptVersion) attrs[JUDGE_PROMPT_VERSION_KEY] = ctx.judgePromptVersion;
-  const text = instructionsText(ctx.judgeSystemInstructions);
-  if (text) {
-    // Count characters (code points), not UTF-16 units.
-    const chars = Array.from(text);
-    if (chars.length <= SYSTEM_INSTRUCTIONS_LIMIT) {
-      attrs[JUDGE_SYSTEM_INSTRUCTIONS_KEY] = text;
-    } else {
-      attrs[JUDGE_SYSTEM_INSTRUCTIONS_KEY] = chars.slice(0, SYSTEM_INSTRUCTIONS_LIMIT).join("");
-      attrs[SYSTEM_INSTRUCTIONS_TRUNCATED_KEY] = true;
-    }
-  }
   return attrs;
 }
 

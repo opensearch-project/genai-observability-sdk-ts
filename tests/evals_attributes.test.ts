@@ -5,7 +5,9 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { trace } from '@opentelemetry/api';
 import { Benchmark, evaluate, defineScorer } from '../src/benchmark.js';
 import { score } from '../src/score.js';
-import { getFinishedLogRecords, clearSpans } from './setup.js';
+import { withObserve } from '../src/observe.js';
+import { enrich } from '../src/enrich.js';
+import { getFinishedLogRecords, getFinishedSpans, clearSpans } from './setup.js';
 
 const TRACE_ID = 'abcdef1234567890abcdef1234567890';
 const SPAN_ID = '1234567890abcdef';
@@ -128,37 +130,39 @@ describe('judge / evaluator context on score()', () => {
     expect(r.attributes['gen_ai.request.model']).toBe('us.anthropic.claude-sonnet');
     expect(r.attributes['gen_ai.prompt.name']).toBe('helpfulness_judge');
     expect(r.attributes['gen_ai.prompt.version']).toBe('2');
-    // opt-in only
+    // The judge's system prompt is never on a result event.
     expect(r.attributes['gen_ai.system_instructions']).toBeUndefined();
     expect(r.attributes['opensearch.gen_ai.evaluation.system_instructions_truncated']).toBeUndefined();
   });
 
-  it('records system instructions only when passed, without the flag when short', () => {
-    score({ name: 'x', value: 1, judgeSystemInstructions: 'You are a strict grader.' });
+  it('ignores a judgeSystemInstructions option: the prompt is not on results', () => {
+    // Not part of ScoreOptions; a JS caller passing it gets nothing recorded.
+    score({ name: 'x', value: 1, judgeSystemInstructions: 'You are a strict grader.' } as never);
     const [r] = getFinishedLogRecords();
-    expect(r.attributes['gen_ai.system_instructions']).toBe('You are a strict grader.');
+    expect(r.attributes['gen_ai.system_instructions']).toBeUndefined();
     expect(r.attributes['opensearch.gen_ai.evaluation.system_instructions_truncated']).toBeUndefined();
   });
 
-  it('truncates system instructions at 8192 characters and sets the flag', () => {
-    score({ name: 'x', value: 1, judgeSystemInstructions: 'a'.repeat(9000) });
+  it('keeps the full prompt on the judge span and name@version on the result', () => {
+    const judgeTraceId = withObserve('answer_quality_judge', { op: 'chat' }, (span) => {
+      enrich({ model: 'judge-model', systemInstructions: 'You are a strict grader.' });
+      return span.spanContext().traceId;
+    });
+    score({
+      name: 'answer_quality',
+      value: 4,
+      traceId: TRACE_ID,
+      judgeTraceId,
+      judgePromptName: 'strict-grader',
+      judgePromptVersion: 'v3',
+    });
     const [r] = getFinishedLogRecords();
-    expect((r.attributes['gen_ai.system_instructions'] as string).length).toBe(8192);
-    expect(r.attributes['opensearch.gen_ai.evaluation.system_instructions_truncated']).toBe(true);
-  });
-
-  it('keeps exactly 8192 characters without the flag', () => {
-    score({ name: 'x', value: 1, judgeSystemInstructions: 'a'.repeat(8192) });
-    const [r] = getFinishedLogRecords();
-    expect((r.attributes['gen_ai.system_instructions'] as string).length).toBe(8192);
-    expect(r.attributes['opensearch.gen_ai.evaluation.system_instructions_truncated']).toBeUndefined();
-  });
-
-  it('serializes non-string system instructions as JSON', () => {
-    const parts = [{ type: 'text', content: 'Grade strictly.' }];
-    score({ name: 'x', value: 1, judgeSystemInstructions: parts });
-    const [r] = getFinishedLogRecords();
-    expect(r.attributes['gen_ai.system_instructions']).toBe(JSON.stringify(parts));
+    expect(r.attributes['gen_ai.prompt.name']).toBe('strict-grader');
+    expect(r.attributes['gen_ai.prompt.version']).toBe('v3');
+    expect(r.attributes['opensearch.gen_ai.evaluation.judge.trace_id']).toBe(judgeTraceId);
+    expect(r.attributes['gen_ai.system_instructions']).toBeUndefined();
+    const judgeSpan = getFinishedSpans().find((sp) => sp.name.includes('answer_quality_judge'));
+    expect(judgeSpan?.attributes['gen_ai.system_instructions']).toBe('You are a strict grader.');
   });
 
   it('drops the judge keys from extra attributes', () => {
@@ -186,7 +190,6 @@ describe('judge / evaluator context on defineScorer()', () => {
       judgeModel: 'judge-model',
       judgePromptName: 'helpfulness',
       judgePromptVersion: '3',
-      judgeSystemInstructions: 'b'.repeat(8200),
     },
     function helpfulness() { return 5; },
   );
@@ -202,8 +205,8 @@ describe('judge / evaluator context on defineScorer()', () => {
       expect(r.attributes['gen_ai.request.model']).toBe('judge-model');
       expect(r.attributes['gen_ai.prompt.name']).toBe('helpfulness');
       expect(r.attributes['gen_ai.prompt.version']).toBe('3');
-      expect((r.attributes['gen_ai.system_instructions'] as string).length).toBe(8192);
-      expect(r.attributes['opensearch.gen_ai.evaluation.system_instructions_truncated']).toBe(true);
+      expect(r.attributes['gen_ai.system_instructions']).toBeUndefined();
+      expect(r.attributes['opensearch.gen_ai.evaluation.system_instructions_truncated']).toBeUndefined();
     }
   });
 
