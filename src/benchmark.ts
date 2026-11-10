@@ -639,6 +639,17 @@ export class Benchmark {
     caseName?: string;
     traceId?: string;
     spanId?: string;
+    /**
+     * Default `opensearch.gen_ai.evaluation.evaluator.name` for every score of
+     * this call, for example `"deepeval"`. An `EvalScore` that sets its own
+     * `evaluator` wins.
+     */
+    evaluator?: string;
+    /**
+     * Default `opensearch.gen_ai.evaluation.evaluator.type` for every score of
+     * this call. An `EvalScore` that sets its own `evaluatorType` wins.
+     */
+    evaluatorType?: EvaluatorType;
   }): void {
     if (this._closed) {
       throw new Error('Benchmark is already closed');
@@ -682,7 +693,7 @@ export class Benchmark {
         identity,
         { traceId: options.traceId, spanId: options.spanId },
         { ...toAttributes(this._metadata), ...caseMeta },
-        { errorType },
+        { errorType, evaluator: options.evaluator, evaluatorType: options.evaluatorType },
       );
     }
 

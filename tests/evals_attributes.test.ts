@@ -277,4 +277,34 @@ describe('evaluator on EvalScore', () => {
     expect(r.attributes['opensearch.gen_ai.evaluation.evaluator.name']).toBe('actual');
     expect(r.attributes['opensearch.gen_ai.evaluation.evaluator.type']).toBe('code');
   });
+
+  it('Benchmark.log() evaluator defaults apply to every score; an EvalScore wins', () => {
+    const bm = new Benchmark('suite');
+    bm.log({
+      scores: [
+        { name: 'a', value: 1 },
+        { name: 'b', value: 1, evaluator: 'own', evaluatorType: 'code' },
+      ],
+      evaluator: 'ragas',
+      evaluatorType: 'llm_judge',
+    });
+    bm.log({ input: 'q2', scores: { c: 0.5 }, evaluator: 'ragas' });
+    bm.close();
+    const [a, own, c] = getFinishedLogRecords();
+    expect(a.attributes['opensearch.gen_ai.evaluation.evaluator.name']).toBe('ragas');
+    expect(a.attributes['opensearch.gen_ai.evaluation.evaluator.type']).toBe('llm_judge');
+    expect(own.attributes['opensearch.gen_ai.evaluation.evaluator.name']).toBe('own');
+    expect(own.attributes['opensearch.gen_ai.evaluation.evaluator.type']).toBe('code');
+    expect(c.attributes['opensearch.gen_ai.evaluation.evaluator.name']).toBe('ragas');
+    expect(c.attributes['opensearch.gen_ai.evaluation.evaluator.type']).toBeUndefined();
+  });
+
+  it('Benchmark.log() error results keep the evaluator', () => {
+    const bm = new Benchmark('suite');
+    bm.log({ scores: [{ name: 'a', evaluator: 'judge_x' }], errorType: 'TimeoutError' });
+    bm.close();
+    const [r] = getFinishedLogRecords();
+    expect(r.attributes['error.type']).toBe('TimeoutError');
+    expect(r.attributes['opensearch.gen_ai.evaluation.evaluator.name']).toBe('judge_x');
+  });
 });

@@ -103,7 +103,7 @@ Attributes (each is set only when it has a value):
 npm install @opensearch-project/genai-observability-sdk-ts
 ```
 
-This guide needs a release newer than 0.1.1. Version 0.1.1 and earlier (the latest on npm) record scores as span events instead of `gen_ai.evaluation.result` log events, and have no `logsEndpoint`, `tracesEndpoint` or `sigv4` options. Until the next release ships, build the package from source.
+This guide needs a release that includes PR #100 (opensearch-project/genai-observability-sdk-ts#100). Earlier releases record scores as span events instead of `gen_ai.evaluation.result` log events, and have no `logsEndpoint`, `tracesEndpoint` or `sigv4` options. Until the next release ships, build the package from source.
 
 Call `register()` once at startup. It sets up the OTLP traces pipeline and the OTLP logs pipeline that carries the evaluation events. `agentName` and `agentVersion` become `gen_ai.agent.name` and `gen_ai.agent.version` on every result, unless a call names another agent or the evaluated span names its own.
 
@@ -134,7 +134,7 @@ Pick the setup that matches your ingestion (see [Ingestion](#ingestion) for the 
 (a) Local OTel Collector or the observability stack: nothing to set, or `endpoint: "http://localhost:4318"`.
 
 ```typescript
-await register({ serviceName: "travel-agent" });
+await register({ serviceName: "travel-agent", agentName: "travel_planner" });
 ```
 
 (b) One OSIS or Data Prepper `otlp` source serving `/<pipeline>/v1/traces` and `/<pipeline>/v1/logs`: pass the base, path prefix included. For OSIS, sign with SigV4 service `osis`:
@@ -403,7 +403,37 @@ b.log({ input: "Capital of Peru?", expected: { city: "Lima" }, scores: { exact_m
 const summary = b.close();
 ```
 
-`scores` is `{ name: value }` or an `EvalScore[]`. `Benchmark` creates no spans.
+`scores` is `{ name: value }` or an `EvalScore[]`. `Benchmark` creates no spans, and it stamps the `test.*` and `cicd.pipeline.*` ids only on the results, not on the agent's spans (only `evaluate()` stamps the spans it starts).
+
+Name the evaluator of each score with `evaluator` / `evaluatorType` on the `EvalScore` (`opensearch.gen_ai.evaluation.evaluator.name` / `.type`, the same keys `evaluate()` and `defineScorer()` write), or pass `evaluator` / `evaluatorType` to `Benchmark.log()` as the default for every score of that call; an `EvalScore` that sets its own wins. Without either, the result has no evaluator name, as before.
+
+```typescript
+b.log({
+  input: question,
+  output: answer,
+  scores: [{ name: "answer_relevancy", value: 0.9, threshold: 0.7 }],
+  evaluator: "deepeval.answer_relevancy",
+  evaluatorType: "llm_judge",
+  traceId, // from ask() below
+  spanId,
+});
+```
+
+To link each result to its agent run, run the agent inside `withObserve()` with `Op.INVOKE_AGENT` and return the span ids with the answer. Without `traceId` and `spanId` the results are not linked to a trace, so the run page has no trace link and the result shows no agent input or output.
+
+```typescript
+import { Op, withObserve } from "@opensearch-project/genai-observability-sdk-ts";
+
+async function ask(question: string) {
+  return withObserve("my_agent", { op: Op.INVOKE_AGENT }, async (span) => {
+    const answer = await myAgent(question); // your agent call
+    const { traceId, spanId } = span.spanContext();
+    return { answer, traceId, spanId };
+  });
+}
+
+const { answer, traceId, spanId } = await ask("Capital of France?");
+```
 
 ### Expected output
 
@@ -442,7 +472,7 @@ const b = new Benchmark("observability-assistant", {
 
 ### CI pipeline attributes
 
-Inside CI, results and agent root spans also get `cicd.pipeline.name`, `cicd.pipeline.run.id` and `cicd.pipeline.run.url.full`. Outside CI nothing is added.
+Inside CI, every result gets `cicd.pipeline.name`, `cicd.pipeline.run.id` and `cicd.pipeline.run.url.full`, and `evaluate()` also stamps them on the agent root spans it starts (`Benchmark` only on results). Outside CI nothing is added.
 
 | CI system | Detected by | `cicd.pipeline.name` | `cicd.pipeline.run.id` | `cicd.pipeline.run.url.full` |
 |---|---|---|---|---|

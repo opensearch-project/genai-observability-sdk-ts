@@ -71,7 +71,7 @@ npm install @opensearch-project/genai-observability-sdk-ts @opentelemetry/api @o
 npm install @opensearch-project/opensearch
 ```
 
-This guide needs a release newer than 0.1.1; until it ships, build the package from source (see [Setup](agent-evaluations.md#setup)).
+This guide needs a release that includes PR #100 (opensearch-project/genai-observability-sdk-ts#100); until it ships, build the package from source (see [Setup](agent-evaluations.md#setup)).
 
 ## 3. Instrument the agent
 
