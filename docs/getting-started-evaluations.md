@@ -237,7 +237,9 @@ const retriever = new OpenSearchTraceRetriever({
 const since = new Date(Date.now() - 60 * 60 * 1000); // time window
 const roots = (await retriever.listRootSpans({ services: ["observability-assistant"], since, maxResults: 50 }))
   .filter((r) => r.agentName === AGENT_NAME);
-const done = await retriever.findEvaluatedTraceIds(roots.map((r) => r.traceId));
+const done = await retriever.findEvaluatedTraceIds(roots.map((r) => r.traceId), {
+  evaluator: "answer_quality_judge", // this job's own results
+});
 
 for (const root of roots) {
   if (done.has(root.traceId) || Math.random() > 0.5) continue; // skip evaluated; 50% sampling rate
@@ -259,8 +261,8 @@ for (const root of roots) {
     judgeModel: "us.anthropic.claude-haiku-4-5-20251001-v1:0",
     judgePromptName: "answer-quality",
     judgePromptVersion: "v1",
-    agentName: AGENT_NAME,
-    agentVersion: String((root.raw.attributes as Record<string, unknown>)?.["gen_ai.agent.version"] ?? ""),
+    agentName: root.agentName,
+    agentVersion: root.agentVersion || undefined,
   });
 }
 await provider.forceFlush();
@@ -268,7 +270,8 @@ await provider.forceFlush();
 
 - Run it on a schedule (cron, a loop with a sleep, a Lambda). The example's `onlineEval.ts --interval 300` loops.
 - Pair the LLM judge with a cheap deterministic check (for example "the answer names a service that exists"): it costs nothing and catches regressions the judge misses.
-- `findEvaluatedTraceIds()` makes the job safe to re-run: a trace that already has a result is skipped. Results count as done once indexed (the pipeline flush interval), so do not run two passes at once.
+- `listRootSpans()` returns each trace's agent root, the same span Agent Traces lists: the trace root when it is a GenAI span, or the marked agent span below an HTTP handler. Its `agentName` and `agentVersion` come from the span; pass both to `score()`, or the results are grouped under "(no version)" on the agent page.
+- `findEvaluatedTraceIds(traceIds, { evaluator })` makes the job safe to re-run: a trace that already has a result from this evaluator is skipped. Without `evaluator` (or `evaluationName`), a result from any evaluator counts, so a new judge would skip traces another evaluator already scored. Results count as done once indexed (the pipeline flush interval), so do not run two passes at once.
 - Run the judge outside the agent's span. If the judge is itself traced, pass `judgeTraceId` so the result links to the judge's run.
 
 ## 8. Ship and monitor
@@ -533,14 +536,14 @@ Add an online evaluator for this TypeScript agent with the OpenSearch GenAI obse
 - Use OpenSearchTraceRetriever (host, auth, verifyCerts from env) to list root spans of the
   agent's service from the last N minutes (listRootSpans({ services, since, maxResults })),
   keep the ones whose agentName is our agent, and skip the trace ids
-  findEvaluatedTraceIds() returns.
+  findEvaluatedTraceIds(traceIds, { evaluator: <this judge's evaluator name> }) returns.
 - Sample with a configurable rate (--sample-rate, default 0.5) and window (--minutes,
   default 60).
 - Read the question and answer from the root span's inputMessages / outputMessages.
 - Score each trace with an LLM judge (1 to 5, threshold 4) and one cheap deterministic check,
   and post each with score({ traceId, spanId, name, value, evaluator, evaluatorType,
-  evaluatorDescription, judgeModel, judgePromptName, judgePromptVersion, agentName,
-  agentVersion }).
+  evaluatorDescription, judgeModel, judgePromptName, judgePromptVersion,
+  agentName: root.agentName, agentVersion: root.agentVersion }).
 - Support one pass (default) or a loop with --interval <seconds>. Flush after each pass.
 - Never re-score a trace that already has a result.
 ```

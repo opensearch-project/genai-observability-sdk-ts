@@ -645,7 +645,7 @@ const retriever = new OpenSearchTraceRetriever({
   verifyCerts: false,
 });
 
-// Retrieve all spans for a session or trace
+// Retrieve all spans of a conversation's traces (or of one trace, by trace ID)
 const session = await retriever.getTraces("my-conversation-id");
 for (const trace of session.traces) {
   for (const span of trace.spans) {
@@ -653,17 +653,24 @@ for (const trace of session.traces) {
   }
 }
 
-// List recent root spans
+// List the agent roots of recent traces (for discovering traces to evaluate)
 const roots = await retriever.listRootSpans({
   services: ["my-agent"],
   maxResults: 10,
 });
+for (const root of roots) console.log(root.traceId, root.agentName, root.agentVersion);
 
 // Check which traces already have evaluation results
 const evaluated = await retriever.findEvaluatedTraceIds(["trace-id-1", "trace-id-2"]);
+// ... only results of one evaluator (and/or one evaluation name)
+const mine = await retriever.findEvaluatedTraceIds(["trace-id-1"], { evaluator: "answer_quality_judge" });
 ```
 
-`findEvaluatedTraceIds()` returns the trace ids that already have a `gen_ai.evaluation.result` event in the evaluation index. A missing evaluation index (nothing sent yet) returns an empty set; any other error (auth, connection, mapping) is thrown, so a failed lookup never looks like "nothing evaluated" and never makes you re-run judges and write duplicate results.
+- `getTraces(identifier, maxSpans = 1000, { maxTraces = 1000 })`: by conversation ID, every span of each trace in the conversation (the traces whose spans carry `gen_ai.conversation.id`, earliest first); otherwise by trace ID, every span of that trace. `truncated` is `true` when a limit was reached.
+- `listRootSpans({ services, since, maxResults })`: the agent roots of recent traces, newest first, by the Agent Traces rule: a trace root that is a GenAI span, or the span marked `derived.gen_ai.is_root` (for example the agent span below an HTTP server span). Indices where the marker is not mapped yet are fine.
+- Each `SpanRecord` carries `agentName` and `agentVersion` (`gen_ai.agent.name`, `gen_ai.agent.version`). Pass both to `score()` when you post a result for a retrieved trace, or the result is grouped under "(no version)" on the agent page.
+
+`findEvaluatedTraceIds()` returns the trace ids that already have a `gen_ai.evaluation.result` event in the evaluation index. Without a filter, a result from any evaluator counts; `{ evaluator }` / `{ evaluationName }` count only that evaluator's (`opensearch.gen_ai.evaluation.evaluator.name`) or that evaluation's (`gen_ai.evaluation.name`) results. A missing evaluation index (nothing sent yet) returns an empty set; any other error (auth, connection, mapping) is thrown, so a failed lookup never looks like "nothing evaluated" and never makes you re-run judges and write duplicate results.
 
 **Constructor:**
 
