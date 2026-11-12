@@ -28,6 +28,22 @@ export const EVALUATION_RESULT_EVENT = "gen_ai.evaluation.result";
  */
 export const JUDGE_LABEL_KEY = "opensearch.gen_ai.evaluation.judge_label";
 
+/** What the evaluator checks (its criteria or rubric summary). */
+export const EVALUATOR_DESCRIPTION_KEY = "opensearch.gen_ai.evaluation.evaluator.description";
+/** Model used by the LLM judge (standard GenAI semconv name). */
+export const JUDGE_MODEL_KEY = "gen_ai.request.model";
+/** Name of the judge prompt template (standard GenAI semconv name). */
+export const JUDGE_PROMPT_NAME_KEY = "gen_ai.prompt.name";
+/** Version of the judge prompt (standard GenAI semconv name). */
+export const JUDGE_PROMPT_VERSION_KEY = "gen_ai.prompt.version";
+/**
+ * The judge's full system prompt. Never set on a result event: it belongs on
+ * the judge's own LLM span (its OTel location), recorded by the judge's
+ * instrumentation or `enrich({ systemInstructions })`. Reserved here so
+ * `attributes` cannot add it to a result either.
+ */
+const JUDGE_SYSTEM_INSTRUCTIONS_KEY = "gen_ai.system_instructions";
+
 /** Exact attribute keys score() owns; `attributes` cannot set them. */
 const SDK_OWNED_KEYS: ReadonlySet<string> = new Set([
   "error.type",
@@ -35,6 +51,10 @@ const SDK_OWNED_KEYS: ReadonlySet<string> = new Set([
   "gen_ai.conversation.id",
   AGENT_NAME_KEY,
   AGENT_VERSION_KEY,
+  JUDGE_MODEL_KEY,
+  JUDGE_PROMPT_NAME_KEY,
+  JUDGE_PROMPT_VERSION_KEY,
+  JUDGE_SYSTEM_INSTRUCTIONS_KEY,
 ]);
 /** Attribute namespaces score() owns: `gen_ai.evaluation.*` and `opensearch.gen_ai.evaluation.*`. */
 const SDK_OWNED_PREFIXES = ["gen_ai.evaluation.", "opensearch.gen_ai.evaluation."];
@@ -87,6 +107,22 @@ export interface ScoreOptions {
   evaluatorVersion?: string;
   /** `opensearch.gen_ai.evaluation.evaluator.type`. */
   evaluatorType?: EvaluatorType;
+  /**
+   * `opensearch.gen_ai.evaluation.evaluator.description`: what the evaluator
+   * checks (its criteria or rubric summary).
+   */
+  evaluatorDescription?: string;
+  /** `gen_ai.request.model`: the model used by the LLM judge. */
+  judgeModel?: string;
+  /** `gen_ai.prompt.name`: the name of the judge prompt template. */
+  judgePromptName?: string;
+  /**
+   * `gen_ai.prompt.version`: the version of the judge prompt. With
+   * `judgePromptName` it identifies the prompt (`name@version`). The full
+   * prompt text is not put on the result: it goes on the judge's own LLM span
+   * as `gen_ai.system_instructions`.
+   */
+  judgePromptVersion?: string;
   /** `opensearch.gen_ai.evaluation.score.direction`. */
   direction?: ScoreDirection;
   /** `opensearch.gen_ai.evaluation.score.min`. */
@@ -116,7 +152,8 @@ export interface ScoreOptions {
    * Extra attributes (string, number, boolean), for example `test.*` grouping
    * keys. Keys the SDK sets itself (`gen_ai.evaluation.*`,
    * `opensearch.gen_ai.evaluation.*`, `error.type`, `gen_ai.response.id`,
-   * `gen_ai.conversation.id`, `gen_ai.agent.*`) are dropped with a warning:
+   * `gen_ai.conversation.id`, `gen_ai.agent.*`, `gen_ai.request.model`,
+   * `gen_ai.prompt.name` / `.version`, `gen_ai.system_instructions`) are dropped with a warning:
    * use the options instead.
    */
   attributes?: Record<string, unknown>;
@@ -270,6 +307,28 @@ function buildAttributes(options: ScoreOptions, target: Target, verdict?: Verdic
     ),
   );
   if (options.judgeTraceId) attrs["opensearch.gen_ai.evaluation.judge.trace_id"] = options.judgeTraceId;
+  Object.assign(attrs, judgeAttributes(options));
+  return attrs;
+}
+
+/** Judge / evaluator context fields of a score, as event attributes (only those set). */
+export interface JudgeContext {
+  evaluatorDescription?: string;
+  judgeModel?: string;
+  judgePromptName?: string;
+  judgePromptVersion?: string;
+}
+
+/**
+ * @internal The judge / evaluator context attributes: evaluator description,
+ * judge model, prompt name and version. Never the judge's system prompt.
+ */
+export function judgeAttributes(ctx: JudgeContext): Attributes {
+  const attrs: Attributes = {};
+  if (ctx.evaluatorDescription) attrs[EVALUATOR_DESCRIPTION_KEY] = ctx.evaluatorDescription;
+  if (ctx.judgeModel) attrs[JUDGE_MODEL_KEY] = ctx.judgeModel;
+  if (ctx.judgePromptName) attrs[JUDGE_PROMPT_NAME_KEY] = ctx.judgePromptName;
+  if (ctx.judgePromptVersion) attrs[JUDGE_PROMPT_VERSION_KEY] = ctx.judgePromptVersion;
   return attrs;
 }
 

@@ -12,6 +12,8 @@ export const RESERVED_KEYS: ReadonlySet<string> = new Set([
   "test.case.expected",
   "opensearch.test.case.expected",
   "opensearch.test.case.expected_truncated",
+  "opensearch.test.suite.run.name",
+  "opensearch.test.suite.run.description",
   "error.type",
   "gen_ai.operation.name",
   "cicd.pipeline.name",
@@ -19,12 +21,38 @@ export const RESERVED_KEYS: ReadonlySet<string> = new Set([
   "cicd.pipeline.run.url.full",
 ]);
 
+/** Human-readable name of an offline run. */
+export const TEST_SUITE_RUN_NAME_KEY = "opensearch.test.suite.run.name";
+/** Free-text description of an offline run (truncated to 1024 characters). */
+export const TEST_SUITE_RUN_DESCRIPTION_KEY = "opensearch.test.suite.run.description";
+/** Maximum length of `opensearch.test.suite.run.description`, in characters. */
+export const RUN_DESCRIPTION_LIMIT = 1024;
+
+/**
+ * @internal `opensearch.test.suite.run.name` / `.description` of a run (only
+ * those given; the description is truncated to 1024 characters). Throws when
+ * either is not a string.
+ */
+export function runAttributes(runName?: string, runDescription?: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [key, value] of [["runName", runName], ["runDescription", runDescription]] as const) {
+    if (value !== undefined && typeof value !== "string") {
+      throw new Error(`${key} must be a string; got ${typeof value}`);
+    }
+  }
+  if (runName && runName.trim() !== "") out[TEST_SUITE_RUN_NAME_KEY] = runName;
+  if (runDescription && runDescription.trim() !== "") {
+    out[TEST_SUITE_RUN_DESCRIPTION_KEY] = Array.from(runDescription).slice(0, RUN_DESCRIPTION_LIMIT).join("");
+  }
+  return out;
+}
+
 /** Expected output of an offline test case, on each of its evaluation results. */
 export const TEST_CASE_EXPECTED_KEY = "opensearch.test.case.expected";
 /** `true` when `opensearch.test.case.expected` was truncated. */
 export const TEST_CASE_EXPECTED_TRUNCATED_KEY = "opensearch.test.case.expected_truncated";
 /** Maximum length of `opensearch.test.case.expected`, in characters. */
-export const EXPECTED_LIMIT = 4096;
+export const EXPECTED_LIMIT = 32768;
 
 /**
  * @internal `opensearch.test.case.expected` (and `_truncated` when cut) for a

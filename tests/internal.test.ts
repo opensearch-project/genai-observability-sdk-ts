@@ -99,8 +99,8 @@ describe('validateMetadataKeys', () => {
 
 describe('expectedAttributes', () => {
   it('counts characters, not UTF-16 units, when truncating', () => {
-    const out = expectedAttributes('😀'.repeat(4097));
-    expect(Array.from(out['opensearch.test.case.expected'] as string)).toHaveLength(4096);
+    const out = expectedAttributes('😀'.repeat(32769));
+    expect(Array.from(out['opensearch.test.case.expected'] as string)).toHaveLength(32768);
     expect(out['opensearch.test.case.expected_truncated']).toBe(true);
   });
 

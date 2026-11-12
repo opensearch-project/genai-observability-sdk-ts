@@ -1,7 +1,46 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright OpenSearch Contributors
 
+import { AGENT_ROOT_ATTRIBUTE } from './enrich.js';
 import { EVALUATION_RESULT_EVENT } from './score.js';
+
+/**
+ * Agent Traces lists a trace by its AI root: a trace root that is a GenAI span (has
+ * `gen_ai.operation.name`), or a span marked `derived.gen_ai.is_root` (by Data Prepper, an SDK
+ * or the user), for example the agent span below an HTTP server span.
+ */
+const AI_ROOT_FIELD = `attributes.${AGENT_ROOT_ATTRIBUTE}`;
+const OPERATION_FIELD = 'attributes.gen_ai.operation.name';
+const CONVERSATION_FIELD = 'attributes.gen_ai.conversation.id';
+const EVALUATOR_NAME_FIELD = 'attributes.opensearch.gen_ai.evaluation.evaluator.name';
+const EVALUATION_NAME_FIELD = 'attributes.gen_ai.evaluation.name';
+
+/** Upper bound on the traces `getTraces()` collects for one conversation. */
+export const DEFAULT_MAX_CONVERSATION_TRACES = 1000;
+
+type SearchFn = (opts: Record<string, unknown>) => Promise<Record<string, unknown>>;
+
+function responseBody(response: Record<string, unknown>): Record<string, unknown> {
+  return (response['body'] as Record<string, unknown>) ?? response;
+}
+
+function sourcesOf(response: Record<string, unknown>): Record<string, unknown>[] {
+  const hits = responseBody(response)['hits'] as Record<string, unknown> | undefined;
+  const hitList = (hits?.['hits'] as Record<string, unknown>[]) ?? [];
+  return hitList.map((hit) => (hit['_source'] as Record<string, unknown>) ?? hit);
+}
+
+/**
+ * Drops marked spans whose trace is also listed through its GenAI root. Only spans without a
+ * parent pass the GenAI-root condition, so a trace with such a hit keeps that one; marked spans
+ * deeper in the same trace (an SDK marking a nested span) are dropped, as in Agent Traces.
+ */
+export function dropShadowedAiRoots(
+  docs: Record<string, unknown>[],
+): Record<string, unknown>[] {
+  const rootTraceIds = new Set(docs.filter((d) => !d['parentSpanId']).map((d) => d['traceId']));
+  return docs.filter((d) => !d['parentSpanId'] || !rootTraceIds.has(d['traceId']));
+}
 
 export interface Message {
   role: string;
@@ -17,6 +56,8 @@ export interface SpanRecord {
   endTime: string;
   operationName: string;
   agentName: string;
+  /** `gen_ai.agent.version`; empty when the span has none. */
+  agentVersion: string;
   model: string;
   inputMessages: Message[];
   outputMessages: Message[];
@@ -144,6 +185,7 @@ export function mapSpanDoc(doc: Record<string, unknown>): SpanRecord {
     endTime: String(doc['endTime'] ?? doc['end_time'] ?? ''),
     operationName: String(attrs['gen_ai.operation.name'] ?? ''),
     agentName: String(attrs['gen_ai.agent.name'] ?? ''),
+    agentVersion: String(attrs['gen_ai.agent.version'] ?? ''),
     model: String(
       attrs['gen_ai.response.model'] ??
         attrs['gen_ai.request.model'] ??
@@ -225,67 +267,75 @@ export class OpenSearchTraceRetriever {
     return new Client(clientOpts);
   }
 
+  private async _search(): Promise<{ client: Record<string, unknown>; search: SearchFn }> {
+    const client = (await this._clientPromise) as Record<string, unknown>;
+    return { client, search: client['search'] as SearchFn };
+  }
+
+  /**
+   * All spans of a conversation's traces, or of one trace, grouped by trace.
+   *
+   * Looks up the traces whose spans carry `gen_ai.conversation.id` = `identifier` (earliest
+   * first, at most `maxTraces`), then fetches every span of those traces, so each `TraceRecord`
+   * holds the whole trace (model calls, tools and the agent span) exactly as
+   * `getTraces(traceId)` does. If no span has that conversation id, `identifier` is treated as a
+   * `traceId`. `truncated` is `true` when `maxSpans` or `maxTraces` was reached.
+   */
   async getTraces(
     identifier: string,
     maxSpans?: number,
+    options?: { maxTraces?: number },
   ): Promise<SessionRecord> {
-    const client = (await this._clientPromise) as Record<string, unknown>;
-    const search = client['search'] as (
-      opts: Record<string, unknown>,
-    ) => Promise<Record<string, unknown>>;
+    const { client, search } = await this._search();
     const size = maxSpans ?? 1000;
+    const maxTraces = options?.maxTraces ?? DEFAULT_MAX_CONVERSATION_TRACES;
 
-    // Try conversation_id first
-    let response = await search.call(client, {
+    const lookup = await search.call(client, {
       index: this._index,
       body: {
+        size: 0,
         query: {
           bool: {
             should: [
-              {
-                term: {
-                  'attributes.conversation_id': identifier,
-                },
-              },
-              {
-                term: {
-                  'attributes.gen_ai.conversation_id': identifier,
-                },
-              },
+              { term: { [CONVERSATION_FIELD]: identifier } },
+              // Attribute names written by older SDK versions.
+              { term: { 'attributes.conversation_id': identifier } },
+              { term: { 'attributes.gen_ai.conversation_id': identifier } },
             ],
             minimum_should_match: 1,
           },
         },
+        aggs: {
+          by_trace: {
+            terms: { field: 'traceId', size: maxTraces, order: { first_start: 'asc' } },
+            aggs: { first_start: { min: { field: 'startTime' } } },
+          },
+        },
+      },
+    });
+    const aggs = responseBody(lookup)['aggregations'] as Record<string, unknown> | undefined;
+    const byTrace = aggs?.['by_trace'] as Record<string, unknown> | undefined;
+    const traceIds = ((byTrace?.['buckets'] as Record<string, unknown>[]) ?? []).map((b) =>
+      String(b['key']),
+    );
+    const moreTraces = Number(byTrace?.['sum_other_doc_count'] ?? 0) > 0;
+
+    const response = await search.call(client, {
+      index: this._index,
+      body: {
+        query: traceIds.length > 0
+          ? { terms: { traceId: traceIds } }
+          : { term: { traceId: identifier } },
         size,
         sort: [{ startTime: { order: 'asc' } }],
       },
     });
+    const docs = sourcesOf(response);
 
-    let body = (response['body'] as Record<string, unknown>) ?? response;
-    let hits = body['hits'] as Record<string, unknown> | undefined;
-    let hitList = (hits?.['hits'] as Record<string, unknown>[]) ?? [];
-
-    // Fall back to traceId
-    if (hitList.length === 0) {
-      response = await search.call(client, {
-        index: this._index,
-        body: {
-          query: { term: { traceId: identifier } },
-          size,
-          sort: [{ startTime: { order: 'asc' } }],
-        },
-      });
-      body = (response['body'] as Record<string, unknown>) ?? response;
-      hits = body['hits'] as Record<string, unknown> | undefined;
-      hitList = (hits?.['hits'] as Record<string, unknown>[]) ?? [];
-    }
-
-    // Group spans by traceId
+    // Group spans by traceId, traces in order of their first span.
     const traceMap = new Map<string, SpanRecord[]>();
-    for (const hit of hitList) {
-      const source =
-        (hit['_source'] as Record<string, unknown>) ?? hit;
-      const span = mapSpanDoc(source);
+    for (const doc of docs) {
+      const span = mapSpanDoc(doc);
       const existing = traceMap.get(span.traceId);
       if (existing) {
         existing.push(span);
@@ -293,42 +343,64 @@ export class OpenSearchTraceRetriever {
         traceMap.set(span.traceId, [span]);
       }
     }
-
     const traces: TraceRecord[] = [];
     for (const [traceId, spans] of traceMap) {
       traces.push({ traceId, spans });
     }
 
+    const hits = responseBody(response)['hits'] as Record<string, unknown> | undefined;
     const totalHits =
       typeof hits?.['total'] === 'object'
-        ? ((hits['total'] as Record<string, unknown>)['value'] as number)
-        : (hits?.['total'] as number) ?? 0;
+        ? Number((hits['total'] as Record<string, unknown>)['value'] ?? 0)
+        : Number(hits?.['total'] ?? 0);
 
     return {
       sessionId: identifier,
       traces,
-      truncated: totalHits > size,
+      truncated: docs.length > 0 && (moreTraces || totalHits > size || docs.length >= size),
     };
   }
 
+  /**
+   * The AI roots of recent traces, newest first: the same rule as Agent Traces. A span is an AI
+   * root when it is a trace root that is a GenAI span (no parent, has `gen_ai.operation.name`)
+   * or it is marked `derived.gen_ai.is_root`. For an agent behind an HTTP handler this returns
+   * the marked agent span (with its messages and agent name), not the HTTP server span. A marked
+   * span in a trace that also has a GenAI root is left out, so a trace is listed once, unless
+   * several agents in it are marked (one record each). Indices where the marker is not mapped
+   * yet are fine: the marker condition matches nothing there.
+   */
   async listRootSpans(options?: {
+    /** Only spans of these services (the span index's `serviceName`). */
     services?: string[];
     since?: Date;
     maxResults?: number;
   }): Promise<SpanRecord[]> {
-    const client = (await this._clientPromise) as Record<string, unknown>;
-    const search = client['search'] as (
-      opts: Record<string, unknown>,
-    ) => Promise<Record<string, unknown>>;
-    const size = options?.maxResults ?? 50;
+    const { client, search } = await this._search();
+    const maxResults = options?.maxResults ?? 50;
 
     const filters: Record<string, unknown>[] = [
-      { term: { parentSpanId: '' } },
+      {
+        bool: {
+          should: [
+            {
+              bool: {
+                filter: [
+                  { term: { parentSpanId: '' } },
+                  { exists: { field: OPERATION_FIELD } },
+                ],
+              },
+            },
+            { term: { [AI_ROOT_FIELD]: true } },
+          ],
+          minimum_should_match: 1,
+        },
+      },
     ];
 
     if (options?.services && options.services.length > 0) {
       filters.push({
-        terms: { 'resource.service.name': options.services },
+        terms: { serviceName: options.services },
       });
     }
 
@@ -342,21 +414,14 @@ export class OpenSearchTraceRetriever {
       index: this._index,
       body: {
         query: { bool: { filter: filters } },
-        size,
+        // A shadowed marked span takes a slot in the page; fetch extra so dropping it still
+        // leaves maxResults roots when there are more.
+        size: Math.min(maxResults * 2, 10000),
         sort: [{ startTime: { order: 'desc' } }],
       },
     });
 
-    const body =
-      (response['body'] as Record<string, unknown>) ?? response;
-    const hits = body['hits'] as Record<string, unknown> | undefined;
-    const hitList = (hits?.['hits'] as Record<string, unknown>[]) ?? [];
-
-    return hitList.map((hit) => {
-      const source =
-        (hit['_source'] as Record<string, unknown>) ?? hit;
-      return mapSpanDoc(source);
-    });
+    return dropShadowedAiRoots(sourcesOf(response)).slice(0, maxResults).map(mapSpanDoc);
   }
 
   /**
@@ -365,14 +430,33 @@ export class OpenSearchTraceRetriever {
    * index. A missing evaluation index means none are evaluated; any other
    * error (auth, connection, mapping) is thrown, so callers do not re-run
    * judges and write duplicate results.
+   *
+   * Without a filter, a result from any evaluator counts. Pass `evaluator`
+   * and/or `evaluationName` so a job skips only the traces it scored itself.
    */
-  async findEvaluatedTraceIds(traceIds: string[]): Promise<Set<string>> {
+  async findEvaluatedTraceIds(
+    traceIds: string[],
+    options?: {
+      /**
+       * Only count results of this evaluator (`opensearch.gen_ai.evaluation.evaluator.name`,
+       * the `evaluator` of `score()`).
+       */
+      evaluator?: string;
+      /** Only count results with this name (`gen_ai.evaluation.name`, the `score()` name). */
+      evaluationName?: string;
+    },
+  ): Promise<Set<string>> {
     if (traceIds.length === 0) return new Set();
 
-    const client = (await this._clientPromise) as Record<string, unknown>;
-    const search = client['search'] as (
-      opts: Record<string, unknown>,
-    ) => Promise<Record<string, unknown>>;
+    const { client, search } = await this._search();
+    const filter: Record<string, unknown>[] = [
+      { term: { eventName: EVALUATION_RESULT_EVENT } },
+      { terms: { traceId: traceIds } },
+    ];
+    if (options?.evaluator) filter.push({ term: { [EVALUATOR_NAME_FIELD]: options.evaluator } });
+    if (options?.evaluationName) {
+      filter.push({ term: { [EVALUATION_NAME_FIELD]: options.evaluationName } });
+    }
 
     const response = await search.call(client, {
       index: this._evaluationIndex,
@@ -381,22 +465,14 @@ export class OpenSearchTraceRetriever {
       allow_no_indices: true,
       body: {
         size: 0,
-        query: {
-          bool: {
-            filter: [
-              { term: { eventName: EVALUATION_RESULT_EVENT } },
-              { terms: { traceId: traceIds } },
-            ],
-          },
-        },
+        query: { bool: { filter } },
         aggs: {
           by_trace: { terms: { field: 'traceId', size: traceIds.length } },
         },
       },
     });
 
-    const body = (response['body'] as Record<string, unknown>) ?? response;
-    const aggs = body['aggregations'] as Record<string, unknown> | undefined;
+    const aggs = responseBody(response)['aggregations'] as Record<string, unknown> | undefined;
     const byTrace = aggs?.['by_trace'] as Record<string, unknown> | undefined;
     const buckets = (byTrace?.['buckets'] as Record<string, unknown>[]) ?? [];
     const wanted = new Set(traceIds);

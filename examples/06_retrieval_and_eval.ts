@@ -72,14 +72,15 @@ for (const [name, scoreSummary] of Object.entries(result.summary.scores)) {
 //   verifyCerts: false,
 // });
 //
-// // Get traces by session/conversation ID
+// // Get every span of a conversation's traces (or of one trace, by trace ID)
 // const session = await retriever.getTraces('session-123');
 // console.log(`Found ${session.traces.length} traces`);
 // for (const trace of session.traces) {
 //   console.log(`  Trace ${trace.traceId}: ${trace.spans.length} spans`);
 // }
 //
-// // List recent root spans
+// // List the agent roots of recent traces (the span Agent Traces lists: the trace
+// // root when it is a GenAI span, or the marked agent span below an HTTP handler)
 // const rootSpans = await retriever.listRootSpans({
 //   since: new Date(Date.now() - 60 * 60 * 1000), // last hour
 //   maxResults: 10,
@@ -89,7 +90,10 @@ for (const [name, scoreSummary] of Object.entries(result.summary.scores)) {
 // // Skip traces that already have results. This throws on auth or connection
 // // errors (only a missing evaluation index means "none evaluated"), so a
 // // failed lookup never re-runs the judges and writes duplicate results.
-// const evaluated = await retriever.findEvaluatedTraceIds(session.traces.map((t) => t.traceId));
+// // { evaluator } counts only this judge's results.
+// const evaluated = await retriever.findEvaluatedTraceIds(session.traces.map((t) => t.traceId), {
+//   evaluator: 'helpfulness_judge',
+// });
 //
 // // Write scores back: one gen_ai.evaluation.result event per evaluated span,
 // // parented to that span (exported over OTLP logs to otel-v1-genai-evaluation)
@@ -101,6 +105,7 @@ for (const [name, scoreSummary] of Object.entries(result.summary.scores)) {
 //       traceId: span.traceId,
 //       spanId: span.spanId,
 //       agentName: span.agentName,
+//       agentVersion: span.agentVersion || undefined,
 //       evaluator: 'helpfulness_judge',
 //       evaluatorType: 'llm_judge',
 //     });
