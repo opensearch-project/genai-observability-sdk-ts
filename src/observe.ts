@@ -77,20 +77,127 @@ function resolveSpanName(
   return baseName;
 }
 
-function getArgNames(fn: AnyFunction): string[] {
-  const source = fn.toString();
-  const match = source.match(/\(([^)]*)\)/);
-  if (!match) return [];
-  return match[1]
-    .split(",")
-    .map((p) =>
-      p
-        .trim()
-        .replace(/\s*=.*$/, "")    // default values
-        .replace(/\.{3}/, "")      // rest params
-        .replace(/:\s*.*$/, "")    // TS type annotations
-    )
-    .filter(Boolean);
+const IDENTIFIER = /^[A-Za-z_$][\w$]*/;
+
+/** One declared parameter: its name (empty when it has none, e.g. destructuring) and rest flag. */
+interface ParamInfo {
+  name: string;
+  rest: boolean;
+}
+
+/**
+ * The text between the parameter list's parentheses, starting at `open` (a "("), with comments
+ * removed, or undefined when the parentheses are unbalanced. Skips nested brackets, strings and
+ * template literals, so default values like `(a = f(1), b = ")")` are kept whole.
+ */
+function balancedParams(source: string, open: number): string | undefined {
+  let depth = 0;
+  let out = "";
+  for (let i = open; i < source.length; i++) {
+    const c = source[i];
+    if (c === "'" || c === '"' || c === "`") {
+      const start = i;
+      for (i++; i < source.length && source[i] !== c; i++) {
+        if (source[i] === "\\") i++;
+      }
+      out += source.slice(start, i + 1);
+      continue;
+    }
+    if (c === "/" && source[i + 1] === "/") {
+      while (i < source.length && source[i] !== "\n") i++;
+      continue;
+    }
+    if (c === "/" && source[i + 1] === "*") {
+      const end = source.indexOf("*/", i + 2);
+      if (end < 0) return undefined;
+      i = end + 1;
+      continue;
+    }
+    if (c === "(" || c === "[" || c === "{") {
+      depth++;
+    } else if (c === ")" || c === "]" || c === "}") {
+      depth--;
+      if (depth === 0) return c === ")" ? out.slice(1) : undefined;
+    }
+    out += c;
+  }
+  return undefined;
+}
+
+/** Split a parameter list at top-level commas. */
+function splitTopLevel(params: string): string[] {
+  const parts: string[] = [];
+  let depth = 0;
+  let start = 0;
+  for (let i = 0; i < params.length; i++) {
+    const c = params[i];
+    if (c === "'" || c === '"' || c === "`") {
+      for (i++; i < params.length && params[i] !== c; i++) {
+        if (params[i] === "\\") i++;
+      }
+    } else if (c === "(" || c === "[" || c === "{") {
+      depth++;
+    } else if (c === ")" || c === "]" || c === "}") {
+      depth--;
+    } else if (c === "," && depth === 0) {
+      parts.push(params.slice(start, i));
+      start = i + 1;
+    }
+  }
+  parts.push(params.slice(start));
+  return parts.map((p) => p.trim()).filter(Boolean);
+}
+
+/**
+ * The declared parameters of `fn`, read from its source. Handles `function` expressions and
+ * declarations, methods, arrows with and without parentheses (`x => ...`, `async x => ...`, as
+ * tsx/esbuild emit for one-parameter arrows), default values and rest parameters. A
+ * destructured parameter has no name (`name: ""`). Returns undefined when the source cannot be
+ * parsed (for example native or bound functions), so callers fall back to positional names.
+ */
+export function parseParams(fn: AnyFunction): ParamInfo[] | undefined {
+  let source: string;
+  try {
+    source = Function.prototype.toString.call(fn).trim();
+  } catch {
+    return undefined;
+  }
+  if (/\{\s*\[native code\]\s*\}\s*$/.test(source)) return undefined;
+
+  // Arrow function with a single unparenthesized parameter: `x => ...` / `async x => ...`.
+  const bare = source.match(/^(?:async\s+)?([A-Za-z_$][\w$]*)\s*=>/);
+  if (bare) return [{ name: bare[1], rest: false }];
+
+  const open = source.indexOf("(");
+  if (open < 0) return undefined;
+  const params = balancedParams(source, open);
+  if (params === undefined) return undefined;
+  return splitTopLevel(params).map((param) => {
+    const rest = param.startsWith("...");
+    const body = rest ? param.slice(3).trim() : param;
+    const name = body.match(IDENTIFIER)?.[0] ?? "";
+    return { name, rest };
+  });
+}
+
+/**
+ * The input object recorded for a call: declared parameter names as keys, a rest parameter
+ * collects the remaining arguments, and arguments without a usable name (destructured, extra
+ * or unparseable) are keyed by position (`arg0`, `arg1`, ...).
+ */
+export function namedArguments(fn: AnyFunction, args: unknown[]): Record<string, unknown> {
+  const params = parseParams(fn) ?? [];
+  const obj: Record<string, unknown> = {};
+  for (let i = 0; i < args.length; i++) {
+    const param = params[i];
+    if (param?.rest) {
+      obj[param.name || `arg${i}`] = args.slice(i);
+      break;
+    }
+    const key = param?.name && !(param.name in obj) ? param.name : `arg${i}`;
+    obj[key] = args[i];
+  }
+  return obj;
 }
 
 function setInputAttributes(
@@ -101,25 +208,19 @@ function setInputAttributes(
 ): void {
   if (args.length === 0) return;
   try {
-    const paramNames = getArgNames(fn);
-    let value: unknown;
-    if (paramNames.length > 0) {
-      const obj: Record<string, unknown> = {};
-      for (let i = 0; i < args.length; i++) {
-        const key = i < paramNames.length ? paramNames[i] : `arg${i}`;
-        obj[key] = args[i];
-      }
-      value = obj;
-    } else {
-      value = args.length === 1 ? args[0] : args;
-    }
-    const serialized = truncate(safeStringify(value));
+    const serialized = truncate(safeStringify(namedArguments(fn, args)));
     if (op === Op.EXECUTE_TOOL) {
       span.setAttribute("gen_ai.tool.call.arguments", serialized);
     } else {
       span.setAttribute("gen_ai.input.messages", serialized);
     }
   } catch { /* ignore */ }
+}
+
+/** Whether the span already has the attribute (an SDK span exposes its attributes). */
+function hasAttribute(span: Span, key: string): boolean {
+  const attributes = (span as unknown as { attributes?: Record<string, unknown> }).attributes;
+  return !!attributes && attributes[key] !== undefined;
 }
 
 function setOutputAttributes(
@@ -132,6 +233,9 @@ function setOutputAttributes(
     op === Op.EXECUTE_TOOL
       ? "gen_ai.tool.call.result"
       : "gen_ai.output.messages";
+  // Keep a value set inside the function (enrich({ outputMessages }), or setAttribute), as the
+  // Python SDK does: the return value is recorded only when nothing was set.
+  if (hasAttribute(span, attrKey)) return;
   const serialized = truncate(safeStringify(result));
   span.setAttribute(attrKey, serialized);
 }

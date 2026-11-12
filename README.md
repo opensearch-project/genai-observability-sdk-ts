@@ -307,6 +307,8 @@ const tracedAgent = withTracing(myAgentFunction);
 | `gen_ai.input.messages` / `gen_ai.output.messages` | All ops except `execute_tool` |
 | `gen_ai.tool.call.arguments` / `gen_ai.tool.call.result` | When `op=Op.EXECUTE_TOOL` |
 
+Inputs are recorded as an object keyed by the function's parameter names (read from its source, so arrows compiled by tsx/esbuild such as `city=>...` work too); destructured or extra arguments are keyed `arg0`, `arg1`, .... The return value becomes `gen_ai.output.messages` (or `gen_ai.tool.call.result`) only when the function did not set it itself: messages set with `enrich({ outputMessages })` inside the function are kept.
+
 **Dynamic naming with `nameFrom`:**
 
 ```typescript
