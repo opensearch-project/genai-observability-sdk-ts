@@ -558,3 +558,46 @@ describe('argument names', () => {
     }
   });
 });
+
+describe('gen_ai.agent.name only for agent operations', () => {
+  for (const op of [Op.INVOKE_AGENT, Op.CREATE_AGENT]) {
+    it(`${op} names the agent`, () => {
+      withObserve('planner', { op }, () => 'ok');
+      expect(getFinishedSpans()[0].attributes['gen_ai.agent.name']).toBe('planner');
+    });
+  }
+
+  for (const op of [Op.CHAT, Op.RETRIEVAL, Op.EMBEDDINGS, Op.GENERATE_CONTENT, Op.TEXT_COMPLETION]) {
+    it(`${op} does not (withObserve and observe)`, () => {
+      withObserve('judge', { op }, () => 'ok');
+      observe({ name: 'judge2', op }, () => 'ok')();
+      for (const span of getFinishedSpans()) {
+        expect(span.attributes['gen_ai.operation.name']).toBe(op);
+        expect(span.attributes['gen_ai.agent.name']).toBeUndefined();
+      }
+    });
+  }
+
+  it('execute_tool names the tool, not an agent', () => {
+    withObserve('lookup', { op: Op.EXECUTE_TOOL }, () => 'ok');
+    const attrs = getFinishedSpans()[0].attributes;
+    expect(attrs['gen_ai.tool.name']).toBe('lookup');
+    expect(attrs['gen_ai.agent.name']).toBeUndefined();
+  });
+
+  it('no op sets no GenAI attributes, as in Python', () => {
+    withObserve('plain', () => 'ok');
+    observe(function plainFn() { return 'ok'; })();
+    for (const span of getFinishedSpans()) {
+      expect(span.attributes['gen_ai.agent.name']).toBeUndefined();
+      expect(span.attributes['gen_ai.operation.name']).toBeUndefined();
+    }
+  });
+
+  it('keeps an agent name set explicitly on a chat span', () => {
+    withObserve('judge', { op: Op.CHAT }, (span) => {
+      span.setAttribute('gen_ai.agent.name', 'judge_agent');
+    });
+    expect(getFinishedSpans()[0].attributes['gen_ai.agent.name']).toBe('judge_agent');
+  });
+});

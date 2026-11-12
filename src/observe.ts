@@ -35,10 +35,15 @@ const PREFIXED_OPS = new Set([
   Op.TEXT_COMPLETION,
 ]);
 
+// Name attribute per op. Only agent operations name an agent: a chat, retrieval or embeddings
+// span (for example a traced LLM judge call) must not carry gen_ai.agent.name, or Agent Traces
+// would list it as an agent. Set it explicitly (span.setAttribute("gen_ai.agent.name", ...)) if
+// a span needs it.
 const NAME_ATTR: Record<string, string> = {
+  [Op.INVOKE_AGENT]: "gen_ai.agent.name",
+  [Op.CREATE_AGENT]: "gen_ai.agent.name",
   [Op.EXECUTE_TOOL]: "gen_ai.tool.name",
 };
-const DEFAULT_NAME_ATTR = "gen_ai.agent.name";
 
 export interface ObserveOptions {
   name?: string;
@@ -245,14 +250,13 @@ function setNameAttributes(
   name: string,
   op: string | undefined,
 ): void {
-  const nameAttr = op ? (NAME_ATTR[op] ?? DEFAULT_NAME_ATTR) : DEFAULT_NAME_ATTR;
-  span.setAttribute(nameAttr, name);
+  if (!op) return; // as in the Python SDK: no op, no GenAI attributes
+  const nameAttr = NAME_ATTR[op];
+  if (nameAttr) span.setAttribute(nameAttr, name);
   if (op === Op.EXECUTE_TOOL) {
     span.setAttribute("gen_ai.tool.type", "function");
   }
-  if (op) {
-    span.setAttribute("gen_ai.operation.name", op);
-  }
+  span.setAttribute("gen_ai.operation.name", op);
 }
 
 function isAsyncGeneratorFunction(fn: unknown): boolean {
