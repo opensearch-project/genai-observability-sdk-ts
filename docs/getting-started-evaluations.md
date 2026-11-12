@@ -66,12 +66,12 @@ Traces and evaluation events need somewhere to go:
 - **Managed:** an Amazon OpenSearch Service domain plus Amazon OpenSearch Ingestion (OSI) pipelines for traces and logs. See [8. Ship and monitor](#8-ship-and-monitor) and [Ingestion](agent-evaluations.md#ingestion).
 
 ```bash
-npm install @opensearch-project/genai-observability-sdk-ts @opentelemetry/api @opentelemetry/context-async-hooks
+npm install "@opensearch-project/genai-observability-sdk-ts@>=0.2.0" @opentelemetry/api @opentelemetry/context-async-hooks
 # OpenSearchTraceRetriever (online evals) also needs:
 npm install @opensearch-project/opensearch
 ```
 
-This guide needs a release that includes PR #100 (opensearch-project/genai-observability-sdk-ts#100); until it ships, build the package from source (see [Setup](agent-evaluations.md#setup)).
+This guide needs `@opensearch-project/genai-observability-sdk-ts@>=0.2.0`; until 0.2.0 is on npm, build the package from source (see [Setup](agent-evaluations.md#setup)).
 
 ## 3. Instrument the agent
 
@@ -485,7 +485,7 @@ Paste these into your coding assistant, in your agent's repository.
 
 ```text
 Instrument this TypeScript agent with the OpenSearch GenAI observability SDK
-(npm package @opensearch-project/genai-observability-sdk-ts, docs:
+(npm package @opensearch-project/genai-observability-sdk-ts@>=0.2.0, docs:
 https://github.com/opensearch-project/genai-observability-sdk-ts).
 
 - Install @opentelemetry/context-async-hooks and set an AsyncLocalStorageContextManager

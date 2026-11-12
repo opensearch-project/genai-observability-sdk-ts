@@ -259,7 +259,7 @@ Use gRPC with a local OTel Collector (default `localhost:4317`) or a self-hosted
 
 `exporter` and `logExporter` are escape hatches: each replaces one signal's exporter and nothing is derived from it. Without `exporter`, every signal has an endpoint (the default at worst). With `exporter` and no logs destination (`logExporter`, or any of steps 1 to 4 above for logs: `logsEndpoint`, `endpoint`, `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`, `OTEL_EXPORTER_OTLP_ENDPOINT`), `register()` does not set up a logs pipeline: it warns once, and evaluation events go to the global `LoggerProvider` (a no-op unless you registered one). Pass `logsEndpoint` or `logExporter` to export them.
 
-**Migrating from a traces URL in `endpoint`.** Before this release `endpoint` was the full traces URL and the default was `http://localhost:21890/opentelemetry/v1/traces`. `endpoint` is now always the base URL, and a value ending in `/v1/traces` throws. Pass the base (`http://host:4318`), or `tracesEndpoint` and `logsEndpoint`. To keep sending to a Data Prepper `otlp` source on its old default, pass `endpoint: "http://localhost:21890"` and set `traces_path` / `logs_path` and `unframed_requests: true` on the source (see the [guide](docs/agent-evaluations.md#ingestion)).
+**Migrating from a traces URL in `endpoint`.** Before 0.2.0 (`@opensearch-project/genai-observability-sdk-ts@>=0.2.0`), `endpoint` was the full traces URL and the default was `http://localhost:21890/opentelemetry/v1/traces`. `endpoint` is now always the base URL, and a value ending in `/v1/traces` throws. Pass the base (`http://host:4318`), or `tracesEndpoint` and `logsEndpoint`. To keep sending to a Data Prepper `otlp` source on its old default, pass `endpoint: "http://localhost:21890"` and set `traces_path` / `logs_path` and `unframed_requests: true` on the source (see the [guide](docs/agent-evaluations.md#ingestion)).
 
 **Scores over gRPC.** The OTLP/HTTP log exporters send whole-number scores as `doubleValue` (see [Scores are doubles](#score)); the gRPC log exporter sends them as `intValue`. The evaluation index maps them as `double` either way.
 
@@ -301,7 +301,7 @@ const tracedAgent = withTracing(myAgentFunction);
 | Attribute | When set |
 |---|---|
 | `gen_ai.operation.name` | When `op` is provided |
-| `gen_ai.agent.name` | All ops except `execute_tool` |
+| `gen_ai.agent.name` | `op` is `invoke_agent` or `create_agent` only (a `chat` span, such as a traced LLM judge call, is not an agent) |
 | `gen_ai.tool.name` | When `op=Op.EXECUTE_TOOL` |
 | `gen_ai.tool.type` | When `op=Op.EXECUTE_TOOL` (set to `"function"`) |
 | `gen_ai.input.messages` / `gen_ai.output.messages` | All ops except `execute_tool` |

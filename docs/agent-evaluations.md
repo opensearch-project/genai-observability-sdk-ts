@@ -100,10 +100,10 @@ Attributes (each is set only when it has a value):
 ## Setup
 
 ```bash
-npm install @opensearch-project/genai-observability-sdk-ts
+npm install "@opensearch-project/genai-observability-sdk-ts@>=0.2.0"
 ```
 
-This guide needs a release that includes PR #100 (opensearch-project/genai-observability-sdk-ts#100). Earlier releases record scores as span events instead of `gen_ai.evaluation.result` log events, and have no `logsEndpoint`, `tracesEndpoint` or `sigv4` options. Until the next release ships, build the package from source.
+This guide needs `@opensearch-project/genai-observability-sdk-ts@>=0.2.0`. Earlier releases record scores as span events instead of `gen_ai.evaluation.result` log events, and have no `logsEndpoint`, `tracesEndpoint` or `sigv4` options. Until 0.2.0 is on npm, build the package from source.
 
 Call `register()` once at startup. It sets up the OTLP traces pipeline and the OTLP logs pipeline that carries the evaluation events. `agentName` and `agentVersion` become `gen_ai.agent.name` and `gen_ai.agent.version` on every result, unless a call names another agent or the evaluated span names its own.
 
@@ -258,7 +258,7 @@ score({
 
 Results identify the judge prompt by name and version: `gen_ai.prompt.name` and `gen_ai.prompt.version` (shown as `name@version`). Bump the version whenever the prompt text changes, so two prompt versions are never mixed under one label.
 
-The full prompt text is never put on a result event. It belongs on the judge's own LLM call span as `gen_ai.system_instructions`, its OTel location, so it is stored once per judge call, next to the judge's input and output. The SDK does not create the judge's LLM span: the judge's instrumentation records it there (most GenAI instrumentations do, often behind a content-capture opt-in, because a prompt may hold sensitive data). If you trace the judge yourself, set it with `enrich({ systemInstructions })` inside the judge call, and pass the judge's trace id to the result:
+The full prompt text is never put on a result event. It belongs on the judge's own LLM call span as `gen_ai.system_instructions`, its OTel location, so it is stored once per judge call, next to the judge's input and output. The SDK does not create the judge's LLM span: the judge's instrumentation records it there (most GenAI instrumentations do, often behind a content-capture opt-in, because a prompt may hold sensitive data). If you trace the judge yourself, set it with `enrich({ systemInstructions })` inside the judge call, and pass the judge's trace id to the result: The judge span is a `chat` span: it carries no `gen_ai.agent.name`, so Agent Traces does not list the judge as an agent.
 
 ```typescript
 import { Op, enrich, score, withObserve } from "@opensearch-project/genai-observability-sdk-ts";
