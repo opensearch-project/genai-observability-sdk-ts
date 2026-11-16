@@ -346,19 +346,24 @@ const exactMatch = defineScorer(
   (_input, output, expected) => (output === expected ? 1 : 0),
 );
 
-const quality = defineScorer({ name: "answer_quality", evaluatorType: "llm_judge" }, (): EvalScore =>
-  withObserve("judge answer_quality", { op: Op.CHAT }, (span) => ({
-    name: "answer_quality",
-    value: 4, // call your judge model here
-    threshold: 4,
-    scoreMin: 1,
-    scoreMax: 5,
-    explanation: "Correct and concise",
-    judgeTraceId: span.spanContext().traceId,
-  })),
+// An async LLM judge: evaluate() awaits it.
+const quality = defineScorer({ name: "answer_quality", evaluatorType: "llm_judge" }, async (): Promise<EvalScore> =>
+  withObserve("judge answer_quality", { op: Op.CHAT }, async (span) => {
+    const value = await Promise.resolve(4); // await your judge model here
+    return {
+      name: "answer_quality",
+      value,
+      threshold: 4,
+      scoreMin: 1,
+      scoreMax: 5,
+      explanation: "Correct and concise",
+      judgeTraceId: span.spanContext().traceId,
+    };
+  }),
 );
 
-const result = evaluate({
+// An async scorer (or task) makes evaluate() return a Promise.
+const result = await evaluate({
   name: "travel-capitals",
   task: (input) => travelPlanner(String(input)),
   data: [
@@ -373,11 +378,12 @@ await provider.forceFlush();
 if (result.summary.failCount || result.summary.errorCount) process.exitCode = 1;
 ```
 
-- A scorer receives `(input, output, expected)` and synchronously returns a finite number, a boolean (a verdict), an `EvalScore` or an `EvalScore[]`. Anything else (`undefined`, `null`, `NaN`, a Promise, an object without a `name`) logs a warning and emits an error result with `error.type` = `TypeError`.
+- The task and the scorers may be synchronous or async, mixed. When the task or a scorer is an async function or returns a Promise, `evaluate()` awaits it and returns a `Promise<BenchmarkResult>`; when all are synchronous it returns the result directly. `await evaluate(...)` works either way.
+- A scorer receives `(input, output, expected)` and returns (or resolves to) a finite number, a boolean (a verdict), an `EvalScore` or an `EvalScore[]`. Anything else (`undefined`, `null`, `NaN`, an object without a `name`) logs a warning and emits an error result with `error.type` = `TypeError`. A scorer that throws or rejects (for example a judge call that fails) emits an error result with `error.type` = the exception class name.
 - `defineScorer(spec, fn)` declares the evaluation name, `threshold`, `direction`, `scoreMin`, `scoreMax`, `evaluator` and `evaluatorType`. Fields set on a returned `EvalScore` win.
 - `EvalScore.judgeTraceId` sets `opensearch.gen_ai.evaluation.judge.trace_id`, in `evaluate()` and in `Benchmark.log()`.
 - Scorers run outside the agent trace, so a traced judge gets its own trace.
-- The task must be synchronous and cases run one at a time: `evaluate()` tracks the running case in module state, not in the OTel context. An async task is reported as an error. See [How root spans are found](../README.md#evaluate).
+- Cases run one at a time, and a case's scorers run in order after its task settles. The running case rides in the task's OTel context, so with a context manager (`register()` installs one on Node) spans the task starts after an `await` are still stamped; without one, the SDK falls back to module state held until the task settles, so run one `evaluate()` at a time. See [How root spans are found](../README.md#evaluate).
 
 ### Benchmark
 
@@ -486,7 +492,7 @@ For another CI system pass `ciPipeline: { "cicd.pipeline.run.id": "...", ... }` 
 
 ### Errors
 
-- The task throws (`evaluate()`): the case is not scored. Each scorer emits one error result under its evaluation name with `error.type` = the exception class name, no value, no label and no explanation. The run continues.
+- The task throws or rejects (`evaluate()`): the case is not scored. Each scorer emits one error result under its evaluation name with `error.type` = the exception class name, no value, no label and no explanation. The run continues.
 - A scorer throws: one error result with `error.type` = the exception class name, no value, no label and no explanation. The message can carry URLs, keys or request bodies, so it stays in the local `scorerErrors`.
 - `Benchmark.log({ errorType: "TimeoutError", scores: [...] })`: every listed score is sent as an error result.
 
@@ -1035,7 +1041,7 @@ explore.agentTraces.evaluations.enabled: true
 
 - **No events at all.** `register()` was not called, or your own OTel setup has no global `LoggerProvider`. Short scripts: `await provider.forceFlush()` before the process exits.
 - **Traces arrive, results do not.** The logs endpoint points somewhere that does not accept OTLP logs (for example `endpoint` is a traces-only pipeline). Use setup (c): pass `tracesEndpoint` and `logsEndpoint`. With OSI, the logs pipeline must be a separate pipeline with an OTLP logs source. With a custom `exporter` and no logs destination, `register()` sets up no logs pipeline and warns once; pass `logsEndpoint` or `logExporter`.
-- **Results have no trace link.** Pass `traceId` (and `spanId`) to `score()`; inline scoring needs an OTel context manager (`register()` installs one on Node). In `evaluate()`, the task must start a span (for example with `observe()`) and be synchronous.
+- **Results have no trace link.** Pass `traceId` (and `spanId`) to `score()`; inline scoring needs an OTel context manager (`register()` installs one on Node). In `evaluate()`, the task must start a span (for example with `observe()`); for an async task, `await` the Promise `evaluate()` returns before you flush.
 - **Results land in the logs index.** The route did not match `eventName`. Check that the route uses `/eventName == "gen_ai.evaluation.result"` and that your Data Prepper version maps the OTLP `event_name` field to `eventName` (added in opensearch-project/data-prepper#7148).
 - **Field types look wrong** (strings as `text` with `.keyword` sub-fields, `time` not a date). The index was created before the index template, or the sink wrote to a plain index named `otel-v1-genai-evaluation` because the alias did not exist. Create the [evaluation index](#evaluation-index) (template, policy, first index with the alias); for an existing write index, roll it over (`POST otel-v1-genai-evaluation/_rollover`) or reindex.
 - **A long `opensearch.test.case.expected` does not match a filter.** Expected: string attributes are `keyword` with `ignore_above` 256, so longer values are stored and shown but not indexed. Filter on the case id instead.

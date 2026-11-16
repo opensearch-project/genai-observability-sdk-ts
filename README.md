@@ -563,6 +563,27 @@ const result = evaluate({
 console.log(result.summary); // { totalCases: 2, passCount: 2, errorCount: 0, scores: { accuracy: { avg: 1.0 } } }
 ```
 
+**Async agents and judges.** `task` and the scorers may be async. When the task or a scorer is an async function or returns a Promise, `evaluate()` awaits it and returns a `Promise<BenchmarkResult>`; when all are synchronous it returns the result directly, as above. `await evaluate(...)` works either way. Cases still run one at a time, and the scorers of a case run in order after its task.
+
+```typescript
+const judge = defineScorer(
+  { name: "answer_quality", threshold: 4, scoreMin: 1, scoreMax: 5, evaluatorType: "llm_judge" },
+  async (input, output): Promise<EvalScore> => {
+    const { score, reason } = await callJudgeModel(input, output); // its own trace, not stamped
+    return { name: "answer_quality", value: score, explanation: reason };
+  },
+);
+
+const result = await evaluate({
+  name: "rag-agent",
+  task: async (input) => myAsyncAgent(String(input)), // e.g. withObserve(..., { op: Op.INVOKE_AGENT }, async () => ...)
+  data: [{ input: "What is Python?", expected: "programming language" }],
+  scores: [accuracy, judge], // sync and async mixed
+});
+```
+
+A task or judge that rejects is handled like one that throws (below). The return type follows the types of `task` and `scores`: a task or scorer typed to return `unknown` / `any` (or the `ScorerFn` type, which allows a Promise) gives `BenchmarkResult | Promise<BenchmarkResult>`; `await` it, or type synchronous scorers as `SyncScorerFn`.
+
 Produces:
 ```
 trace (one per case)                        the agent run, unchanged
@@ -578,9 +599,9 @@ Each `gen_ai.evaluation.result` carries `test.suite.name`, `test.suite.run.id`, 
 
 **CI/CD.** Inside CI, every evaluation result (and, with `evaluate()`, the agent root spans it starts; `Benchmark` stamps results only) carries the OTel `cicd.pipeline.name`, `cicd.pipeline.run.id` and `cicd.pipeline.run.url.full`, read from GitHub Actions (`GITHUB_WORKFLOW`, `GITHUB_RUN_ID`, run URL), GitLab CI (`CI_PIPELINE_NAME`, `CI_PIPELINE_ID`, `CI_PIPELINE_URL`) or Jenkins (`JOB_NAME`, `BUILD_ID`, `BUILD_URL`). Pass `ciPipeline: { "cicd.pipeline.run.id": ... }` to `evaluate()` / `new Benchmark()` to set or override them. Outside CI nothing is added.
 
-A case whose task throws is not scored: each declared scorer emits one error result instead, named after the scorer (its `defineScorer()` `name`, else the function name), with `error.type` set to the exception class name, no score value and no label (the exception message is not sent). The run continues. When the task creates no span, the results have no trace context. All events go to the OTLP logs endpoint; Data Prepper routes them to `otel-v1-genai-evaluation-*`, distinguished by `eventName`.
+A case whose task throws (or rejects) is not scored: each declared scorer emits one error result instead, named after the scorer (its `defineScorer()` `name`, else the function name), with `error.type` set to the exception class name, no score value and no label (the exception message is not sent). The run continues. When the task creates no span, the results have no trace context. All events go to the OTLP logs endpoint; Data Prepper routes them to `otel-v1-genai-evaluation-*`, distinguished by `eventName`.
 
-**How root spans are found.** `evaluate()` does not rely on the active OTel context (a context manager may be missing, for example with `setGlobal: false`). Cases run one at a time and `task` is synchronous, so the SDK keeps a module-level "current case" while each task runs. `TestCaseSpanProcessor` reads it in `onStart`: every span started during the case without a parent from the same case (no parent, or a remote parent) is stamped with the `test.*` ids, and the first one becomes the trace context for that case's events. Spans started by scorers (LLM judges) are outside the case and are not stamped. `register()` adds the processor to its provider, and `evaluate()` adds it to a global OTel JS 1.x `BasicTracerProvider` if missing. With a provider that only takes processors at construction (OTel JS 2.x), add it yourself:
+**How root spans are found.** `evaluate()` runs each task in an OTel context that carries the current case, so with a context manager (`register()` installs `AsyncLocalStorageContextManager` on Node) the case follows the task across `await`. A context manager may be missing (for example with `setGlobal: false` and your own setup), so the SDK also keeps a module-level "current case" from the task call until its Promise settles; cases run one at a time, so run one `evaluate()` at a time too. `TestCaseSpanProcessor` reads the case in `onStart` (from the span's context, else the module-level one): every span started during the case without a parent from the same case (no parent, or a remote parent) is stamped with the `test.*` ids, and the first one becomes the trace context for that case's events. Spans started by scorers (LLM judges) are outside the case and are not stamped. `register()` adds the processor to its provider, and `evaluate()` adds it to a global OTel JS 1.x `BasicTracerProvider` if missing. With a provider that only takes processors at construction (OTel JS 2.x), add it yourself:
 
 ```typescript
 import { TestCaseSpanProcessor } from "@opensearch-project/genai-observability-sdk-ts";
@@ -595,9 +616,9 @@ const provider = new BasicTracerProvider({
 | Parameter | Type | Description |
 |---|---|---|
 | `name` | `string` | Benchmark name (`test.suite.name`). Stable across runs |
-| `task` | `(input: unknown) => unknown` | Synchronous function that takes input and returns output |
+| `task` | `(input: unknown) => unknown` | Function that takes input and returns output, or a Promise of it (then `evaluate()` returns a Promise) |
 | `data` | `Array<{ input, expected?, caseId?, caseName? }>` | Test cases |
-| `scores` | `Array<ScorerFn \| Scorer>` | Scorer functions: `(input, output, expected)` returning, synchronously, `EvalScore`, `EvalScore[]`, a finite `number`, or `boolean`. Anything else logs a warning and emits an error result. Optionally wrapped with `defineScorer()` |
+| `scores` | `Array<ScorerFn \| Scorer>` | Scorer functions: `(input, output, expected)` returning, or resolving to, `EvalScore`, `EvalScore[]`, a finite `number`, or `boolean`. Anything else logs a warning and emits an error result. Sync and async scorers can be mixed. Optionally wrapped with `defineScorer()` |
 | `metadata` | `Record<string, unknown>` | Copied to every `gen_ai.evaluation.result` of the run. Reserved keys are filtered, with one warning per key per process. The judge keys `gen_ai.request.model` and `gen_ai.prompt.*` are allowed; `defineScorer()` judge fields win over them |
 | `runName` | `string` | `opensearch.test.suite.run.name` on every result: a readable run name, for example `"v5 with shorter prompt"`. Also a `new Benchmark()` option |
 | `runDescription` | `string` | `opensearch.test.suite.run.description` on every result (cut at 1024 characters). Also a `new Benchmark()` option |
@@ -629,9 +650,9 @@ const tools = defineScorer({ name: "tool_selection" }, () => ({
 }));
 ```
 
-`ScorerSpec` fields: `name` (evaluation name of number/boolean results and of the error grade; default the function name), `threshold`, `direction` (default `maximize` with a threshold), `scoreMin` / `scoreMax`, `evaluator` (`opensearch.gen_ai.evaluation.evaluator.name`), `evaluatorType`. A scorer that throws, or returns something other than a finite number, a boolean, an `EvalScore` or an `EvalScore[]` (for example `undefined`, `NaN` or a Promise, with a warning), emits a grade with `error.type` and no value, label or explanation under the declared `name` (else the function name), so it lands on the same evaluation as its successful results. The exception message stays in the local `scorerErrors`.
+`ScorerSpec` fields: `name` (evaluation name of number/boolean results and of the error grade; default the function name), `threshold`, `direction` (default `maximize` with a threshold), `scoreMin` / `scoreMax`, `evaluator` (`opensearch.gen_ai.evaluation.evaluator.name`), `evaluatorType`. A scorer that throws or rejects, or returns (or resolves to) something other than a finite number, a boolean, an `EvalScore` or an `EvalScore[]` (for example `undefined` or `NaN`, with a warning), emits a grade with `error.type` and no value, label or explanation under the declared `name` (else the function name), so it lands on the same evaluation as its successful results. The exception message stays in the local `scorerErrors`.
 
-**Case status** (local `resultStatus`, not sent): `error` if the task threw or any result errored; else `fail` if any score of the case has a `fail` verdict (a `pass` / `fail` `label`, `passed`, or `threshold` + `direction`); else `pass`. Scores with no declared rule never fail a case. The summary keeps `passCount`, `failCount` and `errorCount`.
+**Case status** (local `resultStatus`, not sent): `error` if the task threw or rejected, or any result errored; else `fail` if any score of the case has a `fail` verdict (a `pass` / `fail` `label`, `passed`, or `threshold` + `direction`); else `pass`. Scores with no declared rule never fail a case. The summary keeps `passCount`, `failCount` and `errorCount`.
 
 ### `Benchmark`
 

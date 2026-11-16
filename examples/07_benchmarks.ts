@@ -5,7 +5,8 @@
  * Example 07: Benchmarks
  *
  * Demonstrates using the Benchmark class for manual test case logging
- * and the evaluate() function for automated benchmarking with scorers.
+ * and the evaluate() function for automated benchmarking with scorers, with a
+ * synchronous task and with an async agent and an async LLM judge.
  *
  * Each case's agent run is its own trace; its root span is stamped with
  * test.suite.name, test.suite.run.id, test.case.id and test.case.name. Each
@@ -13,7 +14,7 @@
  * The run summary is computed locally.
  */
 
-import { Benchmark, Op, evaluate, register, withObserve } from '../src/index.js';
+import { Benchmark, Op, defineScorer, evaluate, register, withObserve } from '../src/index.js';
 import type { EvalScore } from '../src/index.js';
 
 const provider = await register({
@@ -115,6 +116,42 @@ for (const c of evalResult.cases) {
   console.log(
     `  Case ${c.caseId.slice(0, 8)}: ${c.resultStatus} trace=${c.traceId} scores=${JSON.stringify(c.scores)}`,
   );
+}
+
+// 4. evaluate() with an async agent and an async LLM judge: it awaits both and
+// returns a Promise. Each case is still its own trace; the judge's chat span is a
+// separate trace, linked from the result by judgeTraceId.
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const asyncAgent = (question: string) =>
+  withObserve('qa-agent', { op: Op.INVOKE_AGENT }, async () => {
+    await withObserve('model', { op: Op.CHAT }, () => sleep(5)); // simulated model call
+    return `${question.replace('What is ', '').replace('?', '')} is a field of computer science.`;
+  });
+
+const judge = defineScorer(
+  { name: 'helpfulness', threshold: 3, scoreMin: 1, scoreMax: 5, evaluator: 'helpfulness_judge', evaluatorType: 'llm_judge' },
+  async (_input, output): Promise<EvalScore> =>
+    withObserve('helpfulness judge', { op: Op.CHAT }, async (span) => {
+      await sleep(5); // simulated judge model call
+      const value = String(output).length > 20 ? 4 : 2;
+      return { name: 'helpfulness', value, explanation: 'Simulated judge', judgeTraceId: span.spanContext().traceId };
+    }),
+);
+
+const asyncResult = await evaluate({
+  name: 'qa-benchmark-async',
+  task: (input) => asyncAgent(String(input)),
+  data: [
+    { input: 'What is AI?', caseId: 'ai' },
+    { input: 'What is ML?', caseId: 'ml' },
+  ],
+  scores: [judge, lengthScore], // async and sync scorers mixed
+});
+
+console.log(`\nAsync evaluation: ${asyncResult.summary.benchmarkName}`);
+for (const c of asyncResult.cases) {
+  console.log(`  Case ${c.caseId}: ${c.resultStatus} trace=${c.traceId} scores=${JSON.stringify(c.scores)}`);
 }
 
 // Flush spans and evaluation events

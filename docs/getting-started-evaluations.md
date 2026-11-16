@@ -159,28 +159,37 @@ Write the suite as data, the scorers as functions, and record one eval run per p
 {"caseId": "errors-by-service", "caseName": "Errors by service", "input": "Which services had errors in the last hour?", "expected": {"check": "error_counts", "minutes": 60}}
 ```
 
-**Synchronous tasks: `evaluate()`.** It runs each case, links the results to the trace the task starts, and takes scorers declared with `defineScorer()`:
+**`evaluate()`.** It runs each case, awaits your async agent and async LLM judges, links the results to the trace the task starts, and takes scorers declared with `defineScorer()` (sync or async, mixed):
 
 ```typescript
 import { defineScorer, evaluate } from "@opensearch-project/genai-observability-sdk-ts";
 
-const exactMatch = defineScorer(
-  { name: "exact_match", evaluatorType: "code", evaluatorDescription: "Output equals the expected answer" },
-  (_input, output, expected) => output === expected, // boolean: a pass / fail verdict
+type Answer = Awaited<ReturnType<typeof ask>>; // { answer, traceId, spanId } from section 3
+
+const namesAService = defineScorer(
+  { name: "names_a_service", evaluatorType: "code", evaluatorDescription: "The answer names at least one service" },
+  (_input, output) => /service/i.test((output as Answer).answer), // boolean: a pass / fail verdict
+);
+const quality = defineScorer(
+  { name: "answer_quality", evaluator: "answer_quality_judge", evaluatorType: "llm_judge" },
+  (input, output) => answerQualityJudge(String(input), (output as Answer).answer), // async LLM judge, see the cookbook
 );
 
-const result = evaluate({
+const result = await evaluate({
   name: "observability-assistant-core", // the test suite
-  task: (input) => mySyncAgent(String(input)),
+  task: (input) => ask(String(input)), // async: evaluate() awaits it, one case at a time
   data: cases,
-  scores: [exactMatch],
-  runName: "v1 baseline",
+  scores: [namesAService, quality],
+  runName: process.argv[2] ?? "v1 baseline",
   runDescription: "Haiku 4.5, default system prompt",
 });
 console.log(result.summary.runId);
+await provider.forceFlush();
 ```
 
-**Async agents (most of them): `Benchmark`.** `evaluate()` needs a synchronous task and synchronous scorers, so run each case yourself, await the agent and the judge, and log the case with the trace and span id from section 3:
+With an async task or scorer `evaluate()` returns a Promise; with only synchronous ones it returns the result directly. A judge that throws or rejects records an error result for that evaluation and the run continues.
+
+**Your own loop: `Benchmark`.** When scorers need the trace's spans from OpenSearch (`agentRun()` in the cookbook, which needs the spans flushed and indexed first), or you want to run cases your own way (concurrently, with retries), run each case yourself, await the agent and the judge, and log the case with the trace and span id from section 3:
 
 ```typescript
 import { Benchmark } from "@opensearch-project/genai-observability-sdk-ts";
@@ -307,7 +316,7 @@ Offline evals catch regressions before a release; online evals catch what the su
 
 ## Eval cookbook
 
-Copy and adapt. Each scorer returns an `EvalScore` (or a number or boolean) and works with `Benchmark.log({ scores })`; the synchronous ones also work as `evaluate()` scorers through `defineScorer()`. Runnable versions are in the Strands observability example ([#101](https://github.com/opensearch-project/genai-observability-sdk-ts/pull/101)). `AgentRun` is whatever your `ask()` returns, plus the spans of its trace. Build it once per case with `agentRun()` and pass the same object to every scorer: the spans are fetched from OpenSearch once per trace id (cached), not once per scorer.
+Copy and adapt. Each scorer returns an `EvalScore` (or a number or boolean) and works with `Benchmark.log({ scores })`, and, wrapped with `defineScorer()` (sync or async), as an `evaluate()` scorer. Runnable versions are in the Strands observability example ([#101](https://github.com/opensearch-project/genai-observability-sdk-ts/pull/101)). `AgentRun` is whatever your `ask()` returns, plus the spans of its trace. Build it once per case with `agentRun()` and pass the same object to every scorer: the spans are fetched from OpenSearch once per trace id (cached), not once per scorer.
 
 ```typescript
 import {
@@ -367,7 +376,7 @@ async function answerCorrectness(run: AgentRun): Promise<EvalScore> {
 
 ### answerCorrectness (LLM judge)
 
-An async judge goes through `Benchmark.log()` or `score()`. Record the judge model, prompt name and version, and what it checks. Results carry the prompt's name and version (`answer-quality@v1`); the full `JUDGE_PROMPT` goes on the judge's own LLM span as `gen_ai.system_instructions` (recorded by the judge's instrumentation, or `enrich({ systemInstructions: JUDGE_PROMPT })` inside a `withObserve()` judge call), never on the result:
+An async judge works in `evaluate()` (wrapped with `defineScorer()`, as in section 6), `Benchmark.log()` and `score()`. Record the judge model, prompt name and version, and what it checks. Results carry the prompt's name and version (`answer-quality@v1`); the full `JUDGE_PROMPT` goes on the judge's own LLM span as `gen_ai.system_instructions` (recorded by the judge's instrumentation, or `enrich({ systemInstructions: JUDGE_PROMPT })` inside a `withObserve()` judge call), never on the result:
 
 ```typescript
 const JUDGE_PROMPT = "You grade answers of an observability assistant. Reply with JSON {\"score\": 1-5, \"reason\": \"...\"}.";
@@ -535,7 +544,7 @@ https://github.com/opensearch-project/genai-observability-sdk-ts).
 
 ```text
 Write an offline evaluation for this TypeScript agent with the OpenSearch GenAI observability
-SDK (Benchmark, EvalScore; evaluate() and defineScorer() only if the agent is synchronous).
+SDK: evaluate() with defineScorer() scorers (the task and scorers may be async; await evaluate()).
 
 - Create test_suite.jsonl with 8 to 12 realistic cases: {"caseId", "caseName", "input",
   "expected"}. caseId must be stable (short slug). Add 2 or 3 safety cases: a destructive
@@ -549,9 +558,10 @@ SDK (Benchmark, EvalScore; evaluate() and defineScorer() only if the agent is sy
   when the prompt text changes), and put the judge's reason in explanation. Do not put
   the judge prompt on the result: it belongs on the judge's LLM span
   (gen_ai.system_instructions).
-- new Benchmark(<suite>, { runName, runDescription, agentName, agentVersion }); for each case
-  await the agent, then bench.log({ caseId, caseName, input, output, expected, traceId, spanId,
-  scores }). Take runName from the command line.
+- await evaluate({ name: <suite>, task: (input) => <agent>(input), data, scores, runName,
+  runDescription }). Take runName from the command line. If a scorer needs the trace's spans
+  from OpenSearch, use new Benchmark(<suite>, { runName, ... }) instead: await the agent per
+  case, then bench.log({ caseId, caseName, input, output, expected, traceId, spanId, scores }).
 - Print the summary and the Dashboards link /app/agentTraces/evaluations#/runs/<run id>.
   Flush the provider before exit.
 ```
@@ -584,7 +594,7 @@ Add an online evaluator for this TypeScript agent with the OpenSearch GenAI obse
 | Spans arrive but are not nested; `enrich()` or `markAgentRoot()` do nothing | No context manager, so async code loses the active span | `register()` installs `AsyncLocalStorageContextManager` on Node; with `setGlobal: false` or your own OTel setup, set it as the global context manager yourself |
 | No evaluation events | The pipeline does not accept OTLP logs on `/v1/logs`, or does not route `eventName == "gen_ai.evaluation.result"` | Check the logs pipeline; without the route Data Prepper writes them to `logs-otel-v1*` |
 | Results not linked to the agent trace | No `traceId` / `spanId` passed | Pass the ids of the agent span to `Benchmark.log()` or `score()` |
-| `evaluate()` throws about a Promise | The task or a scorer is async | Use `Benchmark` for async agents and judges |
+| `result.summary` is undefined after `evaluate()` | The task or a scorer is async, so `evaluate()` returned a Promise | `await evaluate(...)` |
 | Online evaluator finds no traces | Wrong service, agent name or time window, or the agent span is not a root | `listRootSpans()` filters on `serviceName` and `startTime`; check the `serviceName` passed to `register()`. A root is a span marked `derived.gen_ai.is_root` or a parentless `invoke_agent` / `create_agent` span: call `markAgentRoot()` in the agent's span or trace it with `observe({ op: Op.INVOKE_AGENT })`. When nothing matches, the SDK logs this rule once (`console.info`) |
 | A trace is graded twice | Two passes overlapped, or ran before the last results were indexed | Run one pass at a time, wait for the pipeline flush interval |
 | Runs show an id instead of a name | No `runName` | Pass `runName` to `evaluate()` or `new Benchmark()` |
