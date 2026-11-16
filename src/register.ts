@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright OpenSearch Contributors
 
-import { context, createContextKey, ROOT_CONTEXT } from "@opentelemetry/api";
+import { context, createContextKey, ROOT_CONTEXT, type TracerProvider } from "@opentelemetry/api";
 import { Resource } from "@opentelemetry/resources";
 import {
   BasicTracerProvider,
@@ -130,6 +130,16 @@ export interface RegisterOptions {
   serviceName?: string;
   serviceVersion?: string;
   batch?: boolean;
+  /**
+   * Turn on the installed instrumentations of AUTO_INSTRUMENTATIONS
+   * (`@opentelemetry/instrumentation-openai`, `@opentelemetry/instrumentation-aws-sdk`)
+   * with this provider. Default true. They patch the library when it is
+   * loaded, so register() must finish before `openai` or the AWS SDK is
+   * imported; in an ES module app, call register() in a module loaded with
+   * `node --import` after registering the `@opentelemetry/instrumentation/hook.mjs`
+   * loader hook (see the README). Pass false when you register these
+   * instrumentations yourself, else every call is traced twice.
+   */
   autoInstrument?: boolean;
   /**
    * Custom span exporter. Replaces the traces endpoint, protocol and sigv4 for
@@ -169,8 +179,27 @@ export interface RegisterOptions {
   agentVersion?: string;
 }
 
-const INSTRUMENTOR_PACKAGES = [
-  "@opentelemetry/instrumentation-openai",
+/** An OpenTelemetry JS instrumentation package register() turns on when it is installed. */
+export interface AutoInstrumentationSpec {
+  /** Package (or module URL) to import. */
+  packageName: string;
+  /** Name of the exported Instrumentation class. */
+  exportName: string;
+  /** Versions of the package that work with this SDK (OTel JS API 1.9), shown in warnings. */
+  supported: string;
+}
+
+/**
+ * Instrumentations `autoInstrument` turns on, when installed. The supported
+ * ranges are the releases built on `@opentelemetry/instrumentation` 0.2xx:
+ * later ones need `@opentelemetry/api` 1.10, and this SDK is on OTel JS 1.x
+ * (`@opentelemetry/api` 1.9).
+ */
+export const AUTO_INSTRUMENTATIONS: readonly AutoInstrumentationSpec[] = [
+  // Chat Completions, Responses and Embeddings of the `openai` package (>=4.19 <7).
+  { packageName: "@opentelemetry/instrumentation-openai", exportName: "OpenAIInstrumentation", supported: ">=0.14.0 <0.22.0" },
+  // AWS SDK for JavaScript v3: Bedrock Runtime calls (Converse, InvokeModel) become chat spans.
+  { packageName: "@opentelemetry/instrumentation-aws-sdk", exportName: "AwsInstrumentation", supported: ">=0.50.0 <0.79.0" },
 ];
 
 const SIGNAL_PATH_RE = /\/v1\/(traces|logs)$/;
@@ -565,19 +594,84 @@ function chainLoggerProvider(
   };
 }
 
-async function tryAutoInstrument(): Promise<void> {
-  for (const pkg of INSTRUMENTOR_PACKAGES) {
-    try {
-      const mod = await import(pkg);
-      if (typeof mod?.register === "function") {
-        mod.register();
-      } else if (typeof mod?.default?.register === "function") {
-        mod.default.register();
-      }
-    } catch {
-      // Package not installed, skip
+/** The part of the OTel JS `Instrumentation` interface register() uses. */
+interface InstrumentationLike {
+  setTracerProvider(provider: TracerProvider): void;
+  enable(): void;
+  isEnabled?(): boolean;
+}
+
+/** One instance per package and class for the process: a second register() must not patch twice. */
+const instrumentations = new Map<string, InstrumentationLike>();
+
+function isNotInstalled(err: unknown, packageName: string): boolean {
+  const e = err as { code?: string; message?: string } | undefined;
+  if (e?.code !== "ERR_MODULE_NOT_FOUND" && e?.code !== "MODULE_NOT_FOUND") return false;
+  // A missing dependency of an installed package is a broken install, not "not installed".
+  return (e.message ?? "").includes(`'${packageName}'`) || (e.message ?? "").includes(`"${packageName}"`);
+}
+
+function warnInstrumentation(spec: AutoInstrumentationSpec, reason: string): void {
+  console.warn(
+    `[opensearch-genai-observability-sdk-ts] register(): ${spec.packageName} is installed but was not ` +
+      `enabled: ${reason}. This SDK supports ${spec.packageName} ${spec.supported} (OpenTelemetry JS API 1.9). ` +
+      `Install a supported version, or pass autoInstrument: false and register it yourself.`,
+  );
+}
+
+async function loadInstrumentation(spec: AutoInstrumentationSpec): Promise<InstrumentationLike | undefined> {
+  let mod: Record<string, unknown>;
+  try {
+    mod = (await import(spec.packageName)) as Record<string, unknown>;
+  } catch (err) {
+    if (!isNotInstalled(err, spec.packageName)) {
+      warnInstrumentation(spec, err instanceof Error ? err.message : String(err));
     }
+    return undefined;
   }
+  const Ctor = mod[spec.exportName] ?? (mod.default as Record<string, unknown> | undefined)?.[spec.exportName];
+  if (typeof Ctor !== "function") {
+    warnInstrumentation(spec, `it has no ${spec.exportName} export`);
+    return undefined;
+  }
+  try {
+    return new (Ctor as new () => InstrumentationLike)();
+  } catch (err) {
+    warnInstrumentation(spec, err instanceof Error ? err.message : String(err));
+    return undefined;
+  }
+}
+
+/**
+ * Turn on each installed instrumentation of `specs` (default
+ * AUTO_INSTRUMENTATIONS) and point it at `provider`. A package that is not
+ * installed is skipped silently; one that fails to load (for example a release
+ * built for a newer `@opentelemetry/api`) logs a warning naming the supported
+ * versions. Each package is instantiated once per process; a later call only
+ * switches it to the new provider. Returns the package names that are on.
+ *
+ * Patching happens when the instrumented library is loaded, so this must run
+ * before the library is imported (see the README, "Auto-instrumentation").
+ */
+export async function autoInstrument(
+  provider: TracerProvider,
+  specs: readonly AutoInstrumentationSpec[] = AUTO_INSTRUMENTATIONS,
+): Promise<string[]> {
+  const enabled: string[] = [];
+  for (const spec of specs) {
+    const key = `${spec.packageName}#${spec.exportName}`;
+    let instrumentation = instrumentations.get(key);
+    if (!instrumentation) {
+      instrumentation = await loadInstrumentation(spec);
+      if (!instrumentation) continue;
+      instrumentations.set(key, instrumentation);
+    }
+    // What registerInstrumentations({ instrumentations, tracerProvider }) does.
+    instrumentation.setTracerProvider(provider);
+    if (instrumentation.isEnabled?.() !== true) instrumentation.enable();
+    enabled.push(spec.packageName);
+  }
+  return enabled;
 }
 
 const CONTEXT_PROBE = createContextKey("opensearch-genai-observability-sdk.contextProbe");
@@ -696,9 +790,8 @@ export async function register(
     chainLoggerProvider(provider, loggerProvider);
   }
 
-  const autoInstrument = options.autoInstrument ?? true;
-  if (autoInstrument) {
-    tryAutoInstrument().catch(() => {});
+  if (options.autoInstrument ?? true) {
+    await autoInstrument(provider);
   }
 
   return provider;
