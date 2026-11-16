@@ -818,10 +818,18 @@ function describeValue(value: unknown): string {
   return typeof value === 'object' ? 'an object' : `a ${typeof value}`;
 }
 
-/** Why `value` is not a usable EvalScore, or undefined when it is one. */
+/**
+ * `value` without its null fields: a JSON judge's `"explanation": null` means
+ * "not set", like a missing key, as on main where these were truthiness checks.
+ */
+function withoutNulls(value: object): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(value).filter(([, v]) => v !== null));
+}
+
+/** Why `value` is not a usable EvalScore, or undefined when it is one. Null fields count as unset. */
 function invalidEvalScore(value: unknown): string | undefined {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return describeValue(value);
-  const s = value as Record<string, unknown>;
+  const s = withoutNulls(value);
   if (typeof s.name !== 'string' || s.name === '') return 'an object without a string name';
   if (s.value !== undefined && (typeof s.value !== 'number' || !Number.isFinite(s.value))) {
     return `an EvalScore "${s.name}" whose value is ${describeValue(s.value)}`;
@@ -872,12 +880,12 @@ function scorerResultScores(result: unknown, evalName: string): EvalScore[] | st
   if (typeof result === 'number') {
     return Number.isFinite(result) ? [{ name: evalName, value: result }] : `returned ${result}`;
   }
-  const items = Array.isArray(result) ? result : [result];
+  const items: unknown[] = Array.isArray(result) ? result : [result];
   for (const item of items) {
     const reason = invalidEvalScore(item);
     if (reason) return `returned ${reason}`;
   }
-  return items as EvalScore[];
+  return items.map(item => withoutNulls(item as object) as unknown as EvalScore);
 }
 
 export interface EvaluateOptions {
@@ -987,7 +995,8 @@ export type EvaluateResult<O extends EvaluateOptions = EvaluateOptions> =
  * the case: an LLM judge's spans are its own trace and are not stamped.
  *
  * A scorer returns (or resolves to) a finite number, a boolean (a verdict),
- * an `EvalScore` or an `EvalScore[]`. A scorer that throws or rejects, or
+ * an `EvalScore` or an `EvalScore[]`; a `null` field of an EvalScore (as in
+ * parsed judge JSON) counts as unset. A scorer that throws or rejects, or
  * returns anything else (undefined, null, NaN, a malformed object; with a
  * warning), emits an evaluator error result (`error.type`, no value, no label,
  * no explanation) named after its declared `name` (else the function name).

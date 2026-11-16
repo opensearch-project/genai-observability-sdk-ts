@@ -3,7 +3,7 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { trace } from '@opentelemetry/api';
-import { Benchmark, evaluate, defineScorer } from '../src/benchmark.js';
+import { Benchmark, evaluate, defineScorer, type EvalScore } from '../src/benchmark.js';
 import { score } from '../src/score.js';
 import { withObserve } from '../src/observe.js';
 import { enrich } from '../src/enrich.js';
@@ -417,6 +417,36 @@ describe('returned EvalScore fields are validated like defineScorer()', () => {
       expect(result.cases[0].scorerErrors?.[0]).toContain(field);
     });
   }
+});
+
+describe('null optional EvalScore fields are unset', () => {
+  it('keeps a JSON judge score whose explanation, label and bounds are null', () => {
+    const judge = function rel() {
+      return JSON.parse(
+        '{"name":"rel","value":0.9,"explanation":null,"label":null,"threshold":null,"scoreMin":null,' +
+          '"scoreMax":null,"direction":null,"evaluatorType":null,"judgeModel":null,"metadata":null}',
+      ) as EvalScore;
+    };
+    const result = evaluate({ name: 'suite', task: tracedTask, data: [{ input: 'a' }], scores: [judge] });
+    expect(result.cases[0].resultStatus).toBe('pass');
+    expect(result.cases[0].scores).toEqual({ rel: 0.9 });
+    const [r] = getFinishedLogRecords();
+    expect(r.attributes['error.type']).toBeUndefined();
+    expect(r.attributes['gen_ai.evaluation.score.value']).toBe(0.9);
+    expect(r.attributes['gen_ai.evaluation.explanation']).toBeUndefined();
+  });
+
+  it('treats a null value as no value (a label-only score)', () => {
+    const judge = function verdict() {
+      return JSON.parse('{"name":"verdict","value":null,"label":"pass"}') as EvalScore;
+    };
+    const result = evaluate({ name: 'suite', task: tracedTask, data: [{ input: 'a' }], scores: [judge] });
+    expect(result.cases[0].resultStatus).toBe('pass');
+    expect(result.cases[0].scores).toEqual({});
+    const [r] = getFinishedLogRecords();
+    expect(r.attributes['gen_ai.evaluation.score.label']).toBe('pass');
+    expect(r.attributes['gen_ai.evaluation.score.value']).toBeUndefined();
+  });
 });
 
 describe('run labels stay off agent spans', () => {
