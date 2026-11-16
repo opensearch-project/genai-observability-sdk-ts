@@ -359,6 +359,15 @@ describe('judge context keys in metadata', () => {
     expect(plain.attributes['gen_ai.request.model']).toBe('from-metadata');
   });
 
+  it('a reserved-key warning does not silence the score() dropped-key hint for the same key', () => {
+    new Benchmark('suite', { metadata: { 'error.type': 'x' } }).close();
+    score({ name: 'a', value: 1, attributes: { 'error.type': 'y' } });
+    const messages = warnSpy.mock.calls.map((c) => String(c[0])).filter((m) => m.includes('error.type'));
+    expect(messages).toHaveLength(2);
+    expect(messages[0]).toContain('reserved');
+    expect(messages[1]).toContain('use the score() options');
+  });
+
   it('a dropped key is warned about once, not once per score', () => {
     const bm = new Benchmark('suite');
     for (let i = 0; i < 5; i++) {

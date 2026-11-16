@@ -102,18 +102,21 @@ export function validateMetadataKeys(
   context?: string,
 ): void {
   const prefix = context ? `[${context}] ` : "";
-  for (const key of firstWarnings(Object.keys(metadata).filter((k) => RESERVED_KEYS.has(k)))) {
+  for (const key of firstWarnings("reserved", Object.keys(metadata).filter((k) => RESERVED_KEYS.has(k)))) {
     console.warn(`${prefix}Key "${key}" is reserved and may be overwritten by the SDK (logged once per key).`);
   }
 }
 
-/** Keys already warned about as reserved or dropped: each is logged once per process. */
+/** `<warning>:<key>` already logged: each warning is logged once per key per process. */
 const warnedKeys = new Set<string>();
 
-/** @internal The keys of `keys` not warned about yet, now marked as warned. */
-export function firstWarnings(keys: string[]): string[] {
-  const fresh = keys.filter((k) => !warnedKeys.has(k));
-  for (const k of fresh) warnedKeys.add(k);
+/**
+ * @internal The keys of `keys` not warned about yet with `warning` (for example "reserved"),
+ * now marked as warned. Each warning has its own set, so one does not silence another.
+ */
+export function firstWarnings(warning: string, keys: string[]): string[] {
+  const fresh = keys.filter((k) => !warnedKeys.has(`${warning}:${k}`));
+  for (const k of fresh) warnedKeys.add(`${warning}:${k}`);
   return fresh;
 }
 

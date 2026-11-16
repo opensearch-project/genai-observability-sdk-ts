@@ -242,7 +242,7 @@ function extraAttributes(attributes: Record<string, unknown> | undefined): Attri
       attrs[k] = v;
     }
   }
-  const fresh = firstWarnings(dropped);
+  const fresh = firstWarnings("score-dropped", dropped);
   if (fresh.length > 0) {
     console.warn(
       `score(): dropped attributes the SDK sets itself (${fresh.map((k) => `"${k}"`).join(', ')}); ` +
