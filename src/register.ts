@@ -135,7 +135,8 @@ export interface RegisterOptions {
    * default) turns on `@opentelemetry/instrumentation-openai`; pass
    * `{ awsSdk: true }` to also turn on `@opentelemetry/instrumentation-aws-sdk`,
    * which traces every AWS SDK v3 client call (S3, DynamoDB, SQS, ...), not
-   * only Bedrock, so it is off by default. `false` turns on none.
+   * only Bedrock, so it is off by default. `false` (or another falsy value
+   * such as `null` from a JSON config) turns on none.
    *
    * They patch the library when it is loaded, so register() must finish
    * before `openai` or the AWS SDK is imported; in an ES module app, call
@@ -229,10 +230,17 @@ export const AWS_SDK_INSTRUMENTATION: AutoInstrumentationSpec = {
 /** Instrumentations `autoInstrument: true` (the default) turns on, when installed. */
 export const AUTO_INSTRUMENTATIONS: readonly AutoInstrumentationSpec[] = [OPENAI_INSTRUMENTATION];
 
-/** The instrumentations a `register({ autoInstrument })` value turns on. */
-function instrumentationsFor(option: boolean | AutoInstrumentOptions | undefined): AutoInstrumentationSpec[] {
-  if (option === false) return [];
-  const { openai = true, awsSdk = false } = option === undefined || option === true ? {} : option;
+/**
+ * @internal The instrumentations a `register({ autoInstrument })` value turns on. `undefined`
+ * is the default (OpenAI on); any other falsy value (`false`, `null`, `0`, `""` from a JS or
+ * JSON config) turns all off; an object is the option object; any other value is the default.
+ */
+export function instrumentationsFor(
+  option: boolean | AutoInstrumentOptions | null | undefined,
+): AutoInstrumentationSpec[] {
+  if (option === undefined) return [OPENAI_INSTRUMENTATION];
+  if (!option) return [];
+  const { openai = true, awsSdk = false } = typeof option === "object" ? option : {};
   return [...(openai ? [OPENAI_INSTRUMENTATION] : []), ...(awsSdk ? [AWS_SDK_INSTRUMENTATION] : [])];
 }
 
