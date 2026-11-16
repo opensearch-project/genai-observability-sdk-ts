@@ -52,7 +52,7 @@ export const TEST_CASE_EXPECTED_KEY = "opensearch.test.case.expected";
 /** `true` when `opensearch.test.case.expected` was truncated. */
 export const TEST_CASE_EXPECTED_TRUNCATED_KEY = "opensearch.test.case.expected_truncated";
 /** Maximum length of `opensearch.test.case.expected`, in characters. */
-export const EXPECTED_LIMIT = 32768;
+export const EXPECTED_LIMIT = 8192;
 
 /**
  * @internal `opensearch.test.case.expected` (and `_truncated` when cut) for a
@@ -91,14 +91,25 @@ export function validateMetadataKeys(
   metadata: Record<string, unknown>,
   context?: string,
 ): void {
-  for (const key of Object.keys(metadata)) {
-    if (RESERVED_KEYS.has(key)) {
-      const prefix = context ? `[${context}] ` : "";
-      console.warn(
-        `${prefix}Key "${key}" is reserved and may be overwritten by the SDK.`,
-      );
-    }
+  const prefix = context ? `[${context}] ` : "";
+  for (const key of firstWarnings(Object.keys(metadata).filter((k) => RESERVED_KEYS.has(k)))) {
+    console.warn(`${prefix}Key "${key}" is reserved and may be overwritten by the SDK (logged once per key).`);
   }
+}
+
+/** Keys already warned about as reserved or dropped: each is logged once per process. */
+const warnedKeys = new Set<string>();
+
+/** @internal The keys of `keys` not warned about yet, now marked as warned. */
+export function firstWarnings(keys: string[]): string[] {
+  const fresh = keys.filter((k) => !warnedKeys.has(k));
+  for (const k of fresh) warnedKeys.add(k);
+  return fresh;
+}
+
+/** @internal For tests: warn about every key again. */
+export function resetWarnedKeys(): void {
+  warnedKeys.clear();
 }
 
 /** Normalize a hex trace id (optional 0x prefix, left-padded). Returns null if invalid. */

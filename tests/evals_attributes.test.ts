@@ -8,6 +8,7 @@ import { score } from '../src/score.js';
 import { withObserve } from '../src/observe.js';
 import { enrich } from '../src/enrich.js';
 import { getFinishedLogRecords, getFinishedSpans, clearSpans } from './setup.js';
+import { resetWarnedKeys } from '../src/internal.js';
 
 const TRACE_ID = 'abcdef1234567890abcdef1234567890';
 const SPAN_ID = '1234567890abcdef';
@@ -17,6 +18,7 @@ let logSpy: ReturnType<typeof vi.spyOn>;
 
 beforeEach(() => {
   clearSpans();
+  resetWarnedKeys();
   warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
   logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
 });
@@ -165,17 +167,28 @@ describe('judge / evaluator context on score()', () => {
     expect(judgeSpan?.attributes['gen_ai.system_instructions']).toBe('You are a strict grader.');
   });
 
-  it('drops the judge keys from extra attributes', () => {
+  it('lets attributes set the judge keys, drops the system prompt; explicit options win', () => {
     score({
       name: 'x',
       value: 1,
-      attributes: { 'gen_ai.request.model': 'fake', 'gen_ai.system_instructions': 'leak', keep: 'yes' },
+      attributes: { 'gen_ai.request.model': 'gpt-4o', 'gen_ai.prompt.name': 'p', 'gen_ai.system_instructions': 'leak', keep: 'yes' },
     });
-    const [r] = getFinishedLogRecords();
-    expect(r.attributes['gen_ai.request.model']).toBeUndefined();
-    expect(r.attributes['gen_ai.system_instructions']).toBeUndefined();
-    expect(r.attributes.keep).toBe('yes');
-    expect(warnSpy).toHaveBeenCalled();
+    score({
+      name: 'y',
+      value: 1,
+      judgeModel: 'judge-model',
+      attributes: { 'gen_ai.request.model': 'gpt-4o', 'gen_ai.system_instructions': 'leak' },
+    });
+    const [x, y] = getFinishedLogRecords();
+    expect(x.attributes['gen_ai.request.model']).toBe('gpt-4o');
+    expect(x.attributes['gen_ai.prompt.name']).toBe('p');
+    expect(x.attributes['gen_ai.system_instructions']).toBeUndefined();
+    expect(x.attributes.keep).toBe('yes');
+    expect(y.attributes['gen_ai.request.model']).toBe('judge-model');
+    expect(y.attributes['gen_ai.system_instructions']).toBeUndefined();
+    // One warning for the dropped key, not one per score.
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    expect(warnSpy.mock.calls[0][0]).toContain('gen_ai.system_instructions');
   });
 });
 
@@ -306,5 +319,122 @@ describe('evaluator on EvalScore', () => {
     const [r] = getFinishedLogRecords();
     expect(r.attributes['error.type']).toBe('TimeoutError');
     expect(r.attributes['opensearch.gen_ai.evaluation.evaluator.name']).toBe('judge_x');
+  });
+});
+
+describe('judge context keys in metadata', () => {
+  it('Benchmark run, case and EvalScore metadata can set them, warning-free', () => {
+    const bm = new Benchmark('suite', { metadata: { 'gen_ai.request.model': 'gpt-4o' } });
+    bm.log({
+      traceId: TRACE_ID,
+      spanId: SPAN_ID,
+      metadata: { 'gen_ai.prompt.name': 'faithfulness' },
+      scores: [
+        { name: 'a', value: 1, metadata: { 'gen_ai.prompt.version': '2' } },
+        { name: 'b', value: 1, judgeModel: 'explicit', metadata: { 'gen_ai.request.model': 'meta' } },
+      ],
+    });
+    bm.close();
+    const [a, b] = getFinishedLogRecords();
+    expect(a.attributes['gen_ai.request.model']).toBe('gpt-4o');
+    expect(a.attributes['gen_ai.prompt.name']).toBe('faithfulness');
+    expect(a.attributes['gen_ai.prompt.version']).toBe('2');
+    // The explicit judge field wins over metadata.
+    expect(b.attributes['gen_ai.request.model']).toBe('explicit');
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+
+  it('evaluate() metadata can set them; a defineScorer() judge wins', () => {
+    const judged = defineScorer({ name: 'j', judgeModel: 'declared' }, function j() { return 1; });
+    evaluate({
+      name: 'suite',
+      task: tracedTask,
+      data: [{ input: 'a' }],
+      scores: [judged, function plain() { return 1; }],
+      metadata: { 'gen_ai.request.model': 'from-metadata' },
+    });
+    const [j, plain] = getFinishedLogRecords();
+    expect(j.attributes['gen_ai.request.model']).toBe('declared');
+    expect(plain.attributes['gen_ai.request.model']).toBe('from-metadata');
+  });
+
+  it('a dropped key is warned about once, not once per score', () => {
+    const bm = new Benchmark('suite');
+    for (let i = 0; i < 5; i++) {
+      bm.log({ input: i, scores: [{ name: 'a', value: 1, metadata: { 'gen_ai.evaluation.name': 'x' } }] });
+    }
+    bm.close();
+    const dropped = warnSpy.mock.calls.filter((c) => String(c[0]).includes('gen_ai.evaluation.name'));
+    expect(dropped).toHaveLength(1);
+  });
+});
+
+describe('scorer judge fields apply only to its own evaluator', () => {
+  const multi = defineScorer(
+    { name: 'judge', evaluator: 'my_judge', judgeModel: 'my-model', evaluatorDescription: 'mine', judgePromptName: 'p' },
+    function judge() {
+      return [
+        { name: 'own', value: 1 },
+        { name: 'same', value: 1, evaluator: 'my_judge' },
+        { name: 'other', value: 1, evaluator: 'deepeval.faithfulness' },
+      ];
+    },
+  );
+
+  it('stamps them on unset or matching evaluators only', () => {
+    evaluate({ name: 'suite', task: tracedTask, data: [{ input: 'a' }], scores: [multi] });
+    const byName = Object.fromEntries(getFinishedLogRecords().map((r) => [r.attributes['gen_ai.evaluation.name'], r]));
+    for (const n of ['own', 'same']) {
+      expect(byName[n].attributes['gen_ai.request.model']).toBe('my-model');
+      expect(byName[n].attributes['opensearch.gen_ai.evaluation.evaluator.description']).toBe('mine');
+      expect(byName[n].attributes['gen_ai.prompt.name']).toBe('p');
+    }
+    const other = byName['other'].attributes;
+    expect(other['opensearch.gen_ai.evaluation.evaluator.name']).toBe('deepeval.faithfulness');
+    expect(other['gen_ai.request.model']).toBeUndefined();
+    expect(other['opensearch.gen_ai.evaluation.evaluator.description']).toBeUndefined();
+    expect(other['gen_ai.prompt.name']).toBeUndefined();
+  });
+});
+
+describe('returned EvalScore fields are validated like defineScorer()', () => {
+  for (const [field, bad] of [
+    ['evaluatorType', 'llm-judge'],
+    ['judgeModel', 123],
+    ['judgePromptName', {}],
+    ['judgePromptVersion', 2],
+    ['evaluatorDescription', false],
+    ['direction', 'up'],
+    ['threshold', Number.NaN],
+  ] as const) {
+    it(`rejects ${field}: ${String(bad)}`, () => {
+      const s = function q() { return { name: 'q', value: 1, [field]: bad }; };
+      const result = evaluate({ name: 'suite', task: tracedTask, data: [{ input: 'a' }], scores: [s as never] });
+      const [r] = getFinishedLogRecords();
+      expect(r.attributes['error.type']).toBe('TypeError');
+      expect(r.attributes['opensearch.gen_ai.evaluation.evaluator.type']).toBeUndefined();
+      expect(r.attributes['gen_ai.request.model']).toBeUndefined();
+      expect(result.cases[0].scorerErrors?.[0]).toContain(field);
+    });
+  }
+});
+
+describe('run labels stay off agent spans', () => {
+  it('evaluate() runName / runDescription are on results, not on the agent root span', () => {
+    evaluate({
+      name: 'suite',
+      runName: 'nightly',
+      runDescription: 'desc',
+      task: (q) => withObserve('agent', { op: 'invoke_agent' }, () => `a:${String(q)}`),
+      data: [{ input: 'a' }],
+      scores: [function one() { return 1; }],
+    });
+    const root = getFinishedSpans().find((sp) => sp.name === 'invoke_agent agent');
+    expect(root).toBeDefined();
+    expect(root!.attributes['test.suite.run.id']).toBeDefined();
+    expect(root!.attributes['opensearch.test.suite.run.name']).toBeUndefined();
+    expect(root!.attributes['opensearch.test.suite.run.description']).toBeUndefined();
+    const [r] = getFinishedLogRecords();
+    expect(r.attributes['opensearch.test.suite.run.name']).toBe('nightly');
   });
 });

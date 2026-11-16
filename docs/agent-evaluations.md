@@ -83,19 +83,20 @@ Attributes (each is set only when it has a value):
 | `opensearch.gen_ai.evaluation.score.direction` | OpenSearch | all | `maximize` or `minimize` |
 | `opensearch.gen_ai.evaluation.judge.trace_id` | OpenSearch | all | Trace of the judge's own run |
 | `opensearch.gen_ai.evaluation.evaluator.description` | OpenSearch | all | What the evaluator checks (criteria or rubric summary) |
-| `gen_ai.request.model` | OTel | all | Model used by the LLM judge |
-| `gen_ai.prompt.name` | OTel | all | Name of the judge prompt template |
-| `gen_ai.prompt.version` | OTel | all | Version of the judge prompt (`name@version` identifies the prompt) |
+| `gen_ai.request.model` | OTel | all (also settable through metadata) | Model used by the LLM judge |
+| `gen_ai.prompt.name` | OTel | all (also settable through metadata) | Name of the judge prompt template |
+| `gen_ai.prompt.version` | OTel | all (also settable through metadata) | Version of the judge prompt (`name@version` identifies the prompt) |
 | `opensearch.test.suite.run.name` | OpenSearch | offline | Human-readable run name, for example `v5 with shorter prompt` |
 | `opensearch.test.suite.run.description` | OpenSearch | offline | Free text about the run, up to 1024 characters |
-| `opensearch.test.case.expected` | OpenSearch | offline | Expected output of the case, up to 32768 characters |
+| `opensearch.test.case.expected` | OpenSearch | offline | Expected output of the case, up to 8192 characters |
 | `opensearch.test.case.expected_truncated` | OpenSearch | offline | `true` when the expected output was cut |
 
 - Result events never carry the judge's system prompt (`gen_ai.system_instructions`): it goes on the judge's own LLM span. See [Judge prompt](#judge-prompt).
 - "OTel" names are in the OTel semantic conventions registry. `test.suite.run.id` and `test.case.id` are proposed in [semantic-conventions#1262](https://github.com/open-telemetry/semantic-conventions/issues/1262) and [semantic-conventions-genai#79](https://github.com/open-telemetry/semantic-conventions-genai/issues/79).
 - `opensearch.gen_ai.evaluation.*` names mirror the OTel `gen_ai.evaluation.*` names for fields OTel does not define yet.
 - "offline" means `evaluate()` and `Benchmark.log()`. `score()` sets the `test.*` and `opensearch.test.case.*` keys only if you pass them in `attributes`.
-- Run and case metadata you pass are added to the events too. Metadata cannot set `test.suite.*`, `test.case.*`, `cicd.pipeline.*`, `error.type`, `opensearch.test.case.*` or `opensearch.test.suite.run.*`: those keys are dropped with a warning.
+- Run, case and score metadata you pass are added to the events too. Metadata cannot set `test.suite.*`, `test.case.*`, `cicd.pipeline.*`, `error.type`, `opensearch.test.case.*` or `opensearch.test.suite.run.*`: those keys are dropped, with one warning per key per process.
+- Metadata (`new Benchmark({ metadata })`, `log({ metadata })`, `EvalScore.metadata`, `evaluate({ metadata })`) and `score({ attributes })` can set the judge context keys `gen_ai.request.model`, `gen_ai.prompt.name` and `gen_ai.prompt.version`, for example `new Benchmark('rag', { metadata: { 'gen_ai.request.model': 'gpt-4o' } })` for DeepEval or Ragas results. The explicit judge fields (`judgeModel`, `judgePromptName`, `judgePromptVersion` on `score()`, `defineScorer()` or an `EvalScore`) win when both are set. On a result event `gen_ai.request.model` is the judge's model, not the agent's.
 
 ## Setup
 
@@ -220,7 +221,7 @@ So the stored label always matches the local case status of `evaluate()` and `Be
 
 - `scoreMin` / `scoreMax` record the scale (`opensearch.gen_ai.evaluation.score.min` / `.max`), so a 1 to 5 judge and a 0 to 1 check can be read side by side.
 - `evaluator`, `evaluatorVersion` and `evaluatorType` name the evaluator (`opensearch.gen_ai.evaluation.evaluator.*`). The instrumentation scope is always the SDK.
-- `attributes` adds your own keys. Keys the SDK sets (`gen_ai.evaluation.*`, `opensearch.gen_ai.evaluation.*`, `error.type`, `gen_ai.response.id`, `gen_ai.conversation.id`, `gen_ai.agent.*`, `gen_ai.request.model`, `gen_ai.prompt.name` / `.version`, `gen_ai.system_instructions`) are dropped with a warning; use the `score()` options for them.
+- `attributes` adds your own keys. Keys the SDK sets (`gen_ai.evaluation.*`, `opensearch.gen_ai.evaluation.*`, `error.type`, `gen_ai.response.id`, `gen_ai.conversation.id`, `gen_ai.agent.*`, `gen_ai.system_instructions`) are dropped, with one warning per key per process; use the `score()` options for them. The judge context keys (`gen_ai.request.model`, `gen_ai.prompt.name` / `.version`) pass through; `judgeModel` / `judgePromptName` / `judgePromptVersion` win over them.
 
 ### Judge context
 
@@ -233,7 +234,7 @@ Record how an LLM judge graded, so a reader can tell two judge setups apart:
 | `judgePromptName` | `gen_ai.prompt.name`: the judge prompt template |
 | `judgePromptVersion` | `gen_ai.prompt.version`: its version |
 
-They are `score()` options and `defineScorer()` fields (also `EvalScore` fields, which win over the declaration). There is no option for the judge's full system prompt: see [Judge prompt](#judge-prompt).
+They are `score()` options and `defineScorer()` fields (also `EvalScore` fields, which win over the declaration). A `defineScorer()` description and judge fields apply to a returned `EvalScore` only when its `evaluator` is unset or equals the scorer's `evaluator`, so a scorer that returns results of other evaluators (for example `deepeval.faithfulness`) does not stamp its own judge on them. A returned `EvalScore` is checked like `defineScorer()`: an unknown `evaluatorType` or `direction`, or a non-string judge field, records an error result. There is no option for the judge's full system prompt: see [Judge prompt](#judge-prompt).
 
 ```typescript
 import { score } from "@opensearch-project/genai-observability-sdk-ts";
@@ -440,7 +441,8 @@ const { answer, traceId, spanId } = await ask("Capital of France?");
 The `expected` value of an `evaluate()` case, or `Benchmark.log({ expected })`, is set on every `gen_ai.evaluation.result` of that case (error results included) as `opensearch.test.case.expected`:
 
 - Strings are kept as-is. Other values are JSON-encoded with `JSON.stringify` (compact, non-ASCII kept), for example `{"city":"Lima"}`.
-- Values longer than 32768 characters are cut to 32768 and `opensearch.test.case.expected_truncated` is set to `true`. The index stores the whole value and shows it on the result; only values up to 256 characters are indexed for filters (see [Evaluation index](#evaluation-index)).
+- Values longer than 8192 characters are cut to 8192 and `opensearch.test.case.expected_truncated` is set to `true`. The index stores the whole value and shows it on the result; only values up to 256 characters are indexed for filters (see [Evaluation index](#evaluation-index)).
+- Request size: the value is copied onto every result of the case, so it multiplies the size of an OTLP logs request. With the default batch of 512 log records and 8 KB expected values, a request is about 4 MB before compression. Data Prepper's `otlp` sources reject requests over `max_request_length` (10 MB by default) and OSIS caps them at 1 MB to 4 MB, with a 413. If your expected outputs are large, or you send to OSIS, lower the batch size: set your own global `LoggerProvider` with `new BatchLogRecordProcessor({ exporter, maxExportBatchSize: 64 })` (plus `TraceOnlyContextProcessor` and `sendScoresAsDouble(exporter)`, see [Setup](#setup)); `register()` keeps a global provider you set.
 - `undefined` and `null` send neither key.
 - It is not put on the agent's spans, and online `score()` never sets it.
 - It is exported by default. If your test sets hold sensitive data, pass `recordExpected: false` to `evaluate()` or `new Benchmark()`: neither `opensearch.test.case.expected` nor `opensearch.test.case.expected_truncated` is then written. The value is still on the local result.

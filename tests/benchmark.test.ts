@@ -1148,17 +1148,17 @@ describe('expected output on evaluation results', () => {
     spy.mockRestore();
   });
 
-  it('truncates to 32768 characters and flags it', () => {
+  it('truncates to 8192 characters and flags it', () => {
     const spy = silence();
     const bm = new Benchmark('exp');
     bm.log({ input: 'q', expected: 'x'.repeat(40000), scores: { accuracy: 1 } });
-    bm.log({ input: 'r', expected: 'y'.repeat(32768), scores: { accuracy: 1 } });
+    bm.log({ input: 'r', expected: 'y'.repeat(8192), scores: { accuracy: 1 } });
     bm.log({ input: 's', expected: 'z'.repeat(5000), scores: { accuracy: 1 } });
     bm.close();
     const [long, exact, mid] = scoreRecords();
-    expect(long.attributes[EXPECTED]).toBe('x'.repeat(32768));
+    expect(long.attributes[EXPECTED]).toBe('x'.repeat(8192));
     expect(long.attributes[TRUNCATED]).toBe(true);
-    expect(exact.attributes[EXPECTED]).toBe('y'.repeat(32768));
+    expect(exact.attributes[EXPECTED]).toBe('y'.repeat(8192));
     expect(exact.attributes[TRUNCATED]).toBeUndefined();
     // Above the old 4096 cap: kept whole.
     expect(mid.attributes[EXPECTED]).toBe('z'.repeat(5000));

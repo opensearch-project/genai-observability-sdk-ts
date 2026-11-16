@@ -475,7 +475,7 @@ sendScoresAsDouble(exporter); // returns false, and changes nothing, for a JSON 
 | `judgeModel` | `string` | `gen_ai.request.model` | Model used by the LLM judge |
 | `judgePromptName` | `string` | `gen_ai.prompt.name` | Name of the judge prompt template |
 | `judgePromptVersion` | `string` | `gen_ai.prompt.version` | Version of the judge prompt |
-| `attributes` | `Record<string, unknown>` | | Extra string, number, or boolean attributes. SDK keys (`gen_ai.evaluation.*`, `opensearch.gen_ai.evaluation.*`, `error.type`, `gen_ai.response.id`, `gen_ai.conversation.id`, `gen_ai.agent.*`, `gen_ai.request.model`, `gen_ai.prompt.*`, `gen_ai.system_instructions`) are dropped with a warning; the options win |
+| `attributes` | `Record<string, unknown>` | | Extra string, number, or boolean attributes. SDK keys (`gen_ai.evaluation.*`, `opensearch.gen_ai.evaluation.*`, `error.type`, `gen_ai.response.id`, `gen_ai.conversation.id`, `gen_ai.agent.*`, `gen_ai.system_instructions`) are dropped, with one warning per key per process; the options win. The judge keys `gen_ai.request.model` and `gen_ai.prompt.*` pass through; `judgeModel` / `judgePrompt*` win over them |
 
 `opensearch.gen_ai.evaluation.*` attributes are OpenSearch extensions for fields that are still proposals in the GenAI semantic conventions. They will move to `gen_ai.*` names when those proposals merge.
 
@@ -527,7 +527,7 @@ trace (one per case)                        the agent run, unchanged
 
 Each `gen_ai.evaluation.result` carries `test.suite.name`, `test.suite.run.id`, `test.case.id`, `test.case.name`, `gen_ai.agent.name` / `gen_ai.agent.version` when known, `opensearch.test.case.expected` when the case has an `expected`, and the run `metadata` (reserved keys are dropped; the score's own `metadata` and the SDK attributes win). Pass/fail/error counts are not sent: readers derive them from the results of a run. The summary `evaluate()` returns is computed locally.
 
-**Expected output.** When a case has `expected`, every result of the case (including error results) carries it as `opensearch.test.case.expected`: strings as is, other values `JSON.stringify`'d. It is truncated to 32768 characters; a truncated value also sets `opensearch.test.case.expected_truncated = true`. It is not put on the agent spans. Online `score()` never sets it; pass it in `attributes` if you want it there. It is exported by default; if your test sets hold sensitive data, pass `recordExpected: false` to `evaluate()` or `new Benchmark()`, and neither attribute is written.
+**Expected output.** When a case has `expected`, every result of the case (including error results) carries it as `opensearch.test.case.expected`: strings as is, other values `JSON.stringify`'d. It is truncated to 8192 characters (it is copied onto every result, so it grows each OTLP request; see [Expected output](docs/agent-evaluations.md#expected-output) for tuning the log batch size); a truncated value also sets `opensearch.test.case.expected_truncated = true`. It is not put on the agent spans. Online `score()` never sets it; pass it in `attributes` if you want it there. It is exported by default; if your test sets hold sensitive data, pass `recordExpected: false` to `evaluate()` or `new Benchmark()`, and neither attribute is written.
 
 `test.suite.run.id` and `test.case.id` are proposed OTel attributes ([semantic-conventions#1262](https://github.com/open-telemetry/semantic-conventions/issues/1262), [semantic-conventions-genai#79](https://github.com/open-telemetry/semantic-conventions-genai/issues/79)); the other `test.*` names are OTel's.
 
@@ -553,7 +553,7 @@ const provider = new BasicTracerProvider({
 | `task` | `(input: unknown) => unknown` | Synchronous function that takes input and returns output |
 | `data` | `Array<{ input, expected?, caseId?, caseName? }>` | Test cases |
 | `scores` | `Array<ScorerFn \| Scorer>` | Scorer functions: `(input, output, expected)` returning, synchronously, `EvalScore`, `EvalScore[]`, a finite `number`, or `boolean`. Anything else logs a warning and emits an error result. Optionally wrapped with `defineScorer()` |
-| `metadata` | `Record<string, unknown>` | Copied to every `gen_ai.evaluation.result` of the run. Reserved keys are filtered |
+| `metadata` | `Record<string, unknown>` | Copied to every `gen_ai.evaluation.result` of the run. Reserved keys are filtered, with one warning per key per process. The judge keys `gen_ai.request.model` and `gen_ai.prompt.*` are allowed; `defineScorer()` judge fields win over them |
 | `runName` | `string` | `opensearch.test.suite.run.name` on every result: a readable run name, for example `"v5 with shorter prompt"`. Also a `new Benchmark()` option |
 | `runDescription` | `string` | `opensearch.test.suite.run.description` on every result (cut at 1024 characters). Also a `new Benchmark()` option |
 | `runId` | `string` | `test.suite.run.id` (default: generated). Use the same id from every CI shard so they report into one run, or an existing run's id to re-score it (send new results with the same run id). Empty or whitespace-only throws |

@@ -13,6 +13,7 @@ import { SeverityNumber } from '@opentelemetry/api-logs';
 import {
   AGENT_NAME_KEY,
   AGENT_VERSION_KEY,
+  firstWarnings,
   normalizeSpanId,
   normalizeTraceId,
   resolveAgent,
@@ -44,16 +45,18 @@ export const JUDGE_PROMPT_VERSION_KEY = "gen_ai.prompt.version";
  */
 const JUDGE_SYSTEM_INSTRUCTIONS_KEY = "gen_ai.system_instructions";
 
-/** Exact attribute keys score() owns; `attributes` cannot set them. */
+/**
+ * Exact attribute keys score() owns; `attributes` cannot set them. The judge context keys
+ * (`gen_ai.request.model`, `gen_ai.prompt.name`, `gen_ai.prompt.version`) are not here: metadata
+ * and `attributes` may set them (for example a Benchmark upload of DeepEval or Ragas results),
+ * and the explicit judge options win when both are set.
+ */
 const SDK_OWNED_KEYS: ReadonlySet<string> = new Set([
   "error.type",
   "gen_ai.response.id",
   "gen_ai.conversation.id",
   AGENT_NAME_KEY,
   AGENT_VERSION_KEY,
-  JUDGE_MODEL_KEY,
-  JUDGE_PROMPT_NAME_KEY,
-  JUDGE_PROMPT_VERSION_KEY,
   JUDGE_SYSTEM_INSTRUCTIONS_KEY,
 ]);
 /** Attribute namespaces score() owns: `gen_ai.evaluation.*` and `opensearch.gen_ai.evaluation.*`. */
@@ -153,9 +156,10 @@ export interface ScoreOptions {
    * Extra attributes (string, number, boolean), for example `test.*` grouping
    * keys. Keys the SDK sets itself (`gen_ai.evaluation.*`,
    * `opensearch.gen_ai.evaluation.*`, `error.type`, `gen_ai.response.id`,
-   * `gen_ai.conversation.id`, `gen_ai.agent.*`, `gen_ai.request.model`,
-   * `gen_ai.prompt.name` / `.version`, `gen_ai.system_instructions`) are dropped with a warning:
-   * use the options instead.
+   * `gen_ai.conversation.id`, `gen_ai.agent.*`, `gen_ai.system_instructions`) are dropped, with
+   * one warning per key per process: use the options instead. The judge context keys
+   * `gen_ai.request.model` and `gen_ai.prompt.name` / `.version` pass through; `judgeModel` /
+   * `judgePromptName` / `judgePromptVersion` win over them.
    */
   attributes?: Record<string, unknown>;
 }
@@ -238,10 +242,11 @@ function extraAttributes(attributes: Record<string, unknown> | undefined): Attri
       attrs[k] = v;
     }
   }
-  if (dropped.length > 0) {
+  const fresh = firstWarnings(dropped);
+  if (fresh.length > 0) {
     console.warn(
-      `score(): dropped attributes the SDK sets itself (${dropped.map((k) => `"${k}"`).join(', ')}); ` +
-        `use the score() options instead`,
+      `score(): dropped attributes the SDK sets itself (${fresh.map((k) => `"${k}"`).join(', ')}); ` +
+        `use the score() options instead (each key is logged once)`,
     );
   }
   return attrs;

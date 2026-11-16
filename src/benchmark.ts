@@ -192,15 +192,24 @@ function specOf(fn: ScorerFn): ScorerSpec | undefined {
   return (fn as Partial<Scorer>).scorerSpec;
 }
 
-/** Fill unset rule fields of a score from its scorer's declaration. */
+/**
+ * Fill unset rule fields of a score from its scorer's declaration. The description and judge
+ * fields are filled only for the scorer's own evaluator: a score whose `evaluator` is unset or
+ * equals the declared one. A scorer that returns results of other evaluators (for example
+ * `{ evaluator: 'deepeval.faithfulness' }`) does not stamp its own judge on them.
+ */
 function applySpec(s: EvalScore, spec?: ScorerSpec): EvalScore {
   if (!spec) return s;
-  return {
+  const rule: EvalScore = {
     ...s,
     threshold: s.threshold ?? spec.threshold,
     direction: s.direction ?? spec.direction,
     scoreMin: s.scoreMin ?? spec.scoreMin,
     scoreMax: s.scoreMax ?? spec.scoreMax,
+  };
+  if (s.evaluator !== undefined && s.evaluator !== spec.evaluator) return rule;
+  return {
+    ...rule,
     evaluatorDescription: s.evaluatorDescription ?? spec.evaluatorDescription,
     judgeModel: s.judgeModel ?? spec.judgeModel,
     judgePromptName: s.judgePromptName ?? spec.judgePromptName,
@@ -611,7 +620,7 @@ export class Benchmark {
     /**
      * Expected output. Sent on every result of the case as
      * `opensearch.test.case.expected` (strings as is, other values
-     * JSON.stringify'd, truncated to 32768 characters), unless the Benchmark
+     * JSON.stringify'd, truncated to 8192 characters), unless the Benchmark
      * was created with `recordExpected: false`.
      */
     expected?: unknown;
@@ -767,6 +776,32 @@ function invalidEvalScore(value: unknown): string | undefined {
   }
   if (s.label !== undefined && typeof s.label !== 'string') {
     return `an EvalScore "${s.name}" whose label is not a string`;
+  }
+  // Same checks as defineScorer(), so a returned EvalScore cannot write values it would reject.
+  if (s.evaluatorType !== undefined && !EVALUATOR_TYPES.includes(s.evaluatorType as EvaluatorType)) {
+    return `an EvalScore "${s.name}" whose evaluatorType is not one of ${EVALUATOR_TYPES.join(', ')}`;
+  }
+  if (s.direction !== undefined && !DIRECTIONS.includes(s.direction as ScoreDirection)) {
+    return `an EvalScore "${s.name}" whose direction is not one of ${DIRECTIONS.join(', ')}`;
+  }
+  for (const key of ['threshold', 'scoreMin', 'scoreMax'] as const) {
+    const v = s[key];
+    if (v !== undefined && (typeof v !== 'number' || !Number.isFinite(v))) {
+      return `an EvalScore "${s.name}" whose ${key} is not a finite number`;
+    }
+  }
+  for (const key of [
+    'evaluator',
+    'evaluatorDescription',
+    'judgeModel',
+    'judgePromptName',
+    'judgePromptVersion',
+    'judgeTraceId',
+    'explanation',
+  ] as const) {
+    if (s[key] !== undefined && typeof s[key] !== 'string') {
+      return `an EvalScore "${s.name}" whose ${key} is not a string`;
+    }
   }
   return undefined;
 }

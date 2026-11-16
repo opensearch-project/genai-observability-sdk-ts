@@ -6,6 +6,7 @@ import { trace } from '@opentelemetry/api';
 import { SeverityNumber } from '@opentelemetry/api-logs';
 import { score, EVALUATION_RESULT_EVENT, JUDGE_LABEL_KEY } from '../src/score.js';
 import { SDK_SCOPE_NAME, SDK_VERSION } from '../src/version.js';
+import { resetWarnedKeys } from '../src/internal.js';
 import { getFinishedSpans, getFinishedLogRecords, clearSpans } from './setup.js';
 
 const TRACE_ID = 'abcdef1234567890abcdef1234567890';
@@ -15,6 +16,7 @@ let warnSpy: ReturnType<typeof vi.spyOn>;
 
 beforeEach(() => {
   clearSpans();
+  resetWarnedKeys();
   warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
 });
 afterEach(() => {
