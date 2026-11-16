@@ -8,8 +8,6 @@
  */
 
 import { readFileSync } from 'node:fs';
-import { context } from '@opentelemetry/api';
-import { AsyncLocalStorageContextManager } from '@opentelemetry/context-async-hooks';
 import {
   BedrockRuntimeClient,
   ConverseCommand,
@@ -18,10 +16,6 @@ import {
   type Tool,
 } from '@aws-sdk/client-bedrock-runtime';
 import { Op, enrich, observe, withObserve } from '@opensearch-project/genai-observability-sdk-ts';
-
-// Async code keeps the active span only with a context manager. Without it the
-// chat and execute_tool spans would not nest under the agent span.
-context.setGlobalContextManager(new AsyncLocalStorageContextManager().enable());
 
 export const AGENT_NAME = 'travel_assistant';
 export const SERVICE_NAME = 'travel-assistant-evals-native';
@@ -143,17 +137,14 @@ export interface AgentRun {
   spanId: string;
 }
 
-/**
- * Run the agent on one question, as its own trace. `attributes` are set on the
- * agent span (the offline eval passes the test.* ids of the case).
- */
+/** Run the agent on one question, as its own trace. */
 export function runAgent(
   question: string,
-  options: { systemPrompt?: string; version?: string; attributes?: Record<string, string> } = {},
+  options: { systemPrompt?: string; version?: string } = {},
 ): Promise<AgentRun> {
   const system = options.systemPrompt ?? SYSTEM_PROMPT;
   return withObserve(AGENT_NAME, { op: Op.INVOKE_AGENT }, async (span) => {
-    span.setAttributes({ ...(options.attributes ?? {}), 'gen_ai.agent.version': options.version ?? 'v1' });
+    span.setAttribute('gen_ai.agent.version', options.version ?? 'v1');
     enrich({ model: MODEL_ID, provider: 'aws.bedrock', systemInstructions: system, inputMessages: text('user', question) });
     const { traceId, spanId } = span.spanContext();
     const toolsCalled: string[] = [];

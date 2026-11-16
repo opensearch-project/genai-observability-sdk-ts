@@ -6,19 +6,14 @@
  *
  *   npx tsx offline.ts
  *
- * Each prompt version is one run of the suite with its own run name, so the two runs
- * can be compared in OpenSearch Dashboards (Evaluations > the suite > Compare). Every
- * case is its own agent trace; each score is one gen_ai.evaluation.result event
- * linked to the agent's root span.
- *
- * Why Benchmark and not evaluate(): in TypeScript the agent and the LLM judge are
- * async, and evaluate() takes a synchronous task and synchronous scorers. So each
- * case is run and scored here, and uploaded with Benchmark.log(), linked to the
- * agent span (traceId + spanId). The agent span gets the same test.* ids that
- * evaluate() would stamp on it.
+ * Each run is one evaluate() call with its own run name, so the two runs can be
+ * compared in OpenSearch Dashboards (Evaluations > the suite > Compare). Every case
+ * is its own agent trace; each scorer result is one gen_ai.evaluation.result event
+ * linked to the agent's root span. The agent and the LLM judge are async:
+ * evaluate() awaits them and returns a Promise.
  */
 
-import { Benchmark, register, type EvalScore } from '@opensearch-project/genai-observability-sdk-ts';
+import { defineScorer, evaluate, register, type EvalScore } from '@opensearch-project/genai-observability-sdk-ts';
 import { AGENT_NAME, SERVICE_NAME, SYSTEM_PROMPT, loadTestSuite, runAgent } from './agent.js';
 import {
   JUDGE_DESCRIPTION,
@@ -38,87 +33,68 @@ const PROMPTS: Record<string, string> = {
 
 const provider = await register({ serviceName: SERVICE_NAME, agentName: AGENT_NAME });
 
+const toolData = defineScorer(
+  {
+    name: 'uses_tool_data',
+    evaluator: 'uses_tool_data',
+    evaluatorType: 'code',
+    evaluatorDescription: "Names the city's weather and one of its events, or says there is no data",
+  },
+  (input, output): EvalScore => {
+    const { passed, why } = usesToolData(String(input), String(output));
+    return { name: 'uses_tool_data', value: passed ? 1 : 0, passed, explanation: why };
+  },
+);
+
+const answerLength = defineScorer(
+  {
+    name: 'answer_length',
+    threshold: 500,
+    direction: 'minimize',
+    evaluator: 'answer_length',
+    evaluatorType: 'code',
+    evaluatorDescription: 'Answer length in characters, at most 500',
+  },
+  (_input, output) => String(output).length,
+);
+
+// The LLM judge, with its context (model, prompt name and version, description).
+// It runs after the agent, as its own trace; judgeTraceId links the result to it.
+const planQuality = defineScorer(
+  {
+    name: 'plan_quality',
+    threshold: 4,
+    scoreMin: 1,
+    scoreMax: 5,
+    evaluator: JUDGE_NAME,
+    evaluatorType: 'llm_judge',
+    evaluatorDescription: JUDGE_DESCRIPTION,
+    judgeModel: JUDGE_MODEL_ID,
+    judgePromptName: JUDGE_PROMPT_NAME,
+    judgePromptVersion: JUDGE_PROMPT_VERSION,
+  },
+  async (input, output, expected): Promise<EvalScore> => {
+    const verdict = await judgePlan(String(input), String(expected), String(output));
+    return { name: 'plan_quality', value: verdict.score, explanation: verdict.reason, judgeTraceId: verdict.traceId };
+  },
+);
+
+const data = loadTestSuite().map((tc) => ({ input: tc.input, expected: tc.expected, caseId: tc.id, caseName: tc.name }));
+
 for (const [version, prompt] of Object.entries(PROMPTS)) {
-  const bench = new Benchmark(SUITE, {
+  const result = await evaluate({
+    name: SUITE,
+    task: async (question) => (await runAgent(String(question), { systemPrompt: prompt, version })).answer,
+    data,
+    scores: [toolData, answerLength, planQuality],
+    agentVersion: version,
     runName: `${version} prompt`,
     runDescription: `System prompt ${version}: ${prompt}`,
-    agentName: AGENT_NAME,
-    agentVersion: version,
   });
-
-  for (const tc of loadTestSuite()) {
-    // The agent run, with the test.* ids of the case on its root span.
-    const run = await runAgent(tc.input, {
-      systemPrompt: prompt,
-      version,
-      attributes: {
-        'test.suite.name': SUITE,
-        'test.suite.run.id': bench.runId,
-        'test.case.id': tc.id,
-        'test.case.name': tc.name,
-      },
-    });
-
-    // Deterministic scorers.
-    const toolData = usesToolData(tc.input, run.answer);
-    const scores: EvalScore[] = [
-      {
-        name: 'uses_tool_data',
-        value: toolData.passed ? 1 : 0,
-        passed: toolData.passed,
-        explanation: `${toolData.why}; tools called: ${run.toolsCalled.join(', ') || 'none'}`,
-        evaluator: 'uses_tool_data',
-        evaluatorType: 'code',
-        evaluatorDescription: "Names the city's weather and one of its events, or says there is no data",
-      },
-      {
-        name: 'answer_length',
-        value: run.answer.length,
-        threshold: 500,
-        direction: 'minimize',
-        evaluator: 'answer_length',
-        evaluatorType: 'code',
-        evaluatorDescription: 'Answer length in characters, at most 500',
-      },
-    ];
-
-    // The LLM judge, with its context (model, prompt name and version, description).
-    try {
-      const verdict = await judgePlan(tc.input, tc.expected, run.answer);
-      scores.push({
-        name: 'plan_quality',
-        value: verdict.score,
-        explanation: verdict.reason,
-        threshold: 4,
-        scoreMin: 1,
-        scoreMax: 5,
-        evaluator: JUDGE_NAME,
-        evaluatorType: 'llm_judge',
-        evaluatorDescription: JUDGE_DESCRIPTION,
-        judgeModel: JUDGE_MODEL_ID,
-        judgePromptName: JUDGE_PROMPT_NAME,
-        judgePromptVersion: JUDGE_PROMPT_VERSION,
-        judgeTraceId: verdict.traceId,
-      });
-    } catch (e) {
-      console.warn(`  ${tc.id}: judge failed, no plan_quality score: ${(e as Error).message}`);
-    }
-
-    bench.log({
-      input: tc.input,
-      output: run.answer,
-      expected: tc.expected,
-      scores,
-      caseId: tc.id,
-      caseName: tc.name,
-      traceId: run.traceId,
-      spanId: run.spanId,
-    });
-    const values = Object.fromEntries(scores.map((s) => [s.name, s.value]));
-    console.log(`  ${tc.id.padEnd(14)} ${JSON.stringify(values)}  trace ${run.traceId}`);
+  console.log(`${result.summary.runName}: ${result.summary.passCount} pass, ${result.summary.failCount} fail`);
+  for (const c of result.cases) {
+    console.log(`  ${c.caseId.padEnd(14)} ${c.resultStatus.padEnd(5)} ${JSON.stringify(c.scores)}  trace ${c.traceId}`);
   }
-
-  bench.close(); // prints the run summary
 }
 
 // Flush the spans and the evaluation results.

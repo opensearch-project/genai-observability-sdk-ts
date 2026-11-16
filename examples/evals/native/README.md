@@ -1,4 +1,4 @@
-# Native evals: offline Benchmark runs and online score()
+# Native evals: offline evaluate() runs and online score()
 
 Evaluate the travel assistant with the OpenSearch GenAI observability SDK alone, no eval
 library. The agent (`agent.ts`) is the Amazon Bedrock Converse loop with the two tools over
@@ -8,7 +8,7 @@ library. The agent (`agent.ts`) is the Amazon Bedrock Converse loop with the two
 | --- | --- |
 | `agent.ts` | The agent under test. Each run is one trace: `invoke_agent travel_assistant` > `chat` / `execute_tool` |
 | `scorers.ts` | `usesToolData` (deterministic) and `judgePlan` (LLM judge on Bedrock, traced as its own trace) |
-| `offline.ts` | Runs the shared test suite twice (prompt `v1` and `v2`), one run name each, and uploads the scores |
+| `offline.ts` | Runs the shared test suite twice with `evaluate()` (prompt `v1` and `v2`), one run name each |
 | `traffic.ts` | A few agent runs outside any suite, as stand-in production traffic |
 | `online.ts` | Lists recent agent traces from OpenSearch, judges the new ones, writes the scores back with `score()` |
 
@@ -37,14 +37,15 @@ Compare the runs in OpenSearch Dashboards: Evaluations
 (`http://localhost:5601/app/agentTraces/evaluations`) > `travel-assistant-suite` > select
 both runs > Compare.
 
-### Why Benchmark and not evaluate()
+### Async agent and judge
 
-`evaluate()` takes a synchronous task and synchronous scorers (it records an error result
-when a task or a scorer returns a Promise). In TypeScript the agent and the LLM judge are
-async, so `offline.ts` runs each case and its scorers itself and uploads the scores with
-`Benchmark.log({ traceId, spanId, scores })`, linked to the agent span. `offline.ts` sets the
-`test.*` ids on the agent span itself, as `evaluate()` would. For a synchronous task (a rule,
-a cached output) `evaluate()` with `defineScorer()` scorers does all of this in one call.
+The agent and the LLM judge are async. `evaluate()` awaits an async `task` and async
+scorers and then returns a Promise, so `offline.ts` is one `await evaluate({ ... })` per
+prompt version, with the three scorers declared by `defineScorer()`. A judge that throws
+records an evaluator error result for that case; the other scores are still sent.
+
+For results that were scored somewhere else (a cached run, another tool), upload them
+with `Benchmark.log({ traceId, spanId, scores })` instead.
 
 ## Online: judge recent traces
 
@@ -89,9 +90,8 @@ curl -sk -u admin:<password> "https://localhost:9200/otel-v1-genai-evaluation/_s
 
 ## Notes
 
-- The agent loop is async, so `agent.ts` installs an `AsyncLocalStorageContextManager`.
-  `register()` does not install one, and without it the tool and chat spans become
-  separate traces.
+- `register()` installs an `AsyncLocalStorageContextManager` on Node, so the chat and
+  tool spans nest under the agent span across `await`.
 - In the offline run the judge's spans are in the agent's service, as their own traces
   (one `chat` span each), so each `plan_quality` result can link to its judge call through
   `opensearch.gen_ai.evaluation.judge.trace_id`.
