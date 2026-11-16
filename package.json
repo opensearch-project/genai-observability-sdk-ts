@@ -50,6 +50,7 @@
     "@grpc/grpc-js": "^1.14.4",
     "@opentelemetry/api": "^1.9.0",
     "@opentelemetry/api-logs": "^0.223.0",
+    "@opentelemetry/context-async-hooks": "^2.6.1",
     "@opentelemetry/exporter-logs-otlp-grpc": "^0.223.0",
     "@opentelemetry/exporter-logs-otlp-proto": "^0.223.0",
     "@opentelemetry/exporter-trace-otlp-grpc": "^0.57.0",
@@ -65,7 +66,6 @@
   },
   "devDependencies": {
     "@eslint/js": "^9.39.4",
-    "@opentelemetry/context-async-hooks": "^2.6.1",
     "@opentelemetry/exporter-logs-otlp-http": "^0.223.0",
     "@types/aws4": "^1.11.6",
     "@types/node": "^20.17.0",

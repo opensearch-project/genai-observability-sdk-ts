@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright OpenSearch Contributors
 
+import { context, createContextKey, ROOT_CONTEXT } from "@opentelemetry/api";
 import { Resource } from "@opentelemetry/resources";
 import {
   BasicTracerProvider,
@@ -579,9 +580,37 @@ async function tryAutoInstrument(): Promise<void> {
   }
 }
 
+const CONTEXT_PROBE = createContextKey("opensearch-genai-observability-sdk.contextProbe");
+
+/** Whether a global context manager is installed: the no-op one never makes a context active. */
+function hasContextManager(): boolean {
+  const probe = ROOT_CONTEXT.setValue(CONTEXT_PROBE, true);
+  return context.with(probe, () => context.active().getValue(CONTEXT_PROBE) === true);
+}
+
+/**
+ * On Node, install `AsyncLocalStorageContextManager` when no global context manager is set, so
+ * the active span follows async code (`enrich()`, `markAgentRoot()`, inline `score()` and span
+ * nesting work after `await register()`). A context manager you installed is kept.
+ */
+async function ensureContextManager(): Promise<void> {
+  if (typeof process === "undefined" || !process.versions?.node) return;
+  if (hasContextManager()) return;
+  try {
+    const { AsyncLocalStorageContextManager } = await import("@opentelemetry/context-async-hooks");
+    context.setGlobalContextManager(new AsyncLocalStorageContextManager().enable());
+  } catch {
+    // Not resolvable (for example a bundle without it): spans still export, without async context.
+  }
+}
+
 /**
  * Set up the OTel traces pipeline and the logs pipeline that carries
  * evaluation events (`gen_ai.evaluation.result`).
+ *
+ * With `setGlobal` (the default) on Node, also installs
+ * `AsyncLocalStorageContextManager` when no global context manager is set, so
+ * the active span follows `await` and `enrich()` finds it.
  *
  * Endpoint resolution, per signal (traces and logs). Code options always win
  * over env vars, as in the OTel SDK exporters:
@@ -654,6 +683,7 @@ export async function register(
 
   const setGlobal = options.setGlobal ?? true;
   if (setGlobal) {
+    await ensureContextManager();
     provider.register();
   }
 

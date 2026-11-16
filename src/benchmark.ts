@@ -890,8 +890,9 @@ export interface EvaluateOptions {
  * Cases run one at a time and `task` must be synchronous. While a case runs,
  * the SDK's TestCaseSpanProcessor stamps `test.*` ids on the root span(s) the
  * task starts and remembers the first one, so score events are parented to the
- * agent run's own trace. The TypeScript SDK has no default context manager, so
- * this uses a module-level "current case" instead of the active OTel context.
+ * agent run's own trace. A context manager may be missing (`register({ setGlobal:
+ * false })`, your own OTel setup), so this uses a module-level "current case"
+ * instead of the active OTel context.
  *
  * A scorer returns a finite number, a boolean (a verdict), an `EvalScore` or
  * an `EvalScore[]`, synchronously. A scorer that throws, or returns anything

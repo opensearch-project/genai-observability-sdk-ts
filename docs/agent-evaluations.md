@@ -191,7 +191,7 @@ score({ name: "goal_completed", value: 1, label: "pass", conversationId: "sessio
 
 The level defaults to `trace` with only `traceId`. Pass `level` to set it (`span`, `trace`, `session`, `tool_call`).
 
-Without `traceId`, `score()` evaluates the active span. `register()` installs no OTel context manager, so there is no active span unless you install one (for example `AsyncLocalStorageContextManager` from `@opentelemetry/context-async-hooks`). Passing the ids works either way.
+Without `traceId`, `score()` evaluates the active span. On Node, `register()` installs `AsyncLocalStorageContextManager` when no context manager is set, so the active span follows `await`; with `setGlobal: false` or your own OTel setup, install one yourself. Passing the ids works either way.
 
 ### Pass rules and who decides
 
@@ -377,7 +377,7 @@ if (result.summary.failCount || result.summary.errorCount) process.exitCode = 1;
 - `defineScorer(spec, fn)` declares the evaluation name, `threshold`, `direction`, `scoreMin`, `scoreMax`, `evaluator` and `evaluatorType`. Fields set on a returned `EvalScore` win.
 - `EvalScore.judgeTraceId` sets `opensearch.gen_ai.evaluation.judge.trace_id`, in `evaluate()` and in `Benchmark.log()`.
 - Scorers run outside the agent trace, so a traced judge gets its own trace.
-- The task must be synchronous and cases run one at a time: the TypeScript SDK installs no context manager. An async task is reported as an error. See [How root spans are found](../README.md#evaluate).
+- The task must be synchronous and cases run one at a time: `evaluate()` tracks the running case in module state, not in the OTel context. An async task is reported as an error. See [How root spans are found](../README.md#evaluate).
 
 ### Benchmark
 
@@ -1024,7 +1024,7 @@ explore.agentTraces.evaluations.enabled: true
 
 - **No events at all.** `register()` was not called, or your own OTel setup has no global `LoggerProvider`. Short scripts: `await provider.forceFlush()` before the process exits.
 - **Traces arrive, results do not.** The logs endpoint points somewhere that does not accept OTLP logs (for example `endpoint` is a traces-only pipeline). Use setup (c): pass `tracesEndpoint` and `logsEndpoint`. With OSI, the logs pipeline must be a separate pipeline with an OTLP logs source. With a custom `exporter` and no logs destination, `register()` sets up no logs pipeline and warns once; pass `logsEndpoint` or `logExporter`.
-- **Results have no trace link.** Pass `traceId` (and `spanId`) to `score()`; inline scoring needs an OTel context manager. In `evaluate()`, the task must start a span (for example with `observe()`) and be synchronous.
+- **Results have no trace link.** Pass `traceId` (and `spanId`) to `score()`; inline scoring needs an OTel context manager (`register()` installs one on Node). In `evaluate()`, the task must start a span (for example with `observe()`) and be synchronous.
 - **Results land in the logs index.** The route did not match `eventName`. Check that the route uses `/eventName == "gen_ai.evaluation.result"` and that your Data Prepper version maps the OTLP `event_name` field to `eventName` (added in opensearch-project/data-prepper#7148).
 - **Field types look wrong** (strings as `text` with `.keyword` sub-fields, `time` not a date). The index was created before the index template, or the sink wrote to a plain index named `otel-v1-genai-evaluation` because the alias did not exist. Create the [evaluation index](#evaluation-index) (template, policy, first index with the alias); for an existing write index, roll it over (`POST otel-v1-genai-evaluation/_rollover`) or reindex.
 - **A long `opensearch.test.case.expected` does not match a filter.** Expected: string attributes are `keyword` with `ignore_above` 256, so longer values are stored and shown but not indexed. Filter on the case id instead.

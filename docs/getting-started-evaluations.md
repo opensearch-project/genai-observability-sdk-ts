@@ -66,7 +66,7 @@ Traces and evaluation events need somewhere to go:
 - **Managed:** an Amazon OpenSearch Service domain plus Amazon OpenSearch Ingestion (OSI) pipelines for traces and logs. See [8. Ship and monitor](#8-ship-and-monitor) and [Ingestion](agent-evaluations.md#ingestion).
 
 ```bash
-npm install "@opensearch-project/genai-observability-sdk-ts@>=0.2.0" @opentelemetry/api @opentelemetry/context-async-hooks
+npm install "@opensearch-project/genai-observability-sdk-ts@>=0.2.0" @opentelemetry/api
 # OpenSearchTraceRetriever (online evals) also needs:
 npm install @opensearch-project/opensearch
 ```
@@ -76,16 +76,13 @@ This guide needs `@opensearch-project/genai-observability-sdk-ts@>=0.2.0`; until
 ## 3. Instrument the agent
 
 ```typescript
-import { context } from "@opentelemetry/api";
-import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks";
 import { Op, enrich, markAgentRoot, register, withObserve } from "@opensearch-project/genai-observability-sdk-ts";
 
 export const AGENT_NAME = "observability_assistant";
 export const AGENT_VERSION = "1.0.0";
 
-// Async code keeps the active span only with a context manager.
-context.setGlobalContextManager(new AsyncLocalStorageContextManager().enable());
-
+// On Node, register() also installs AsyncLocalStorageContextManager (unless you set one),
+// so async code keeps the active span.
 // Traces and evaluation events go to OTEL_EXPORTER_OTLP_ENDPOINT, else http://localhost:4318.
 export const provider = await register({
   serviceName: "observability-assistant",
@@ -488,8 +485,6 @@ Instrument this TypeScript agent with the OpenSearch GenAI observability SDK
 (npm package @opensearch-project/genai-observability-sdk-ts@>=0.2.0, docs:
 https://github.com/opensearch-project/genai-observability-sdk-ts).
 
-- Install @opentelemetry/context-async-hooks and set an AsyncLocalStorageContextManager
-  as the global context manager before anything else.
 - Call register({ serviceName, agentName, agentVersion }) once at startup.
   Telemetry goes to OTEL_EXPORTER_OTLP_ENDPOINT (default http://localhost:4318).
 - Wrap the agent's entry point with withObserve(<agent name>, { op: Op.INVOKE_AGENT }, async (span) => ...)
@@ -553,7 +548,7 @@ Add an online evaluator for this TypeScript agent with the OpenSearch GenAI obse
 | Symptom | Likely cause | Fix |
 |---|---|---|
 | No spans at all | `register()` not called, wrong endpoint, or the process exited before export | Check `OTEL_EXPORTER_OTLP_ENDPOINT`; `await provider.forceFlush()` before exit |
-| Spans arrive but are not nested; `enrich()` or `markAgentRoot()` do nothing | No context manager, so async code loses the active span | Set `AsyncLocalStorageContextManager` as the global context manager before `register()` |
+| Spans arrive but are not nested; `enrich()` or `markAgentRoot()` do nothing | No context manager, so async code loses the active span | `register()` installs `AsyncLocalStorageContextManager` on Node; with `setGlobal: false` or your own OTel setup, set it as the global context manager yourself |
 | No evaluation events | The pipeline does not accept OTLP logs on `/v1/logs`, or does not route `eventName == "gen_ai.evaluation.result"` | Check the logs pipeline; without the route Data Prepper writes them to `logs-otel-v1*` |
 | Results not linked to the agent trace | No `traceId` / `spanId` passed | Pass the ids of the agent span to `Benchmark.log()` or `score()` |
 | `evaluate()` throws about a Promise | The task or a scorer is async | Use `Benchmark` for async agents and judges |

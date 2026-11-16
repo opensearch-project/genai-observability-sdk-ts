@@ -8,8 +8,8 @@ import { AGENT_NAME_KEY, AGENT_VERSION_KEY } from './internal.js';
 /**
  * The test case evaluate() is running right now.
  *
- * The TypeScript SDK does not install a context manager, so the case cannot be
- * found through the active OTel context. evaluate() runs cases one at a time
+ * A context manager may be missing (register() installs one only on Node with
+ * `setGlobal`), so the case is not looked up through the active OTel context. evaluate() runs cases one at a time
  * and its task is synchronous, so a module-level "current case" is reliable:
  * every span started while it is set belongs to that case.
  */
