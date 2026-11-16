@@ -438,14 +438,14 @@ score({ name: "task_success", value: 1, traceId: "6ebb9835f43af1552f2cebb9f5165e
 
 The instrumentation scope is the library that emitted the event: every SDK event (`gen_ai.evaluation.result`) has scope `opensearch-genai-observability-sdk-ts` with the SDK version, and no scope attributes. The evaluator is data about the result and goes in `opensearch.gen_ai.evaluation.evaluator.*`. The timestamp is the time `score()` is called.
 
-**Scores are doubles.** `gen_ai.evaluation.score.value` is a double in the OTel semantic conventions, but OTel JS encodes any whole JS number (for example `1`) as an OTLP `intValue`, and the logs API has no way to request a double. The log exporters `register()` uses re-encode whole-number `gen_ai.evaluation.score.value`, `opensearch.gen_ai.evaluation.score.min` / `.max` / `.threshold` as `doubleValue`: the OTLP/HTTP and gRPC exporters it creates, `AWSSigV4OTLPLogExporter`, and an OpenTelemetry OTLP exporter (protobuf or gRPC) you pass as `logExporter`. With a global `LoggerProvider` you configured yourself, call `sendScoresAsDouble(exporter)` on its OTLP log exporter; otherwise whole numbers are sent as `intValue`, and an index that maps the score dynamically can store it as an integer.
+**Scores are doubles.** `gen_ai.evaluation.score.value` is a double in the OTel semantic conventions, but OTel JS encodes any whole JS number (for example `1`) as an OTLP `intValue`, and the logs API has no way to request a double. The log exporters `register()` uses re-encode whole-number `gen_ai.evaluation.score.value`, `opensearch.gen_ai.evaluation.score.min` / `.max` / `.threshold` as `doubleValue`: the OTLP/HTTP and gRPC exporters it creates, `AWSSigV4OTLPLogExporter`, and an OpenTelemetry OTLP exporter (protobuf or gRPC) you pass as `logExporter`. An OTLP/HTTP JSON exporter (`@opentelemetry/exporter-logs-otlp-http`) is left as is. With a global `LoggerProvider` you configured yourself, call `sendScoresAsDouble(exporter)` on its OTLP log exporter; otherwise whole numbers are sent as `intValue`, and an index that maps the score dynamically can store it as an integer.
 
 ```typescript
 import { OTLPLogExporter } from "@opentelemetry/exporter-logs-otlp-grpc";
 import { sendScoresAsDouble } from "@opensearch-project/genai-observability-sdk-ts";
 
 const exporter = new OTLPLogExporter({ url: "http://localhost:4317" });
-sendScoresAsDouble(exporter); // returns false, and changes nothing, for an exporter it cannot wrap
+sendScoresAsDouble(exporter); // returns false, and changes nothing, for a JSON or custom exporter
 ```
 
 **Parameters:**

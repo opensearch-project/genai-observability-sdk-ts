@@ -13,6 +13,7 @@ import {
 import { createRequire } from 'module';
 import { OTLPLogExporter } from '@opentelemetry/exporter-logs-otlp-proto';
 import { OTLPLogExporter as GrpcLogExporter } from '@opentelemetry/exporter-logs-otlp-grpc';
+import { OTLPLogExporter as JsonLogExporter } from '@opentelemetry/exporter-logs-otlp-http';
 import { BasicTracerProvider, SimpleSpanProcessor } from '@opentelemetry/sdk-trace-base';
 import aws4 from 'aws4';
 import { createHash } from 'crypto';
@@ -261,7 +262,7 @@ describe('double-typed attributes over OTLP protobuf', () => {
     return provider;
   }
 
-  function serializedOf(exporter: OTLPLogExporter | GrpcLogExporter) {
+  function serializedOf(exporter: object) {
     return (exporter as unknown as {
       _delegate: { _serializer: { serializeRequest(l: unknown[]): Uint8Array } };
     })._delegate._serializer;
@@ -348,6 +349,30 @@ describe('double-typed attributes over OTLP protobuf', () => {
     expect(sendScoresAsDouble(memory)).toBe(false);
     expect(sendScoresAsDouble(undefined)).toBe(false);
     await exporter.shutdown();
+  });
+
+  it('leaves the OTLP/HTTP JSON exporter untouched, and its output stays JSON', async () => {
+    const exporter = new JsonLogExporter({ url: 'http://localhost:1/v1/logs' });
+    const before = serializedOf(exporter);
+    expect(sendScoresAsDouble(exporter)).toBe(false);
+    expect(serializedOf(exporter)).toBe(before);
+    const memory = new InMemoryLogRecordExporter();
+    const provider = emitTo(memory, 1);
+    const body = serializedOf(exporter).serializeRequest(memory.getFinishedLogRecords());
+    const json = JSON.parse(Buffer.from(body).toString('utf8')) as AnyRecord;
+    const attrs = json.resourceLogs[0].scopeLogs[0].logRecords[0].attributes as AnyRecord[];
+    expect(attrs.find((kv) => kv.key === 'gen_ai.evaluation.score.value')?.value).toEqual({ intValue: 1 });
+    await provider.shutdown();
+    await exporter.shutdown();
+  });
+
+  it('fails open: a batch the rewrite cannot parse is sent as serialized', async () => {
+    // Wire type 3 (a group) is not handled by the rewrite; it must not drop the batch.
+    const odd = new Uint8Array([0x0b, 0x01]);
+    const exporter = { _delegate: { _serializer: { serializeRequest: (logs: unknown[]) => (logs.length ? odd : new Uint8Array(0)) } } };
+    expect(sendScoresAsDouble(exporter)).toBe(true);
+    expect(() => forceDoubleAttributes(odd)).toThrow();
+    expect(exporter._delegate._serializer.serializeRequest([{}])).toEqual(odd);
   });
 
   it('AWSSigV4OTLPLogExporter sends a score of 1 as doubleValue', async () => {

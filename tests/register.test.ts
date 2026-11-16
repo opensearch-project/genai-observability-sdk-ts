@@ -11,6 +11,7 @@ import {
 } from '@opentelemetry/sdk-logs';
 import { OTLPLogExporter } from '@opentelemetry/exporter-logs-otlp-proto';
 import { OTLPLogExporter as GrpcLogExporter } from '@opentelemetry/exporter-logs-otlp-grpc';
+import { OTLPLogExporter as JsonLogExporter } from '@opentelemetry/exporter-logs-otlp-http';
 import { OTLPTraceExporter as HttpTraceExporter } from '@opentelemetry/exporter-trace-otlp-proto';
 import { OTLPTraceExporter as GrpcTraceExporter } from '@opentelemetry/exporter-trace-otlp-grpc';
 import {
@@ -428,6 +429,22 @@ describe('register - exporters', () => {
     await provider.shutdown();
     await grpc.shutdown();
     await custom.shutdown();
+  });
+
+  it('a custom OTLP/HTTP JSON logExporter is used as given and still exports JSON', async () => {
+    const memory = new InMemoryLogRecordExporter();
+    const provider = new LoggerProvider({ processors: [new SimpleLogRecordProcessor({ exporter: memory })] });
+    provider.getLogger('t').emit({ eventName: 'gen_ai.evaluation.result', attributes: { 'gen_ai.evaluation.score.value': 4 } });
+    const json = new JsonLogExporter({ url: 'http://c:4318/v1/logs' });
+    const serializer = (json as unknown as { _delegate: { _serializer: unknown } })._delegate._serializer;
+    expect(await createLogExporter({ logExporter: json })).toBe(json);
+    const after = (json as unknown as { _delegate: { _serializer: { serializeRequest(l: unknown[]): Uint8Array } } })
+      ._delegate._serializer;
+    expect(after).toBe(serializer);
+    const body = JSON.parse(Buffer.from(after.serializeRequest(memory.getFinishedLogRecords())).toString('utf8'));
+    expect(body.resourceLogs[0].scopeLogs[0].logRecords[0].eventName).toBe('gen_ai.evaluation.result');
+    await provider.shutdown();
+    await json.shutdown();
   });
 
   it('grpcMetadata lowercases header keys and is undefined without headers', async () => {
