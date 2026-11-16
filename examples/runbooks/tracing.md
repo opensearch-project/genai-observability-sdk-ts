@@ -19,21 +19,18 @@ It runs an OTel Collector (`localhost:4318` OTLP/HTTP, `localhost:4317` OTLP/gRP
 Node.js 18.19+ or 20.6+.
 
 ```bash
-npm install @opensearch-project/genai-observability-sdk-ts @opentelemetry/api @opentelemetry/context-async-hooks
+npm install @opensearch-project/genai-observability-sdk-ts @opentelemetry/api
 ```
 
 ```typescript
-import { context } from "@opentelemetry/api";
-import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks";
 import { register } from "@opensearch-project/genai-observability-sdk-ts";
-
-// Async code keeps the active span only with a context manager.
-context.setGlobalContextManager(new AsyncLocalStorageContextManager().enable());
 
 const provider = await register({ serviceName: "travel-assistant-strands" });
 ```
 
-Call it once, before the framework creates its first agent or client. It sends traces to `OTEL_EXPORTER_OTLP_ENDPOINT` (default `http://localhost:4318`; `endpoint: "grpc://localhost:4317"` for gRPC) and activates installed instrumentor packages (`autoInstrument: true`, for example `@opentelemetry/instrumentation-openai`). Pass `agentName` and `agentVersion` too if this process also emits evaluation results. In a short script, `await provider.shutdown()` before exit, or the last batch of spans is lost.
+Call it once, before the framework creates its first agent or client. It sends traces to `OTEL_EXPORTER_OTLP_ENDPOINT` (default `http://localhost:4318`; `endpoint: "grpc://localhost:4317"` for gRPC). On Node it also installs an `AsyncLocalStorageContextManager` (unless one is set), so async code keeps the active span. Pass `agentName` and `agentVersion` too if this process also emits evaluation results. In a short script, `await provider.shutdown()` before exit, or the last batch of spans is lost.
+
+With `autoInstrument` (the default), `register()` turns on `@opentelemetry/instrumentation-openai` and `@opentelemetry/instrumentation-aws-sdk` when they are installed (pin `~0.21.0` / `~0.78.0`). They patch their library when it is loaded, so `register()` must finish before `openai` or the AWS SDK is imported: in an ES module app, call it in a file loaded with `node --import` (or `tsx --import`), after registering the `@opentelemetry/instrumentation/hook.mjs` loader hook. [tracing/openai](../tracing/openai/) shows this; the SDK README section "Auto-instrumentation" has the details. To configure an instrumentation yourself, pass `autoInstrument: false` and register it with `tracerProvider: provider`, as [tracing/bedrock](../tracing/bedrock/) does, else every call is traced twice.
 
 Keep one copy of `@opentelemetry/api` in the process: with two, the SDK cannot register its tracer provider and spans are dropped silently (the trace id is all zeros). If `npm ls @opentelemetry/api` shows two versions, add `"overrides": { "@opentelemetry/api": "$@opentelemetry/api" }` to `package.json`.
 
@@ -45,8 +42,9 @@ Pick the row for your stack:
 
 | Your agent uses | What produces the spans | Example |
 |---|---|---|
-| A framework with built-in OTel or an instrumentation (Strands, LangGraph.js, OpenAI Agents SDK) | The framework or its instrumentation, through `register()` | [tracing/strands](../tracing/strands/), [tracing/langgraph](../tracing/langgraph/), [tracing/openai-agents](../tracing/openai-agents/) |
-| A model SDK (OpenAI, Anthropic, Bedrock Converse) | The SDK's instrumentation for `chat` where there is one, `observe()` for the agent and tools | [tracing/openai](../tracing/openai/), [tracing/anthropic](../tracing/anthropic/), [tracing/bedrock](../tracing/bedrock/) |
+| A framework with built-in OTel (Strands) | The framework, through the global tracer provider `register()` sets | [tracing/strands](../tracing/strands/) |
+| A framework without OTel GenAI instrumentation (LangGraph.js, OpenAI Agents SDK) | `observe()` / `withObserve()` around the model and tool calls, or a bridge from the framework's own tracing | [tracing/langgraph](../tracing/langgraph/), [tracing/openai-agents](../tracing/openai-agents/) |
+| A model SDK (OpenAI, Anthropic, Bedrock Converse) | `chat` spans from the instrumentation `register()` turns on (OpenAI, AWS SDK) or from the SDK itself (Anthropic); `observe()` for the agent and tools | [tracing/openai](../tracing/openai/), [tracing/anthropic](../tracing/anthropic/), [tracing/bedrock](../tracing/bedrock/) |
 | Your own code | `observe()` / `withObserve()` and `enrich()` | [basics/01_tracing_basics.ts](../basics/01_tracing_basics.ts), [basics/04_async_tracing.ts](../basics/04_async_tracing.ts) |
 
 ```typescript
@@ -69,7 +67,7 @@ Rules that make Agent Traces show the run correctly:
 - Record the question and answer on the agent span as GenAI messages (`enrich({ inputMessages, outputMessages })`), so evaluators can read them back.
 - Tools are `execute_tool` spans with `gen_ai.tool.name` and their arguments and result (`gen_ai.tool.call.arguments`, `gen_ai.tool.call.result`). Wrap a tool with `observe({ op: Op.EXECUTE_TOOL }, fn)` if the framework does not.
 - Agent Traces reads messages and tool payloads from span attributes. Strands writes span events by default and needs `OTEL_SEMCONV_STABILITY_OPT_IN=gen_ai_latest_experimental,gen_ai_span_attributes_only` (see [end-to-end/strands-observability-agent/agent.ts](../end-to-end/strands-observability-agent/agent.ts)).
-- Without the context manager from step 2, async children start new traces instead of nesting.
+- With `setGlobal: false` or your own OTel setup, install a context manager yourself, else async children start new traces instead of nesting.
 - Never put secrets in span attributes.
 
 ## 4. Run it and verify the spans
@@ -92,7 +90,7 @@ curl -sk -u admin:"$OPENSEARCH_PASSWORD" -X POST https://localhost:9200/_plugins
 
 Look for: one `traceId` per run, `gen_ai.agent.name` = `travel_assistant` on the `invoke_agent` span only, and each `execute_tool` span with its tool name and arguments.
 
-Nothing arrived? Check the endpoint, that `register()` ran before the framework started, that the process flushed before exit, and the collector counters:
+Nothing arrived? Check the endpoint, that `register()` ran before the framework started (and before `openai` / the AWS SDK was imported, for their `chat` spans), that the process flushed before exit, and the collector counters:
 
 ```bash
 curl -s http://localhost:8888/metrics | grep -E 'otelcol_(receiver_accepted|exporter_send_failed)_spans'

@@ -31,7 +31,7 @@ Tools, all read-only except the guarded one:
 
 The agent never sees the OpenSearch credentials: they are read by `config.ts` and used only by the client.
 
-Instrumentation (`agent.ts`): `OTEL_SEMCONV_STABILITY_OPT_IN=gen_ai_latest_experimental,gen_ai_span_attributes_only` (set in code when unset) so Strands writes the latest GenAI conventions with messages and tool arguments / results as span attributes, an `AsyncLocalStorageContextManager` (async code keeps the active span only with one), `register({ serviceName: "observability-assistant", agentName, agentVersion })`, then the entry point `askDetailed()` is a `withObserve(..., { op: Op.INVOKE_AGENT })` span with `markAgentRoot()`. It sets `gen_ai.agent.version`, and `enrich()` sets the model, the system instructions, the token usage and the question and answer as GenAI messages. Strands' own `invoke_agent`, `chat` and `execute_tool` spans nest under it. A small span processor keeps each run's finished spans in memory, so the scorers read the tool calls and model calls without waiting for ingestion.
+Instrumentation (`agent.ts`): `OTEL_SEMCONV_STABILITY_OPT_IN=gen_ai_latest_experimental,gen_ai_span_attributes_only` (set in code when unset) so Strands writes the latest GenAI conventions with messages and tool arguments / results as span attributes, `register({ serviceName: "observability-assistant", agentName, agentVersion })` (on Node it also installs an `AsyncLocalStorageContextManager`, so async code keeps the active span), then the entry point `askDetailed()` is a `withObserve(..., { op: Op.INVOKE_AGENT })` span with `markAgentRoot()`. It sets `gen_ai.agent.version`, and `enrich()` sets the model, the system instructions, the token usage and the question and answer as GenAI messages. Strands' own `invoke_agent`, `chat` and `execute_tool` spans nest under it. A small span processor keeps each run's finished spans in memory, so the scorers read the tool calls and model calls without waiting for ingestion.
 
 ## Prerequisites
 
@@ -172,9 +172,8 @@ Instrument this TypeScript agent with the OpenSearch GenAI observability SDK
 (npm package @opensearch-project/genai-observability-sdk-ts, docs:
 https://github.com/opensearch-project/genai-observability-sdk-ts).
 
-- Install @opentelemetry/context-async-hooks and set an AsyncLocalStorageContextManager
-  as the global context manager before anything else.
-- Call register({ serviceName, agentName, agentVersion }) once at startup.
+- Call register({ serviceName, agentName, agentVersion }) once at startup. On Node it
+  also installs an AsyncLocalStorageContextManager, so async code keeps the active span.
   Telemetry goes to OTEL_EXPORTER_OTLP_ENDPOINT (default http://localhost:4318).
 - Wrap the agent's entry point with withObserve(<agent name>, { op: Op.INVOKE_AGENT }, async (span) => ...)
   and call markAgentRoot() inside it. Set gen_ai.agent.version on the span.
@@ -237,7 +236,7 @@ SDK, modeled on examples/end-to-end/strands-observability-agent/onlineEval.ts.
 ## Troubleshooting
 
 - **The trace id is all zeros and no spans arrive.** Two copies of `@opentelemetry/api` are loaded (the example's and the SDK's), so the SDK could not register its tracer provider. Keep the example's `@opentelemetry/api` pinned to the SDK's version and reinstall.
-- **Spans arrive, but Strands' spans are separate traces.** No context manager. `agent.ts` sets `AsyncLocalStorageContextManager` before `register()`; keep that first.
+- **Spans arrive, but Strands' spans are separate traces.** No context manager. `register()` installs `AsyncLocalStorageContextManager` on Node; with `setGlobal: false` or your own OTel setup, set one yourself.
 - **Spans arrive, results don't.** The logs path is missing: the collector must accept OTLP logs and Data Prepper must route `eventName == "gen_ai.evaluation.result"`. See [agent-evaluations.md](../../../docs/agent-evaluations.md#troubleshooting).
 - **OpenSearch Ingestion.** HTTP only (no gRPC), signed with SigV4, one pipeline per signal; `register({ compression })` must match the pipeline's `compression`.
 - **The answers say there are no errors.** Probably true: the scorers check the same thing live. Use a window that has data, or add services that fail.

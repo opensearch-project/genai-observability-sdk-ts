@@ -70,9 +70,8 @@ curl -sk -u admin:<password> "https://localhost:9200/otel-v1-apm-span-*/_search"
 - The Anthropic SDK's tool runner (`client.beta.messages.toolRunner`) also traces tool calls,
   but opens its own `invoke_agent` span (`anthropic.messages.tool_runner`) without an agent
   name. This example keeps a manual loop so the agent span is named `travel_assistant`.
-- The agent loop is async, so `agent.ts` installs an `AsyncLocalStorageContextManager`.
-  `register()` does not install one, and without it the tool and chat spans become
-  separate traces.
+- `register()` installs an `AsyncLocalStorageContextManager` on Node, so the chat and tool spans
+  nest under the agent span across `await`; there is no context manager to set up.
 - The Anthropic SDK records messages only with `contentMode: 'content'` (or
   `ANTHROPIC_OPEN_TELEMETRY_TRACES_CONTENT_MODE=content`). Prompts and responses then go to
   your trace backend: check that its access and retention settings fit your data.

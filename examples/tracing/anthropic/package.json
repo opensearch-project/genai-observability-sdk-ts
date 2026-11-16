@@ -12,8 +12,7 @@
     "@anthropic-ai/bedrock-sdk": "^1.1.2",
     "@anthropic-ai/sdk": "^1.9.0",
     "@opensearch-project/genai-observability-sdk-ts": "^0.2.0",
-    "@opentelemetry/api": "~1.9.0",
-    "@opentelemetry/context-async-hooks": "^1.30.0"
+    "@opentelemetry/api": "~1.9.0"
   },
   "devDependencies": {
     "@types/node": "^20.17.0",

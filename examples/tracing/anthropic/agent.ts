@@ -14,15 +14,9 @@
  */
 
 import { readFileSync } from 'node:fs';
-import { context } from '@opentelemetry/api';
-import { AsyncLocalStorageContextManager } from '@opentelemetry/context-async-hooks';
 import type Anthropic from '@anthropic-ai/sdk';
 import { AnthropicBedrockMantle } from '@anthropic-ai/bedrock-sdk';
 import { Op, enrich, observe, register, withObserve } from '@opensearch-project/genai-observability-sdk-ts';
-
-// Async code keeps the active span only with a context manager. Without it the
-// chat and execute_tool spans would not nest under the agent span.
-context.setGlobalContextManager(new AsyncLocalStorageContextManager().enable());
 
 const provider = await register({ serviceName: 'travel-assistant-anthropic' });
 

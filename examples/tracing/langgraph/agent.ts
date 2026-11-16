@@ -13,8 +13,6 @@
  */
 
 import { readFileSync } from 'node:fs';
-import { context } from '@opentelemetry/api';
-import { AsyncLocalStorageContextManager } from '@opentelemetry/context-async-hooks';
 import { ChatBedrockConverse } from '@langchain/aws';
 import { AIMessage, type BaseMessage } from '@langchain/core/messages';
 import { tool } from '@langchain/core/tools';
@@ -22,10 +20,6 @@ import { END, MessagesAnnotation, START, StateGraph } from '@langchain/langgraph
 import { ToolNode } from '@langchain/langgraph/prebuilt';
 import { z } from 'zod';
 import { Op, enrich, observe, register, withObserve } from '@opensearch-project/genai-observability-sdk-ts';
-
-// Async code keeps the active span only with a context manager. Without it the
-// chat and execute_tool spans would not nest under the agent span.
-context.setGlobalContextManager(new AsyncLocalStorageContextManager().enable());
 
 const provider = await register({ serviceName: 'travel-assistant-langgraph' });
 

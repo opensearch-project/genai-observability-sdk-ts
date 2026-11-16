@@ -9,8 +9,7 @@
  *   npx tsx agent.ts "Which services had errors in the last hour?"
  */
 
-import { context, type Attributes, type SpanContext } from '@opentelemetry/api';
-import { AsyncLocalStorageContextManager } from '@opentelemetry/context-async-hooks';
+import type { Attributes, SpanContext } from '@opentelemetry/api';
 import { Agent, tool } from '@strands-agents/sdk';
 import { z } from 'zod';
 import {
@@ -33,10 +32,6 @@ import * as queries from './queries.js';
 // Latest GenAI semantic conventions, with messages and tool arguments / results
 // as span attributes (what Agent Traces and the scorers read).
 process.env.OTEL_SEMCONV_STABILITY_OPT_IN ??= 'gen_ai_latest_experimental,gen_ai_span_attributes_only';
-
-// Async code keeps the active span only with a context manager: without it the
-// Strands spans would not nest under the agent span.
-context.setGlobalContextManager(new AsyncLocalStorageContextManager().enable());
 
 /** One finished span of an agent run, as the offline scorers read it. */
 export interface RunSpan {

@@ -57,9 +57,8 @@ curl -sk -u admin:<password> "https://localhost:9200/otel-v1-apm-span-*/_search"
 
 ## Notes
 
-- The graph runs async, so `agent.ts` installs an `AsyncLocalStorageContextManager`.
-  `register()` does not install one, and without it the tool and chat spans become
-  separate traces.
+- `register()` installs an `AsyncLocalStorageContextManager` on Node, so the chat and tool spans
+  nest under the agent span across `await`; there is no context manager to set up.
 - With `createReactAgent` the model call happens inside the prebuilt agent, so there is no
   place to put the chat span. This example builds the same loop with `StateGraph` to keep
   one chat span per model call.

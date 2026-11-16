@@ -21,8 +21,6 @@
  * results (no test.suite.run.id).
  */
 
-import { context } from '@opentelemetry/api';
-import { AsyncLocalStorageContextManager } from '@opentelemetry/context-async-hooks';
 import { parseArgs } from 'node:util';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { OpenSearchTraceRetriever, register, score } from '@opensearch-project/genai-observability-sdk-ts';
@@ -39,7 +37,6 @@ import {
 import { JUDGE_DESCRIPTION, JUDGE_NAME, JUDGE_PROMPT_NAME, JUDGE_PROMPT_VERSION, judge } from './judge.js';
 import * as queries from './queries.js';
 
-context.setGlobalContextManager(new AsyncLocalStorageContextManager().enable());
 const provider = await register({ serviceName: `${SERVICE_NAME}-evaluator` });
 
 const retriever = new OpenSearchTraceRetriever({
