@@ -77,7 +77,7 @@ bench2.log({
 bench2.close();
 
 // 3. Automated evaluation with evaluate()
-function lengthScore(_input: unknown, output: unknown, _expected: unknown): EvalScore {
+function lengthScore(_input: unknown, output: unknown): EvalScore {
   const len = String(output).length;
   return {
     name: 'length_score',
