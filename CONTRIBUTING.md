@@ -42,7 +42,7 @@ pnpm build       # Build ESM + CJS + type declarations
 pnpm test        # Run tests
 pnpm test:watch  # Run tests in watch mode
 pnpm typecheck   # Type-check with tsc
-pnpm lint        # Lint source and test files
+pnpm lint        # Lint source, test and example files
 ```
 
 ### Project Structure

@@ -25,7 +25,7 @@
     "build": "tsup",
     "test": "vitest run",
     "test:watch": "vitest",
-    "lint": "eslint src/ tests/ examples/basics/",
+    "lint": "eslint src/ tests/ examples/",
     "typecheck": "tsc --noEmit",
     "typecheck:examples": "tsc -p examples/basics"
   },
