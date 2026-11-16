@@ -170,8 +170,8 @@ const EVALUATOR_TYPES: readonly EvaluatorType[] = ['llm_judge', 'code', 'human',
  * ```
  *
  * `fn` may be async (an LLM judge): `evaluate()` awaits it. The returned
- * scorer has the same signature as `fn`, so an async `fn` keeps
- * `evaluate()`'s result typed as a Promise.
+ * scorer has the same signature as `fn`, so `evaluate()`'s result type
+ * follows it (see `EvaluateResult`).
  *
  * Rule fields are defaults for every score the scorer returns; fields set on a
  * returned `EvalScore` win. Throws on an unknown `direction` / `evaluatorType`
@@ -196,12 +196,8 @@ export function defineScorer<F extends ScorerFn>(spec: ScorerSpec, fn: F): Score
     ...spec,
     direction: spec.direction ?? (spec.threshold !== undefined ? 'maximize' : undefined),
   };
-  // An async fn gets an async wrapper, so evaluate() sees an async scorer before calling it.
-  const scorer = (
-    isAsyncFunction(fn)
-      ? async (input: unknown, output: unknown, expected: unknown) => fn(input, output, expected)
-      : (input: unknown, output: unknown, expected: unknown) => fn(input, output, expected)
-  ) as unknown as Scorer<F>;
+  const scorer = ((input: unknown, output: unknown, expected: unknown) =>
+    fn(input, output, expected)) as unknown as Scorer<F>;
   Object.defineProperty(scorer, 'name', { value: fn.name || spec.name || 'score' });
   Object.defineProperty(scorer, 'scorerSpec', { value: Object.freeze(resolved), enumerable: true });
   return scorer;
@@ -775,11 +771,6 @@ function isThenable(value: unknown): value is PromiseLike<unknown> {
   );
 }
 
-/** An `async function` (or async arrow), known to return a Promise before it is called. */
-function isAsyncFunction(fn: unknown): boolean {
-  return typeof fn === 'function' && (fn as { [Symbol.toStringTag]?: string })[Symbol.toStringTag] === 'AsyncFunction';
-}
-
 /**
  * Run a generator that yields the Promises it waits for: synchronously while
  * nothing is pending, so a fully synchronous run returns its value directly;
@@ -962,25 +953,24 @@ type CallKind<F> = F extends (...args: never[]) => infer R
 type CallKinds<O extends EvaluateOptions> = CallKind<O['task']> | CallKind<O['scores'][number]>;
 
 /**
- * What `evaluate(options)` returns: `Promise<BenchmarkResult>` when the task
- * or a scorer is typed to return a Promise, `BenchmarkResult` when all are
- * typed synchronous, else either (`await` it).
+ * What `evaluate(options)` returns: `BenchmarkResult` when the task and every
+ * scorer are typed synchronous, else `BenchmarkResult | Promise<BenchmarkResult>`
+ * (`await` it). evaluate() returns a Promise only once a task or scorer call
+ * has returned one, so with no data, or when every task throws before it
+ * awaits, even an async task gives the result directly.
  */
 export type EvaluateResult<O extends EvaluateOptions = EvaluateOptions> =
-  'async' extends CallKinds<O>
-    ? Promise<BenchmarkResult>
-    : 'maybe' extends CallKinds<O>
-      ? BenchmarkResult | Promise<BenchmarkResult>
-      : BenchmarkResult;
+  [Exclude<CallKinds<O>, 'sync'>] extends [never] ? BenchmarkResult : BenchmarkResult | Promise<BenchmarkResult>;
 
 /**
  * Run `task` on each data item, score it and record the results.
  *
  * `task` and the scorers may be synchronous or async. When all are
- * synchronous, evaluate() returns the result directly, as before. When the
- * task or a scorer is an async function or returns a Promise, evaluate()
- * awaits it and returns a `Promise<BenchmarkResult>`; `await evaluate(...)`
- * works either way.
+ * synchronous, evaluate() returns the result directly, as before. Once a task
+ * or scorer call returns a Promise (an async function, an `observe()`-wrapped
+ * one, or any function returning a thenable), evaluate() awaits it and returns
+ * a `Promise<BenchmarkResult>`; `await evaluate(...)` works either way. Invalid
+ * options (an empty `runId`) throw synchronously.
  *
  * Cases run one at a time, in order, and so do the scorers of a case. Each
  * case's task call is its own trace. While a case runs (until the task's
@@ -1010,16 +1000,7 @@ export type EvaluateResult<O extends EvaluateOptions = EvaluateOptions> =
  * declaration); else `pass`. Scores without a declared rule never fail a case.
  */
 export function evaluate<O extends EvaluateOptions>(options: O): EvaluateResult<O> {
-  const declaredAsync = isAsyncFunction(options.task) || options.scores.some(isAsyncFunction);
-  let result: BenchmarkResult | Promise<BenchmarkResult>;
-  try {
-    result = runMaybeAsync(evaluateSteps(options));
-  } catch (e) {
-    if (!declaredAsync) throw e;
-    result = Promise.reject(e);
-  }
-  // An async task or scorer always gives a Promise, also when no case awaited one.
-  return (declaredAsync && !isThenable(result) ? Promise.resolve(result) : result) as EvaluateResult<O>;
+  return runMaybeAsync(evaluateSteps(options)) as EvaluateResult<O>;
 }
 
 /** evaluate()'s run, yielding each Promise it has to wait for (see runMaybeAsync). */

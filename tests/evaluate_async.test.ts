@@ -5,7 +5,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { context, trace } from '@opentelemetry/api';
 import { AsyncLocalStorageContextManager } from '@opentelemetry/context-async-hooks';
 import { evaluate, defineScorer, type EvalScore } from '../src/benchmark.js';
-import { withObserve, Op } from '../src/observe.js';
+import { observe, withObserve, Op } from '../src/observe.js';
 import { getFinishedSpans, getFinishedLogRecords, clearSpans } from './setup.js';
 
 const scoreRecords = () => getFinishedLogRecords().filter(r => r.eventName === 'gen_ai.evaluation.result');
@@ -110,10 +110,26 @@ describe('evaluate() with an async task', () => {
     expect(result.cases[0].resultStatus).toBe('pass');
   });
 
-  it('returns a Promise for an async task even with no data', async () => {
-    const pending = evaluate({ name: 'empty', task: async (q: unknown) => q, data: [], scores: [] });
+  it('returns a Promise for an observe()-wrapped async task (a plain function)', async () => {
+    const task = observe({ op: Op.INVOKE_AGENT }, async (q: unknown) => {
+      await tick();
+      return q;
+    });
+    const pending = evaluate({ name: 'observed', task, data: [{ input: 'q' }], scores: [] });
     expect(pending).toBeInstanceOf(Promise);
-    expect((await pending).summary.totalCases).toBe(0);
+    expect((await pending).cases[0].output).toBe('q');
+  });
+
+  it('with no case run, returns the result directly; await works either way', async () => {
+    const result = evaluate({ name: 'empty', task: async (q: unknown) => q, data: [], scores: [] });
+    expect(result).not.toBeInstanceOf(Promise);
+    expect((await result).summary.totalCases).toBe(0);
+  });
+
+  it('throws invalid options synchronously, also for an async task', () => {
+    expect(() => evaluate({ name: 'bad', runId: '', task: async (q: unknown) => q, data: [], scores: [] })).toThrow(
+      'runId must be a non-empty string',
+    );
   });
 });
 

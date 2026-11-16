@@ -362,7 +362,7 @@ const quality = defineScorer({ name: "answer_quality", evaluatorType: "llm_judge
   }),
 );
 
-// An async scorer (or task) makes evaluate() return a Promise.
+// An async scorer (or task) makes evaluate() return a Promise: await it.
 const result = await evaluate({
   name: "travel-capitals",
   task: (input) => travelPlanner(String(input)),
@@ -378,7 +378,7 @@ await provider.forceFlush();
 if (result.summary.failCount || result.summary.errorCount) process.exitCode = 1;
 ```
 
-- The task and the scorers may be synchronous or async, mixed. When the task or a scorer is an async function or returns a Promise, `evaluate()` awaits it and returns a `Promise<BenchmarkResult>`; when all are synchronous it returns the result directly. `await evaluate(...)` works either way.
+- The task and the scorers may be synchronous or async, mixed. Once a task or scorer call returns a Promise (an async function, an `observe()`-wrapped one, or any function returning a thenable), `evaluate()` awaits it and returns a `Promise<BenchmarkResult>`; when all calls return plain values it returns the result directly. The declared type is `BenchmarkResult` when the task and scorers are typed synchronous, else `BenchmarkResult | Promise<BenchmarkResult>`, so `await evaluate(...)`. Invalid options (an empty `runId`) throw synchronously.
 - A scorer receives `(input, output, expected)` and returns (or resolves to) a finite number, a boolean (a verdict), an `EvalScore` or an `EvalScore[]`. A `null` field of an `EvalScore` (for example `"explanation": null` in parsed judge JSON) counts as unset. Anything else (`undefined`, `null`, `NaN`, an object without a `name`) logs a warning and emits an error result with `error.type` = `TypeError`. A scorer that throws or rejects (for example a judge call that fails) emits an error result with `error.type` = the exception class name.
 - `defineScorer(spec, fn)` declares the evaluation name, `threshold`, `direction`, `scoreMin`, `scoreMax`, `evaluator` and `evaluatorType`. Fields set on a returned `EvalScore` win.
 - `EvalScore.judgeTraceId` sets `opensearch.gen_ai.evaluation.judge.trace_id`, in `evaluate()` and in `Benchmark.log()`.

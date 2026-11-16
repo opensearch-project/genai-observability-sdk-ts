@@ -563,7 +563,7 @@ const result = evaluate({
 console.log(result.summary); // { totalCases: 2, passCount: 2, errorCount: 0, scores: { accuracy: { avg: 1.0 } } }
 ```
 
-**Async agents and judges.** `task` and the scorers may be async. When the task or a scorer is an async function or returns a Promise, `evaluate()` awaits it and returns a `Promise<BenchmarkResult>`; when all are synchronous it returns the result directly, as above. `await evaluate(...)` works either way. Cases still run one at a time, and the scorers of a case run in order after its task.
+**Async agents and judges.** `task` and the scorers may be async. Once a task or scorer call returns a Promise (an async function, an `observe()`-wrapped one, or any function returning a thenable), `evaluate()` awaits it and returns a `Promise<BenchmarkResult>`; when all calls return plain values it returns the result directly, as above. `await evaluate(...)` works either way. Cases still run one at a time, and the scorers of a case run in order after its task.
 
 ```typescript
 const judge = defineScorer(
@@ -582,7 +582,7 @@ const result = await evaluate({
 });
 ```
 
-A task or judge that rejects is handled like one that throws (below). The return type follows the types of `task` and `scores`: a task or scorer typed to return `unknown` / `any` (or the `ScorerFn` type, which allows a Promise) gives `BenchmarkResult | Promise<BenchmarkResult>`; `await` it, or type synchronous scorers as `SyncScorerFn`.
+A task or judge that rejects is handled like one that throws (below). The return type follows the types of `task` and `scores`: `BenchmarkResult` when all are typed synchronous, else `BenchmarkResult | Promise<BenchmarkResult>` (also for an async task, since with no data or a task that throws before it awaits there is nothing to await); `await` it, or type synchronous scorers as `SyncScorerFn`. Invalid options (an empty `runId`) throw synchronously.
 
 Produces:
 ```
