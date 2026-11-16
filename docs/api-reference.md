@@ -92,9 +92,9 @@ const tracedAgent = withTracing(myAgentFunction);
 | Parameter | Type | Default | Description |
 |---|---|---|---|
 | `name` | `string` | Function name | Span name |
-| `op` | `string` | — | `gen_ai.operation.name` value. Use `Op` constants or any custom string |
+| `op` | `string` | none | `gen_ai.operation.name` value. Use `Op` constants or any custom string |
 | `kind` | `SpanKind` | `INTERNAL` | OTel span kind |
-| `nameFrom` | `string` | — | Resolve span name dynamically from a function parameter |
+| `nameFrom` | `string` | none | Resolve span name dynamically from a function parameter |
 
 **Span naming:** When `op` is a well-known value, the span name is `"{op} {name}"` (e.g. `"invoke_agent planner"`).
 
@@ -129,7 +129,7 @@ dispatch("web_search", { q: "hello" });
 
 ## `withObserve()`
 
-Block-level tracing — the TypeScript equivalent of Python's `with observe(...)` context manager. Gives direct access to the span.
+Block-level tracing: the TypeScript equivalent of Python's `with observe(...)` context manager. Gives direct access to the span.
 
 ```typescript
 const result = withObserve("thinking", { op: Op.CHAT }, (span) => {
@@ -512,7 +512,7 @@ const mine = await retriever.findEvaluatedTraceIds(["trace-id-1"], { evaluator: 
 | `host` | `string` | `"https://localhost:9200"` | OpenSearch endpoint |
 | `index` | `string` | `"otel-v1-apm-span-*"` | Index pattern for span data |
 | `evaluationIndex` | `string` | `"otel-v1-genai-evaluation*"` | Index pattern for evaluation results, used by `findEvaluatedTraceIds()` |
-| `auth` | `{ username, password } \| "awsSigV4"` | — | Authentication method |
+| `auth` | `{ username, password } \| "awsSigV4"` | none | Authentication method |
 | `verifyCerts` | `boolean` | `true` | Verify TLS certificates |
 
 ## `AWSSigV4OTLPExporter`
