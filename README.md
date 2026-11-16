@@ -339,7 +339,7 @@ const tracedAgent = withTracing(myAgentFunction);
 | `name` | `string` | Function name | Span name |
 | `op` | `string` | — | `gen_ai.operation.name` value. Use `Op` constants or any custom string |
 | `kind` | `SpanKind` | `INTERNAL` | OTel span kind |
-| `nameFrom` | `string` | — | Resolve span name dynamically from a function parameter |
+| `nameFrom` | `string` | none | Resolve span name dynamically from a function parameter, else from that property of an object first argument (own or inherited, such as a class getter; never an `Object.prototype` key) |
 
 **Span naming:** When `op` is a well-known value, the span name is `"{op} {name}"` (e.g. `"invoke_agent planner"`).
 

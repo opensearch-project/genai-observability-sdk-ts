@@ -82,7 +82,11 @@ function resolveSpanName(
   return baseName;
 }
 
-const IDENTIFIER = /^[A-Za-z_$][\w$]*/;
+// A JavaScript identifier, Unicode letters included (`café`, `ünits`).
+const IDENTIFIER_SOURCE = "[\\p{ID_Start}$_][\\p{ID_Continue}$\\u200c\\u200d]*";
+const IDENTIFIER = new RegExp(`^${IDENTIFIER_SOURCE}`, "u");
+// Arrow function with a single unparenthesized parameter: `x => ...` / `async x => ...`.
+const BARE_ARROW = new RegExp(`^(?:async\\s+)?(${IDENTIFIER_SOURCE})\\s*=>`, "u");
 
 /** One declared parameter: its name (empty when it has none, e.g. destructuring) and rest flag. */
 interface ParamInfo {
@@ -159,6 +163,8 @@ function splitTopLevel(params: string): string[] {
  * tsx/esbuild emit for one-parameter arrows), default values and rest parameters. A
  * destructured parameter has no name (`name: ""`). Returns undefined when the source cannot be
  * parsed (for example native or bound functions), so callers fall back to positional names.
+ * Known limit: a regular expression literal containing `)` in a default value
+ * (`(a = /\)/, b) => ...`) ends the list early, so later parameters get positional names.
  */
 export function parseParams(fn: AnyFunction): ParamInfo[] | undefined {
   let source: string;
@@ -169,8 +175,7 @@ export function parseParams(fn: AnyFunction): ParamInfo[] | undefined {
   }
   if (/\{\s*\[native code\]\s*\}\s*$/.test(source)) return undefined;
 
-  // Arrow function with a single unparenthesized parameter: `x => ...` / `async x => ...`.
-  const bare = source.match(/^(?:async\s+)?([A-Za-z_$][\w$]*)\s*=>/);
+  const bare = source.match(BARE_ARROW);
   if (bare) return [{ name: bare[1], rest: false }];
 
   const open = source.indexOf("(");
@@ -303,7 +308,8 @@ export function resolveNameFromArgs(
   // Fallback: an object first argument with that key.
   if (args.length > 0 && typeof args[0] === "object" && args[0] !== null) {
     const first = args[0] as Record<string, unknown>;
-    const val = Object.hasOwn(first, nameFrom) ? first[nameFrom] : undefined;
+    // Own or inherited (a class getter), but never a key from Object.prototype.
+    const val = nameFrom in first && !(nameFrom in Object.prototype) ? first[nameFrom] : undefined;
     return typeof val === "string" ? val : undefined;
   }
   return undefined;

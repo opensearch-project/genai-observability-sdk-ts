@@ -277,6 +277,25 @@ describe('observe - nameFrom', () => {
     expect(spans[0].attributes['gen_ai.agent.name']).toBe('myDynamicAgent');
   });
 
+  it('reads a getter of a class instance first argument', () => {
+    class Req { get agentName() { return 'planner'; } }
+    const wrapped = observe({ name: 'fallback', nameFrom: 'agentName', op: Op.INVOKE_AGENT }, (_req: Req) => 1);
+    wrapped(new Req());
+    expect(getFinishedSpans()[0].name).toBe('invoke_agent planner');
+  });
+
+  it('ignores Object.prototype keys of an object first argument', () => {
+    const proto = Object.prototype as Record<string, unknown>;
+    proto.polluted = 'evil';
+    try {
+      const wrapped = observe({ name: 'fallback', nameFrom: 'polluted', op: Op.INVOKE_AGENT }, (_o: object) => 1);
+      wrapped({});
+      expect(getFinishedSpans()[0].name).toBe('invoke_agent fallback');
+    } finally {
+      delete proto.polluted;
+    }
+  });
+
   it('falls back to static name if nameFrom param not found', () => {
     function processAgent(agentName: string) { return agentName; }
     const wrapped = observe({ name: 'fallback', nameFrom: 'missing', op: Op.CHAT }, processAgent);
@@ -542,6 +561,13 @@ describe('argument names', () => {
   it('extra arguments get positional names', () => {
     expect(namedArguments(compiled('(a) => a'), [1, 2])).toEqual({ a: 1, arg1: 2 });
     expect(namedArguments(compiled('() => 1'), ['x'])).toEqual({ arg0: 'x' });
+  });
+
+  it('non-ASCII parameter names', () => {
+    expect(namedArguments(compiled('(café, naïve) => café'), [1, 2])).toEqual({ café: 1, naïve: 2 });
+    // A bare arrow: the parameter, not the call in the body.
+    expect(parseParams(compiled('é => fetch(url, opts)'))).toEqual([{ name: 'é', rest: false }]);
+    expect(namedArguments(compiled('async ünits => ünits'), ['c'])).toEqual({ ünits: 'c' });
   });
 
   it('unparseable sources (native, bound) fall back to positional names', () => {
