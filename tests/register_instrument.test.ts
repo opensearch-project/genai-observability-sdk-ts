@@ -61,16 +61,30 @@ describe('register() auto-instrumentation', () => {
     expect(chat[0].attributes['gen_ai.usage.input_tokens']).toBe(3);
   });
 
-  it('does not patch twice when register() runs again, and follows the newest provider', async () => {
+  it('does not patch twice when register() runs again, and follows the newest global provider', async () => {
     const first = new InMemorySpanExporter();
     const second = new InMemorySpanExporter();
     const p1 = await register({ exporter: first, batch: false, logs: false, setGlobal: false });
-    provider = await register({ exporter: second, batch: false, logs: false, setGlobal: false });
+    provider = await register({ exporter: second, batch: false, logs: false });
     await chatWithOpenAI();
     await p1.shutdown();
 
     expect(first.getFinishedSpans()).toHaveLength(0);
     expect(second.getFinishedSpans().filter((s) => s.attributes['gen_ai.operation.name'] === 'chat')).toHaveLength(1);
+  });
+
+  it('a side pipeline (setGlobal: false) does not take the instrumentation from the primary one', async () => {
+    const primary = new InMemorySpanExporter();
+    const debug = new InMemorySpanExporter();
+    provider = await register({ exporter: primary, batch: false, logs: false });
+    const side = await register({ exporter: debug, batch: false, logs: false, setGlobal: false });
+    try {
+      await chatWithOpenAI();
+    } finally {
+      await side.shutdown();
+    }
+    expect(debug.getFinishedSpans()).toHaveLength(0);
+    expect(primary.getFinishedSpans().filter((s) => s.attributes['gen_ai.operation.name'] === 'chat')).toHaveLength(1);
   });
 
   it('patches the AWS SDK with autoInstrument: { awsSdk: true }: a Bedrock Converse call becomes a span', async () => {

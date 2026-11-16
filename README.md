@@ -179,7 +179,7 @@ An unknown agent is left out, never invented. `evaluate()` also stamps the agent
 
 #### Auto-instrumentation
 
-`register()` turns on each of these packages that is installed and selected, with its own provider (also with `setGlobal: false`). It needs nothing else from you: no `registerInstrumentations()` call.
+`register()` turns on each of these packages that is installed and selected, with its own provider (also with `setGlobal: false`). It needs nothing else from you: no `registerInstrumentations()` call. The instrumentations are process-wide, so they send to one provider: the newest `register()` with `setGlobal` (the default). A `setGlobal: false` `register()` (for example a side pipeline with a debug exporter) takes them only when no other live `register()` provider has them, so it does not take the model spans from your main pipeline.
 
 | Package | Instruments | Turned on | Supported versions (tested) |
 |---|---|---|---|

@@ -143,7 +143,9 @@ export interface RegisterOptions {
    * register() in a module loaded with `node --import` after registering the
    * `@opentelemetry/instrumentation/hook.mjs` loader hook (see the README).
    * Turn one off when you register it yourself, else every call is traced
-   * twice. A package that fails to load or enable logs one warning and is
+   * twice. The instrumentations are process-wide: they send to the newest
+   * register() with `setGlobal` (the default), and a `setGlobal: false`
+   * register() takes them only when no live register() provider has them. A package that fails to load or enable logs one warning and is
    * skipped: register() still resolves.
    */
   autoInstrument?: boolean | AutoInstrumentOptions;
@@ -647,6 +649,8 @@ interface InstrumentationLike {
 const instrumentations = new Map<string, InstrumentationLike>();
 /** Package#export keys that failed to load or enable: warned about once, not tried again. */
 const failedInstrumentations = new Set<string>();
+/** The provider each instrumentation (by package#export key) currently sends its spans to. */
+const instrumentationTargets = new Map<string, TracerProvider>();
 
 /** The specifier a Node resolver error names: `Cannot find module 'x'` / `Cannot find package 'x'`. */
 const NODE_MISSING_RE = /Cannot find (?:module|package) ['"]([^'"]+)['"]/;
@@ -719,6 +723,19 @@ export async function autoInstrument(
   provider: TracerProvider,
   specs: readonly AutoInstrumentationSpec[] = AUTO_INSTRUMENTATIONS,
 ): Promise<string[]> {
+  return enableInstrumentations(provider, specs, true);
+}
+
+/**
+ * autoInstrument(), pointing an instrumentation that already sends to another (live) provider
+ * at `provider` only when `repoint` is set. register() repoints for the global pipeline only,
+ * so a side pipeline (`setGlobal: false`) does not take the process-wide instrumentations.
+ */
+async function enableInstrumentations(
+  provider: TracerProvider,
+  specs: readonly AutoInstrumentationSpec[],
+  repoint: boolean,
+): Promise<string[]> {
   const enabled: string[] = [];
   for (const spec of specs) {
     const key = instrumentationKey(spec);
@@ -731,11 +748,15 @@ export async function autoInstrument(
     }
     try {
       // What registerInstrumentations({ instrumentations, tracerProvider }) does.
-      instrumentation.setTracerProvider(provider);
+      if (repoint || !instrumentationTargets.has(key)) {
+        instrumentation.setTracerProvider(provider);
+        instrumentationTargets.set(key, provider);
+      }
       if (instrumentation.isEnabled?.() !== true) instrumentation.enable();
     } catch (err) {
       // A patch error (an incompatible, already loaded library) must not fail register().
       instrumentations.delete(key);
+      instrumentationTargets.delete(key);
       warnInstrumentation(spec, err instanceof Error ? err.message : String(err));
       continue;
     }
@@ -836,10 +857,20 @@ export async function register(
     chainLoggerProvider(provider, loggerProvider);
   }
 
+  // Once shut down, the provider no longer holds the instrumentations: the next register() takes them.
+  const shutdownProvider = provider.shutdown.bind(provider);
+  provider.shutdown = async () => {
+    for (const [key, target] of instrumentationTargets) {
+      if (target === provider) instrumentationTargets.delete(key);
+    }
+    await shutdownProvider();
+  };
+
   const specs = instrumentationsFor(options.autoInstrument);
   if (specs.length > 0) {
     try {
-      await autoInstrument(provider, specs);
+      // The process-wide instrumentations follow the global pipeline, or the first one.
+      await enableInstrumentations(provider, specs, setGlobal);
     } catch (err) {
       // autoInstrument() warns per package; this only guards register() itself.
       console.warn(
