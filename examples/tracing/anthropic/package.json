@@ -1,0 +1,26 @@
+{
+  "name": "travel-assistant-anthropic",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Travel assistant on the Anthropic TypeScript SDK (Claude on Amazon Bedrock), traced with the OpenSearch GenAI observability SDK",
+  "type": "module",
+  "scripts": {
+    "start": "tsx agent.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@anthropic-ai/bedrock-sdk": "^1.1.2",
+    "@anthropic-ai/sdk": "^1.9.0",
+    "@opensearch-project/genai-observability-sdk-ts": "^0.2.0",
+    "@opentelemetry/api": "~1.9.0",
+    "@opentelemetry/context-async-hooks": "^1.30.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.17.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  },
+  "overrides": {
+    "@opentelemetry/api": "$@opentelemetry/api"
+  }
+}
