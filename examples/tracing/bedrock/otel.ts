@@ -6,14 +6,22 @@
  * imported. Converse calls become `chat <model>` spans (model, token usage, finish
  * reason). The instrumentation records no messages, so the hooks below add them as
  * gen_ai.input.messages / gen_ai.output.messages, which Agent Traces reads.
+ *
+ * register() would turn on @opentelemetry/instrumentation-aws-sdk by itself
+ * (autoInstrument), but without these hooks. So this file passes
+ * `autoInstrument: false` and registers it with its own config; with both, every
+ * call would be traced twice.
  */
 
-import { register as registerLoader } from 'node:module';
+import { register as registerHooks } from 'node:module';
 import { registerInstrumentations } from '@opentelemetry/instrumentation';
 import { AwsInstrumentation } from '@opentelemetry/instrumentation-aws-sdk';
+import { register } from '@opensearch-project/genai-observability-sdk-ts';
 
-// ESM: let the instrumentation hook `import` statements.
-registerLoader('@opentelemetry/instrumentation/hook.mjs', import.meta.url);
+// ESM: let the instrumentation patch `import` statements.
+registerHooks('@opentelemetry/instrumentation/hook.mjs', import.meta.url);
+
+export const provider = await register({ serviceName: 'travel-assistant-bedrock', autoInstrument: false });
 
 interface ContentBlock {
   text?: string;
@@ -41,6 +49,7 @@ function toGenAI(messages: BedrockMessage[]) {
 }
 
 registerInstrumentations({
+  tracerProvider: provider,
   instrumentations: [
     new AwsInstrumentation({
       preRequestHook: (span, { request }) => {

@@ -7,8 +7,8 @@ The model calls two tools, `get_weather` and `find_events`, over the static data
 
 There is no agent framework, so the spans come from two places:
 
-- `@opentelemetry/instrumentation-aws-sdk` (set up in `instrumentation.ts`) turns each
-  Converse call into a `chat <model>` span with the model, token usage and finish reason.
+- `@opentelemetry/instrumentation-aws-sdk` (set up in `otel.ts`) turns each Converse call
+  into a `chat <model>` span with the model, token usage and finish reason.
 - The SDK's `withObserve` makes the `invoke_agent travel_assistant` span around the agent
   loop, and `observe` makes an `execute_tool <name>` span per tool call, with
   `gen_ai.tool.call.arguments` and `gen_ai.tool.call.result`.
@@ -29,11 +29,14 @@ Needs Node.js 20+, an OTLP endpoint (the observability stack listens on
 ```bash
 npm install
 AWS_PROFILE=<profile> AWS_REGION=us-west-2 \
-  npx tsx --import ./instrumentation.ts agent.ts "Plan a one-day trip to Paris."
+  npx tsx --import ./otel.ts agent.ts "Plan a one-day trip to Paris."
 ```
 
-`--import ./instrumentation.ts` loads the instrumentation before the AWS SDK is imported;
-without it the `chat` spans are missing.
+The instrumentation patches the AWS SDK when it is loaded, so it must be set up before the
+AWS SDK is imported. `--import ./otel.ts` runs `otel.ts` first: it registers the
+`@opentelemetry/instrumentation/hook.mjs` loader hook (ES modules only), calls `register()`
+and registers the instrumentation. `agent.ts` imports `provider` from `./otel.js` to flush
+it. Without `--import ./otel.ts` the `chat` spans are missing.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
@@ -55,11 +58,15 @@ curl -sk -u admin:<password> "https://localhost:9200/otel-v1-apm-span-*/_search"
 
 ## Notes
 
+- `register()` turns on `@opentelemetry/instrumentation-aws-sdk` by itself when it is
+  installed (`autoInstrument`), but with no hooks. `otel.ts` needs the hooks, so it passes
+  `autoInstrument: false` and registers `AwsInstrumentation` with `tracerProvider: provider`.
+  With both, every Converse call would be traced twice. Without the hooks, drop the
+  `registerInstrumentations()` call and the `autoInstrument: false`.
 - The AWS SDK instrumentation records no messages. The `preRequestHook` / `responseHook`
-  in `instrumentation.ts` add `gen_ai.input.messages`, `gen_ai.output.messages` and
+  in `otel.ts` add `gen_ai.input.messages`, `gen_ai.output.messages` and
   `gen_ai.system_instructions` to the chat spans, which is where Agent Traces reads them.
-- The agent loop is async, so `agent.ts` installs an `AsyncLocalStorageContextManager`.
-  `register()` does not install one, and without it the tool and chat spans become
-  separate traces.
+- `register()` installs an `AsyncLocalStorageContextManager` on Node, so the chat and tool spans
+  nest under the agent span across `await`; there is no context manager to set up.
 - `@opentelemetry/instrumentation-aws-sdk` is pinned to `~0.78.0`: later releases need
   `@opentelemetry/api` 1.10, and the SDK is on OpenTelemetry JS 1.x (`@opentelemetry/api` 1.9).

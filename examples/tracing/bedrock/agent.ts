@@ -8,14 +8,12 @@
  * There is no agent framework here: the agent loop and the tools are plain code,
  * so the SDK's `withObserve` / `observe` create the invoke_agent and execute_tool
  * spans. The chat spans come from @opentelemetry/instrumentation-aws-sdk
- * (set up in instrumentation.ts).
+ * (set up in otel.ts).
  *
- *   npx tsx --import ./instrumentation.ts agent.ts "Plan a one-day trip to Paris."
+ *   npx tsx --import ./otel.ts agent.ts "Plan a one-day trip to Paris."
  */
 
 import { readFileSync } from 'node:fs';
-import { context } from '@opentelemetry/api';
-import { AsyncLocalStorageContextManager } from '@opentelemetry/context-async-hooks';
 import {
   BedrockRuntimeClient,
   ConverseCommand,
@@ -23,13 +21,9 @@ import {
   type Message,
   type Tool,
 } from '@aws-sdk/client-bedrock-runtime';
-import { Op, enrich, observe, register, withObserve } from '@opensearch-project/genai-observability-sdk-ts';
-
-// Async code keeps the active span only with a context manager. Without it the
-// chat and execute_tool spans would not nest under the agent span.
-context.setGlobalContextManager(new AsyncLocalStorageContextManager().enable());
-
-const provider = await register({ serviceName: 'travel-assistant-bedrock' });
+import { Op, enrich, observe, withObserve } from '@opensearch-project/genai-observability-sdk-ts';
+// Already run by `--import ./otel.ts`, before the AWS SDK was loaded; imported for its provider.
+import { provider } from './otel.js';
 
 // ------------------------------------------------------------ shared data + tools
 
