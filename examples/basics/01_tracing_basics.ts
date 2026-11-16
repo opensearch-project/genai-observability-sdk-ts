@@ -8,7 +8,7 @@
  * and create spans with the OpenSearch GenAI Observability SDK.
  */
 
-import { observe, withObserve, Op, enrich, register } from '../src/index.js';
+import { observe, withObserve, Op, enrich, register } from '../../src/index.js';
 
 // Register the SDK (uses default endpoint)
 await register({

@@ -16,10 +16,10 @@ The examples in [`examples/`](../examples/), one SDK feature each:
 
 | Example | Description |
 |---|---|
-| [`01_tracing_basics.ts`](../examples/01_tracing_basics.ts) | `observe()` wrapper, `withObserve()`, `enrich()` |
-| [`02_scoring.ts`](../examples/02_scoring.ts) | Span-level, trace-level, and standalone scoring |
-| [`03_aws_sigv4.ts`](../examples/03_aws_sigv4.ts) | AWS SigV4 authentication with `AWSSigV4OTLPExporter` |
-| [`04_async_tracing.ts`](../examples/04_async_tracing.ts) | Async function and generator tracing |
-| [`05_openai_auto_instrument.ts`](../examples/05_openai_auto_instrument.ts) | OpenAI auto-instrumentation via `register()`, with the ESM load order |
-| [`06_retrieval_and_eval.ts`](../examples/06_retrieval_and_eval.ts) | Retrieve traces from OpenSearch, evaluate, write scores back |
-| [`07_benchmarks.ts`](../examples/07_benchmarks.ts) | `evaluate()` with scorers, `Benchmark` with manual logging |
+| [`01_tracing_basics.ts`](../examples/basics/01_tracing_basics.ts) | `observe()` wrapper, `withObserve()`, `enrich()` |
+| [`02_scoring.ts`](../examples/basics/02_scoring.ts) | Span-level, trace-level, and standalone scoring |
+| [`03_aws_sigv4.ts`](../examples/basics/03_aws_sigv4.ts) | AWS SigV4 authentication with `AWSSigV4OTLPExporter` |
+| [`04_async_tracing.ts`](../examples/basics/04_async_tracing.ts) | Async function and generator tracing |
+| [`05_openai_auto_instrument.ts`](../examples/basics/05_openai_auto_instrument.ts) | OpenAI auto-instrumentation via `register()`, with the ESM load order |
+| [`06_retrieval_and_eval.ts`](../examples/basics/06_retrieval_and_eval.ts) | Retrieve traces from OpenSearch, evaluate, write scores back |
+| [`07_benchmarks.ts`](../examples/basics/07_benchmarks.ts) | `evaluate()` with scorers, `Benchmark` with manual logging |

@@ -14,8 +14,8 @@
  * The run summary is computed locally.
  */
 
-import { Benchmark, Op, defineScorer, evaluate, register, withObserve } from '../src/index.js';
-import type { EvalScore } from '../src/index.js';
+import { Benchmark, Op, defineScorer, evaluate, register, withObserve } from '../../src/index.js';
+import type { EvalScore } from '../../src/index.js';
 
 const provider = await register({
   serviceName: 'benchmark-example',

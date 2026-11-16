@@ -29,7 +29,7 @@
  */
 
 import { register as registerHooks } from 'node:module';
-import { register, observe, Op, enrich } from '../src/index.js';
+import { register, observe, Op, enrich } from '../../src/index.js';
 
 // 1. ESM: let the instrumentation patch `import` statements.
 registerHooks('@opentelemetry/instrumentation/hook.mjs', import.meta.url);

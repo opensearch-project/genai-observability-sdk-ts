@@ -8,7 +8,7 @@
  * async operations with the OpenSearch GenAI Observability SDK.
  */
 
-import { observe, withObserve, Op, enrich, register } from '../src/index.js';
+import { observe, withObserve, Op, enrich, register } from '../../src/index.js';
 
 await register({
   serviceName: 'async-tracing-example',

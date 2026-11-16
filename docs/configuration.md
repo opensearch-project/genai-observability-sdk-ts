@@ -188,7 +188,7 @@ registerHooks("@opentelemetry/instrumentation/hook.mjs", import.meta.url);
 export const provider = await register({ serviceName: "my-agent" });
 ```
 
-`@opentelemetry/instrumentation` must be resolvable from that file: install it, `~0.223.0`, the same line the instrumentations use. `app.ts` imports `openai` as usual and can import `provider` from `./otel.js` to flush it. In a single file, load the library after `register()` with `await import("openai")` (see [`05_openai_auto_instrument.ts`](../examples/05_openai_auto_instrument.ts)). In CommonJS, `require()` the library after `await register()` resolves; no loader hook is needed.
+`@opentelemetry/instrumentation` must be resolvable from that file: install it, `~0.223.0`, the same line the instrumentations use. `app.ts` imports `openai` as usual and can import `provider` from `./otel.js` to flush it. In a single file, load the library after `register()` with `await import("openai")` (see [`05_openai_auto_instrument.ts`](../examples/basics/05_openai_auto_instrument.ts)). In CommonJS, `require()` the library after `await register()` resolves; no loader hook is needed.
 
 ### Your own setup
 
