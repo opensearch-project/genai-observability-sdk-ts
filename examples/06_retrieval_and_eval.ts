@@ -79,8 +79,9 @@ for (const [name, scoreSummary] of Object.entries(result.summary.scores)) {
 //   console.log(`  Trace ${trace.traceId}: ${trace.spans.length} spans`);
 // }
 //
-// // List the agent roots of recent traces (the span Agent Traces lists: the trace
-// // root when it is a GenAI span, or the marked agent span below an HTTP handler)
+// // List the agent roots of recent traces, one per trace: the span marked
+// // derived.gen_ai.is_root (for example the agent span below an HTTP handler), or
+// // a parentless invoke_agent / create_agent span
 // const rootSpans = await retriever.listRootSpans({
 //   since: new Date(Date.now() - 60 * 60 * 1000), // last hour
 //   maxResults: 10,

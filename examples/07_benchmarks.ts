@@ -91,7 +91,9 @@ function matchScore(_input: unknown, output: unknown, expected: unknown): number
 
 const evalResult = evaluate({
   name: 'qa-benchmark',
-  // The task's root span (invoke_agent qa-agent) gets the test.* ids.
+  // The task's root span (invoke_agent qa-agent) gets the test.* ids. Op.INVOKE_AGENT
+  // names the agent (gen_ai.agent.name = "qa-agent"), so every result is grouped
+  // under it; with another op (or none), pass agentName to evaluate() instead.
   task: (input) =>
     withObserve('qa-agent', { op: Op.INVOKE_AGENT }, () => {
       const q = (input as { question: string }).question;

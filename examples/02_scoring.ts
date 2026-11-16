@@ -10,21 +10,20 @@
  * sets up, and Data Prepper routes them to the `otel-v1-genai-evaluation` index.
  */
 
-import { context } from '@opentelemetry/api';
-import { AsyncLocalStorageContextManager } from '@opentelemetry/context-async-hooks';
 import { score, withObserve, Op, register } from '../src/index.js';
 
-// Propagate the active span across callbacks so inline scores find it.
-context.setGlobalContextManager(new AsyncLocalStorageContextManager().enable());
-
+// On Node, register() installs an AsyncLocalStorage context manager, so inline
+// scores find the active span.
 const provider = await register({
   serviceName: 'scoring-example',
   batch: false,
   autoInstrument: false,
 });
 
-// 1. Inline: score the active span while it runs
-const ids = withObserve('answer', { op: Op.CHAT }, (span) => {
+// 1. Inline: score the active span while it runs. An agent operation names the
+//    agent (gen_ai.agent.name = "answer"), and the inline score() reads it from
+//    the active span. A chat span names no agent: pass agentName to score() then.
+const ids = withObserve('answer', { op: Op.INVOKE_AGENT }, (span) => {
   score({
     name: 'relevance',
     value: 0.92,
