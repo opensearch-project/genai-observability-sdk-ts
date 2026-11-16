@@ -188,18 +188,29 @@ export function parseParams(fn: AnyFunction): ParamInfo[] | undefined {
 /**
  * The input object recorded for a call: declared parameter names as keys, a rest parameter
  * collects the remaining arguments, and arguments without a usable name (destructured, extra
- * or unparseable) are keyed by position (`arg0`, `arg1`, ...).
+ * or unparseable) are keyed by position (`arg0`, `arg1`, ...). A positional key never replaces
+ * a declared name: if `arg1` is taken it becomes `_arg1`. Pass `params` (from `parseParams`) to
+ * skip parsing the source again.
  */
-export function namedArguments(fn: AnyFunction, args: unknown[]): Record<string, unknown> {
-  const params = parseParams(fn) ?? [];
+export function namedArguments(
+  fn: AnyFunction,
+  args: unknown[],
+  params: ParamInfo[] | undefined = parseParams(fn),
+): Record<string, unknown> {
+  const declared = new Set((params ?? []).map((p) => p.name).filter(Boolean));
   const obj: Record<string, unknown> = {};
+  const positional = (i: number): string => {
+    let key = `arg${i}`;
+    while (declared.has(key) || Object.hasOwn(obj, key)) key = `_${key}`;
+    return key;
+  };
   for (let i = 0; i < args.length; i++) {
-    const param = params[i];
+    const param = params?.[i];
     if (param?.rest) {
-      obj[param.name || `arg${i}`] = args.slice(i);
+      obj[param.name && !Object.hasOwn(obj, param.name) ? param.name : positional(i)] = args.slice(i);
       break;
     }
-    const key = param?.name && !(param.name in obj) ? param.name : `arg${i}`;
+    const key = param?.name && !Object.hasOwn(obj, param.name) ? param.name : positional(i);
     obj[key] = args[i];
   }
   return obj;
@@ -210,10 +221,11 @@ function setInputAttributes(
   args: unknown[],
   op: string | undefined,
   fn: AnyFunction,
+  params: ParamInfo[] | undefined,
 ): void {
   if (args.length === 0) return;
   try {
-    const serialized = truncate(safeStringify(namedArguments(fn, args)));
+    const serialized = truncate(safeStringify(namedArguments(fn, args, params ?? [])));
     if (op === Op.EXECUTE_TOOL) {
       span.setAttribute("gen_ai.tool.call.arguments", serialized);
     } else {
@@ -273,25 +285,25 @@ function isGeneratorFunction(fn: unknown): boolean {
   );
 }
 
-function resolveNameFromArgs(
+/**
+ * The span name taken from the argument of the parameter called `nameFrom`, or from that key of
+ * an object first argument. Uses the same parameter parsing as the recorded input, so arrows
+ * without parentheses and default values with commas or parentheses resolve correctly.
+ */
+export function resolveNameFromArgs(
   nameFrom: string,
-  fn: AnyFunction,
   args: unknown[],
+  params: ParamInfo[] | undefined,
 ): string | undefined {
-  // Try to get parameter names from function source
-  const source = fn.toString();
-  const match = source.match(/\(([^)]*)\)/);
-  if (match) {
-    const params = match[1].split(",").map((p) => p.trim().replace(/\s*=.*$/, "").replace(/\.{3}/, ""));
-    const index = params.indexOf(nameFrom);
-    if (index >= 0 && index < args.length) {
-      const val = args[index];
-      return typeof val === "string" ? val : undefined;
-    }
+  const index = params?.findIndex((p) => !p.rest && p.name === nameFrom) ?? -1;
+  if (index >= 0 && index < args.length) {
+    const val = args[index];
+    return typeof val === "string" ? val : undefined;
   }
-  // Fallback: check if first arg is an object with the key
+  // Fallback: an object first argument with that key.
   if (args.length > 0 && typeof args[0] === "object" && args[0] !== null) {
-    const val = (args[0] as Record<string, unknown>)[nameFrom];
+    const first = args[0] as Record<string, unknown>;
+    const val = Object.hasOwn(first, nameFrom) ? first[nameFrom] : undefined;
     return typeof val === "string" ? val : undefined;
   }
   return undefined;
@@ -305,18 +317,20 @@ function wrapFunction<F extends AnyFunction>(
   const op = options.op;
   const kind = options.kind ?? SpanKind.INTERNAL;
   const nameFrom = options.nameFrom;
+  // The parameter list of fn never changes: parse it once, not on every call.
+  const params = parseParams(fn);
 
   if (isAsyncGeneratorFunction(fn)) {
     const wrapped = function (this: unknown, ...args: unknown[]) {
       const resolvedName = nameFrom
-        ? resolveNameFromArgs(nameFrom, fn, args) ?? baseName
+        ? resolveNameFromArgs(nameFrom, args, params) ?? baseName
         : baseName;
       const spanName = resolveSpanName(resolvedName, op);
       const tracer = getTracer();
 
       return tracer.startActiveSpan(spanName, { kind }, (span: Span) => {
         setNameAttributes(span, resolvedName, op);
-        setInputAttributes(span, args, op, fn);
+        setInputAttributes(span, args, op, fn, params);
 
         const gen = fn.apply(this, args) as AsyncGenerator;
         const collected: unknown[] = [];
@@ -365,14 +379,14 @@ function wrapFunction<F extends AnyFunction>(
   if (isGeneratorFunction(fn)) {
     const wrapped = function (this: unknown, ...args: unknown[]) {
       const resolvedName = nameFrom
-        ? resolveNameFromArgs(nameFrom, fn, args) ?? baseName
+        ? resolveNameFromArgs(nameFrom, args, params) ?? baseName
         : baseName;
       const spanName = resolveSpanName(resolvedName, op);
       const tracer = getTracer();
 
       return tracer.startActiveSpan(spanName, { kind }, (span: Span) => {
         setNameAttributes(span, resolvedName, op);
-        setInputAttributes(span, args, op, fn);
+        setInputAttributes(span, args, op, fn, params);
 
         const gen = fn.apply(this, args) as Generator;
         const collected: unknown[] = [];
@@ -420,14 +434,14 @@ function wrapFunction<F extends AnyFunction>(
 
   const wrapped = function (this: unknown, ...args: unknown[]) {
     const resolvedName = nameFrom
-      ? resolveNameFromArgs(nameFrom, fn, args) ?? baseName
+      ? resolveNameFromArgs(nameFrom, args, params) ?? baseName
       : baseName;
     const spanName = resolveSpanName(resolvedName, op);
     const tracer = getTracer();
 
     return tracer.startActiveSpan(spanName, { kind }, (span: Span) => {
       setNameAttributes(span, resolvedName, op);
-      setInputAttributes(span, args, op, fn);
+      setInputAttributes(span, args, op, fn, params);
 
       try {
         const result = fn.apply(this, args);

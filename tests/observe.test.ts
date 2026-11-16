@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright OpenSearch Contributors
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { SpanKind, SpanStatusCode, trace } from '@opentelemetry/api';
 import { observe, withObserve, Op, namedArguments, parseParams } from '../src/observe.js';
 import { enrich } from '../src/enrich.js';
@@ -599,5 +599,57 @@ describe('gen_ai.agent.name only for agent operations', () => {
       span.setAttribute('gen_ai.agent.name', 'judge_agent');
     });
     expect(getFinishedSpans()[0].attributes['gen_ai.agent.name']).toBe('judge_agent');
+  });
+});
+
+describe('argument keys (review follow-ups)', () => {
+  it('a parameter named like an Object.prototype member keeps its name', () => {
+    for (const name of ['constructor', 'toString', 'valueOf', 'hasOwnProperty']) {
+      expect(namedArguments(compiled(`function f(${name}) { return 1; }`), [1])).toEqual({ [name]: 1 });
+    }
+  });
+
+  it('a positional key never overwrites a declared parameter', () => {
+    const fn = compiled('function f(arg1, { x }) { return x; }');
+    expect(namedArguments(fn, [1, { x: 2 }])).toEqual({ arg1: 1, _arg1: { x: 2 } });
+  });
+});
+
+describe('observe - nameFrom uses the parsed parameters', () => {
+  it('one-parameter arrow without parentheses', () => {
+    const wrapped = observe({ nameFrom: 'city', op: Op.INVOKE_AGENT }, compiled(TSX_COMPILED.oneParam));
+    wrapped('Paris');
+    const span = getFinishedSpans()[0];
+    expect(span.name).toBe('invoke_agent Paris');
+    expect(span.attributes['gen_ai.agent.name']).toBe('Paris');
+  });
+
+  it('default values with parentheses and commas', () => {
+    const wrapped = observe(
+      { nameFrom: 'name', op: Op.INVOKE_AGENT },
+      compiled('function (a = Math.max(1, 2), name) { return name; }'),
+    );
+    wrapped(1, 'planner');
+    expect(getFinishedSpans()[0].name).toBe('invoke_agent planner');
+  });
+
+  it('parses the source once per wrapped function, not per call', () => {
+    const fn = compiled('(agent, q) => q');
+    const spy = vi.spyOn(Function.prototype, 'toString');
+    try {
+      const wrapped = observe({ nameFrom: 'agent', op: Op.INVOKE_AGENT }, fn);
+      const after = spy.mock.calls.length;
+      wrapped('a', 1);
+      wrapped('b', 2);
+      wrapped('c', 3);
+      expect(spy.mock.calls.length).toBe(after);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(getFinishedSpans().map((s) => s.name)).toEqual([
+      'invoke_agent a',
+      'invoke_agent b',
+      'invoke_agent c',
+    ]);
   });
 });
