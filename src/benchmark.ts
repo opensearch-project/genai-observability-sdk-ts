@@ -980,8 +980,10 @@ export type EvaluateResult<O extends EvaluateOptions = EvaluateOptions> =
  * root span(s) the task starts and remembers the first one, so score events
  * are parented to the agent run's own trace. The case rides in the OTel context
  * of the task (across `await` with a context manager, which register()
- * installs on Node) and in a module-level "current case" for setups without
- * one, so run one evaluate() at a time. Scorers run after the task, outside
+ * installs on Node), so overlapping evaluate() runs and spans started outside
+ * the task (timers, other requests) are kept apart. Without a context manager
+ * a module-level "current case" stands in while one case runs; overlapping
+ * runs then stamp nothing (with a warning). Scorers run after the task, outside
  * the case: an LLM judge's spans are its own trace and are not stamped.
  *
  * A scorer returns (or resolves to) a finite number, a boolean (a verdict),

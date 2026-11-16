@@ -1,6 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright OpenSearch Contributors
 
+import { context, createContextKey, ROOT_CONTEXT } from "@opentelemetry/api";
+
+const CONTEXT_PROBE = createContextKey("opensearch-genai-observability-sdk.contextProbe");
+
+/** @internal Whether a global context manager is installed: the no-op one never makes a context active. */
+export function hasContextManager(): boolean {
+  const probe = ROOT_CONTEXT.setValue(CONTEXT_PROBE, true);
+  return context.with(probe, () => context.active().getValue(CONTEXT_PROBE) === true);
+}
+
 export const RESERVED_KEYS: ReadonlySet<string> = new Set([
   "test.suite.name",
   "test.suite.run.id",

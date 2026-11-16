@@ -3,17 +3,19 @@
 
 import { createContextKey, trace, type Context, type SpanContext } from '@opentelemetry/api';
 import type { ReadableSpan, Span, SpanProcessor } from '@opentelemetry/sdk-trace-base';
-import { AGENT_NAME_KEY, AGENT_VERSION_KEY } from './internal.js';
+import { AGENT_NAME_KEY, AGENT_VERSION_KEY, hasContextManager } from './internal.js';
 
 /**
  * The test case evaluate() is running right now.
  *
- * The case is put in the OTel context the task runs in (TEST_CASE_KEY), so
- * with a context manager (register() installs one on Node) it follows the task
- * across `await`. A context manager may be missing, so evaluate() also keeps a
- * module-level "current case" from the task call until its Promise settles:
- * cases run one at a time, so every span started meanwhile belongs to it. A
- * span whose context carries a case uses that one.
+ * The case is put in the OTel context the task runs in (TEST_CASE_KEY). With a
+ * context manager (register() installs one on Node) it follows the task across
+ * `await`, and only spans started in that context belong to the case: a timer,
+ * poller or another request started outside it is never stamped. Without a
+ * context manager the context is lost at once, so evaluate() then also keeps
+ * a module-level "current case" until the task settles. That fallback is used
+ * only while exactly one case is running: with overlapping evaluate() runs and
+ * no context manager no span can be told apart, so none is stamped.
  */
 export interface ActiveTestCase {
   attributes: Record<string, string>;
@@ -25,7 +27,9 @@ export interface ActiveTestCase {
   readonly seen: Set<string>;
 }
 
-let activeCase: ActiveTestCase | undefined;
+/** Cases running without a context manager (see ActiveTestCase). */
+const fallbackCases = new Set<ActiveTestCase>();
+let overlapWarned = false;
 
 const AGENT_KEYS: ReadonlySet<string> = new Set([AGENT_NAME_KEY, AGENT_VERSION_KEY]);
 
@@ -37,11 +41,26 @@ export const TEST_CASE_KEY = createContextKey('opensearch-genai-observability-sd
  * the previous one; call it once the task has settled.
  */
 export function enterTestCase(testCase: ActiveTestCase): () => void {
-  const previous = activeCase;
-  activeCase = testCase;
+  // With a context manager the case rides in the task's context only.
+  if (hasContextManager()) return () => {};
+  fallbackCases.add(testCase);
+  if (fallbackCases.size > 1 && !overlapWarned) {
+    overlapWarned = true;
+    console.warn(
+      "[opensearch-genai-observability-sdk-ts] evaluate(): test cases overlap and no OTel context " +
+        "manager is set, so their spans cannot be told apart and are not stamped with test.* " +
+        "attributes. Call register() (it installs one on Node) or run one evaluate() at a time.",
+    );
+  }
   return () => {
-    if (activeCase === testCase) activeCase = previous;
+    fallbackCases.delete(testCase);
   };
+}
+
+/** The fallback case, when exactly one case runs without a context manager. */
+function fallbackCase(): ActiveTestCase | undefined {
+  if (fallbackCases.size !== 1) return undefined;
+  return fallbackCases.values().next().value;
 }
 
 function parentSpanId(span: Span): string | undefined {
@@ -66,7 +85,7 @@ function parentSpanId(span: Span): string | undefined {
  */
 export class TestCaseSpanProcessor implements SpanProcessor {
   onStart(span: Span, parentContext: Context): void {
-    const testCase = (parentContext?.getValue(TEST_CASE_KEY) as ActiveTestCase | undefined) ?? activeCase;
+    const testCase = (parentContext?.getValue(TEST_CASE_KEY) as ActiveTestCase | undefined) ?? fallbackCase();
     if (!testCase) return;
 
     const ctx = span.spanContext();

@@ -2,6 +2,8 @@
 // Copyright OpenSearch Contributors
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { context, trace } from '@opentelemetry/api';
+import { AsyncLocalStorageContextManager } from '@opentelemetry/context-async-hooks';
 import { evaluate, defineScorer, type EvalScore } from '../src/benchmark.js';
 import { withObserve, Op } from '../src/observe.js';
 import { getFinishedSpans, getFinishedLogRecords, clearSpans } from './setup.js';
@@ -215,5 +217,80 @@ describe('evaluate() stays synchronous for sync callers', () => {
     });
     expect(result).not.toBeInstanceOf(Promise);
     expect(result.cases[0].status).toBe('pass');
+  });
+});
+
+describe('evaluate() keeps each case to its own spans with async tasks', () => {
+  const stamped = (name: string) =>
+    getFinishedSpans().filter(s => s.name === name && s.attributes['test.case.id'] !== undefined);
+
+  it('does not leave a case active after overlapping runs', async () => {
+    const slow = async (q: unknown) => {
+      await tick();
+      return agent(q);
+    };
+    await Promise.all([
+      evaluate({ name: 'A', task: slow, data: [{ input: 'a1' }, { input: 'a2' }], scores: [] }),
+      evaluate({ name: 'B', task: slow, data: [{ input: 'b1' }], scores: [] }),
+    ]);
+    const roots = getFinishedSpans().filter(s => s.name === 'invoke_agent travel_agent');
+    expect(roots.map(s => s.attributes['test.suite.name']).sort()).toEqual(['A', 'A', 'B']);
+
+    // A span started after both runs belongs to no case.
+    trace.getTracer('later').startSpan('unrelated').end();
+    expect(stamped('unrelated')).toHaveLength(0);
+  });
+
+  it('does not stamp a background span started while the task awaits', async () => {
+    let fire!: () => void;
+    const fired = new Promise<void>(resolve => (fire = resolve));
+    // Scheduled outside the case, like a poller or another request.
+    const timer = setTimeout(() => {
+      trace.getTracer('background').startSpan('background').end();
+      fire();
+    }, 1);
+    const result = await evaluate({
+      name: 'bg',
+      task: async (q: unknown) => {
+        await fired; // the background span starts during this await
+        return agent(q);
+      },
+      data: [{ input: 'q', caseId: 'c1' }],
+      scores: [],
+    });
+    clearTimeout(timer);
+
+    expect(stamped('background')).toHaveLength(0);
+    const root = getFinishedSpans().find(s => s.name === 'invoke_agent travel_agent')!;
+    expect(root.attributes['test.case.id']).toBe('c1');
+    expect(result.cases[0].traceId).toBe(root.spanContext().traceId);
+  });
+
+  it('without a context manager, stamps a lone run and leaves nothing active after overlapping runs', async () => {
+    context.disable();
+    try {
+      const manual = (q: unknown) => {
+        trace.getTracer('manual').startSpan('invoke_agent manual').end();
+        return q;
+      };
+      // One run at a time: the module-level fallback stamps the case's spans.
+      await evaluate({ name: 'solo', task: manual, data: [{ input: 's', caseId: 's1' }], scores: [] });
+      expect(stamped('invoke_agent manual').map(s => s.attributes['test.case.id'])).toEqual(['s1']);
+      clearSpans();
+
+      const slow = async (q: unknown) => {
+        await tick();
+        return manual(q);
+      };
+      await Promise.all([
+        evaluate({ name: 'A', task: slow, data: [{ input: 'a1' }, { input: 'a2' }], scores: [] }),
+        evaluate({ name: 'B', task: slow, data: [{ input: 'b1' }], scores: [] }),
+      ]);
+      trace.getTracer('later').startSpan('unrelated').end();
+      expect(stamped('unrelated')).toHaveLength(0);
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('test cases overlap'));
+    } finally {
+      context.setGlobalContextManager(new AsyncLocalStorageContextManager().enable());
+    }
   });
 });
