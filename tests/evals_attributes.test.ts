@@ -280,7 +280,7 @@ describe('evaluator on EvalScore', () => {
     expect(c.attributes['opensearch.gen_ai.evaluation.evaluator.name']).toBeUndefined();
   });
 
-  it('a returned EvalScore evaluator wins over the declaration', () => {
+  it('a returned EvalScore evaluator wins over the declaration, without its type', () => {
     const s = defineScorer(
       { name: 'q', evaluator: 'declared', evaluatorType: 'code' },
       function q() { return { name: 'q', value: 1, evaluator: 'actual' }; },
@@ -288,7 +288,8 @@ describe('evaluator on EvalScore', () => {
     evaluate({ name: 'suite', task: tracedTask, data: [{ input: 'a' }], scores: [s] });
     const [r] = getFinishedLogRecords();
     expect(r.attributes['opensearch.gen_ai.evaluation.evaluator.name']).toBe('actual');
-    expect(r.attributes['opensearch.gen_ai.evaluation.evaluator.type']).toBe('code');
+    // Another evaluator's result: the declared type describes "declared", not "actual".
+    expect(r.attributes['opensearch.gen_ai.evaluation.evaluator.type']).toBeUndefined();
   });
 
   it('Benchmark.log() evaluator defaults apply to every score; an EvalScore wins', () => {
@@ -394,6 +395,30 @@ describe('scorer judge fields apply only to its own evaluator', () => {
     expect(other['gen_ai.request.model']).toBeUndefined();
     expect(other['opensearch.gen_ai.evaluation.evaluator.description']).toBeUndefined();
     expect(other['gen_ai.prompt.name']).toBeUndefined();
+  });
+});
+
+describe('a scorer declaration applies only to its own evaluator', () => {
+  it('keeps evaluatorType, threshold, direction and bounds off another evaluator\'s results', () => {
+    const wrapper = defineScorer(
+      { name: 'wrapper', evaluator: 'wrapper', evaluatorType: 'code', threshold: 0.8, scoreMin: 0, scoreMax: 1 },
+      () => [
+        { name: 'faithfulness', value: 0.7, evaluator: 'deepeval.faithfulness' },
+        { name: 'own', value: 0.7 },
+      ],
+    );
+    const result = evaluate({ name: 'suite', task: tracedTask, data: [{ input: 'a' }], scores: [wrapper] });
+    const byName = Object.fromEntries(getFinishedLogRecords().map((r) => [r.attributes['gen_ai.evaluation.name'], r]));
+    const other = byName['faithfulness'].attributes;
+    expect(other['opensearch.gen_ai.evaluation.evaluator.name']).toBe('deepeval.faithfulness');
+    expect(other['opensearch.gen_ai.evaluation.evaluator.type']).toBeUndefined();
+    expect(other['opensearch.gen_ai.evaluation.score.threshold']).toBeUndefined();
+    expect(other['gen_ai.evaluation.score.label']).toBeUndefined();
+    const own = byName['own'].attributes;
+    expect(own['opensearch.gen_ai.evaluation.evaluator.name']).toBe('wrapper');
+    expect(own['opensearch.gen_ai.evaluation.evaluator.type']).toBe('code');
+    expect(own['gen_ai.evaluation.score.label']).toBe('fail');
+    expect(result.cases[0].verdicts).toEqual({ own: 'fail' });
   });
 });
 

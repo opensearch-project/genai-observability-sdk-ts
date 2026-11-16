@@ -34,6 +34,7 @@ import {
   normalizeTraceId,
   resolveAgent,
   runAttributes,
+  TEST_SUITE_RUN_NAME_KEY,
   validateMetadataKeys,
 } from './internal.js';
 import { ciPipelineAttributes } from './cicd.js';
@@ -177,21 +178,36 @@ const EVALUATOR_TYPES: readonly EvaluatorType[] = ['llm_judge', 'code', 'human',
  * returned `EvalScore` win. Throws on an unknown `direction` / `evaluatorType`
  * or a non-finite `threshold` / `scoreMin` / `scoreMax`.
  */
-export function defineScorer<F extends ScorerFn>(spec: ScorerSpec, fn: F): Scorer<F> {
-  if (spec.direction !== undefined && !DIRECTIONS.includes(spec.direction)) {
-    throw new Error(`direction must be one of ${DIRECTIONS.join(', ')}; got "${spec.direction}"`);
+/**
+ * What is wrong with the rule fields of a `defineScorer()` spec or a returned
+ * `EvalScore`: an unknown `direction` / `evaluatorType`, or a non-finite
+ * `threshold` / `scoreMin` / `scoreMax`. Undefined when they are valid.
+ */
+function ruleError(rule: {
+  direction?: unknown;
+  evaluatorType?: unknown;
+  threshold?: unknown;
+  scoreMin?: unknown;
+  scoreMax?: unknown;
+}): string | undefined {
+  if (rule.direction !== undefined && !DIRECTIONS.includes(rule.direction as ScoreDirection)) {
+    return `direction must be one of ${DIRECTIONS.join(', ')}; got ${JSON.stringify(rule.direction)}`;
   }
-  if (spec.evaluatorType !== undefined && !EVALUATOR_TYPES.includes(spec.evaluatorType)) {
-    throw new Error(
-      `evaluatorType must be one of ${EVALUATOR_TYPES.join(', ')}; got "${spec.evaluatorType}"`,
-    );
+  if (rule.evaluatorType !== undefined && !EVALUATOR_TYPES.includes(rule.evaluatorType as EvaluatorType)) {
+    return `evaluatorType must be one of ${EVALUATOR_TYPES.join(', ')}; got ${JSON.stringify(rule.evaluatorType)}`;
   }
   for (const key of ['threshold', 'scoreMin', 'scoreMax'] as const) {
-    const v = spec[key];
+    const v = rule[key];
     if (v !== undefined && (typeof v !== 'number' || !Number.isFinite(v))) {
-      throw new Error(`${key} must be a finite number; got ${JSON.stringify(v)}`);
+      return `${key} must be a finite number; got ${JSON.stringify(v)}`;
     }
   }
+  return undefined;
+}
+
+export function defineScorer<F extends ScorerFn>(spec: ScorerSpec, fn: F): Scorer<F> {
+  const invalid = ruleError(spec);
+  if (invalid) throw new Error(invalid);
   const resolved: ScorerSpec = {
     ...spec,
     direction: spec.direction ?? (spec.threshold !== undefined ? 'maximize' : undefined),
@@ -208,23 +224,22 @@ function specOf(fn: ScorerFn): ScorerSpec | undefined {
 }
 
 /**
- * Fill unset rule fields of a score from its scorer's declaration. The description and judge
- * fields are filled only for the scorer's own evaluator: a score whose `evaluator` is unset or
- * equals the declared one. A scorer that returns results of other evaluators (for example
- * `{ evaluator: 'deepeval.faithfulness' }`) does not stamp its own judge on them.
+ * Fill unset fields of a score from its scorer's declaration, for the scorer's own evaluator
+ * only: a score whose `evaluator` is unset or equals the declared one. A scorer that returns
+ * results of other evaluators (for example `{ evaluator: 'deepeval.faithfulness' }`) does not
+ * stamp its evaluator type, rule, bounds, description or judge on them.
  */
 function applySpec(s: EvalScore, spec?: ScorerSpec): EvalScore {
   if (!spec) return s;
-  const rule: EvalScore = {
+  if (s.evaluator !== undefined && s.evaluator !== spec.evaluator) return s;
+  return {
     ...s,
+    evaluator: s.evaluator ?? spec.evaluator,
+    evaluatorType: s.evaluatorType ?? spec.evaluatorType,
     threshold: s.threshold ?? spec.threshold,
     direction: s.direction ?? spec.direction,
     scoreMin: s.scoreMin ?? spec.scoreMin,
     scoreMax: s.scoreMax ?? spec.scoreMax,
-  };
-  if (s.evaluator !== undefined && s.evaluator !== spec.evaluator) return rule;
-  return {
-    ...rule,
     evaluatorDescription: s.evaluatorDescription ?? spec.evaluatorDescription,
     judgeModel: s.judgeModel ?? spec.judgeModel,
     judgePromptName: s.judgePromptName ?? spec.judgePromptName,
@@ -626,7 +641,7 @@ export class Benchmark {
 
   /** `opensearch.test.suite.run.name` of the run, when given. */
   get runName(): string | undefined {
-    return this._run["opensearch.test.suite.run.name"];
+    return this._run[TEST_SUITE_RUN_NAME_KEY];
   }
 
   log(options: {
@@ -831,19 +846,9 @@ function invalidEvalScore(value: unknown): string | undefined {
   if (s.label !== undefined && typeof s.label !== 'string') {
     return `an EvalScore "${s.name}" whose label is not a string`;
   }
-  // Same checks as defineScorer(), so a returned EvalScore cannot write values it would reject.
-  if (s.evaluatorType !== undefined && !EVALUATOR_TYPES.includes(s.evaluatorType as EvaluatorType)) {
-    return `an EvalScore "${s.name}" whose evaluatorType is not one of ${EVALUATOR_TYPES.join(', ')}`;
-  }
-  if (s.direction !== undefined && !DIRECTIONS.includes(s.direction as ScoreDirection)) {
-    return `an EvalScore "${s.name}" whose direction is not one of ${DIRECTIONS.join(', ')}`;
-  }
-  for (const key of ['threshold', 'scoreMin', 'scoreMax'] as const) {
-    const v = s[key];
-    if (v !== undefined && (typeof v !== 'number' || !Number.isFinite(v))) {
-      return `an EvalScore "${s.name}" whose ${key} is not a finite number`;
-    }
-  }
+  // The defineScorer() checks, so a returned EvalScore cannot write values it would reject.
+  const invalidRule = ruleError(s);
+  if (invalidRule) return `an EvalScore "${s.name}" whose ${invalidRule}`;
   for (const key of [
     'evaluator',
     'evaluatorDescription',
@@ -1119,11 +1124,8 @@ function* evaluateSteps(options: EvaluateOptions): Generator<PromiseLike<unknown
         identity,
         { traceId: root?.traceId, spanId: root?.spanId },
         filteredMetadata,
-        {
-          evaluator: group.spec?.evaluator,
-          evaluatorType: group.spec?.evaluatorType,
-          errorType: group.errorType,
-        },
+        // applySpec() filled the declared evaluator (own scores only).
+        { errorType: group.errorType },
       );
     }
 
@@ -1151,7 +1153,7 @@ function* evaluateSteps(options: EvaluateOptions): Generator<PromiseLike<unknown
     runId,
     cases,
     elapsedMs(runStart),
-    run["opensearch.test.suite.run.name"],
+    run[TEST_SUITE_RUN_NAME_KEY],
   );
   console.log(formatSummary(summary));
 
