@@ -2,6 +2,7 @@
 // Copyright OpenSearch Contributors
 
 import { context, createContextKey, ROOT_CONTEXT } from "@opentelemetry/api";
+import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks";
 
 const CONTEXT_PROBE = createContextKey("opensearch-genai-observability-sdk.contextProbe");
 
@@ -9,6 +10,21 @@ const CONTEXT_PROBE = createContextKey("opensearch-genai-observability-sdk.conte
 export function hasContextManager(): boolean {
   const probe = ROOT_CONTEXT.setValue(CONTEXT_PROBE, true);
   return context.with(probe, () => context.active().getValue(CONTEXT_PROBE) === true);
+}
+
+/**
+ * @internal On Node, install `AsyncLocalStorageContextManager` as the global context manager when
+ * none is set, so the active span and the running test case follow `await`. A context manager you
+ * installed is kept. Elsewhere (no Node `process`), nothing is installed.
+ */
+export function ensureContextManager(): void {
+  if (typeof process === "undefined" || !process.versions?.node) return;
+  if (hasContextManager()) return;
+  try {
+    context.setGlobalContextManager(new AsyncLocalStorageContextManager().enable());
+  } catch {
+    // async_hooks unavailable: spans still export, without async context.
+  }
 }
 
 export const RESERVED_KEYS: ReadonlySet<string> = new Set([

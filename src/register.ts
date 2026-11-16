@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright OpenSearch Contributors
 
-import { context, type TracerProvider } from "@opentelemetry/api";
+import { type TracerProvider } from "@opentelemetry/api";
 import { Resource } from "@opentelemetry/resources";
 import {
   BasicTracerProvider,
@@ -25,7 +25,7 @@ import {
   type OtlpSignal,
 } from "./otlp-env.js";
 import { installTestCaseProcessor } from "./testcase.js";
-import { hasContextManager, setAgentDefaults } from "./internal.js";
+import { ensureContextManager, setAgentDefaults } from "./internal.js";
 import {
   hasGlobalLoggerProvider,
   getSdkLoggerProvider,
@@ -726,22 +726,6 @@ export async function autoInstrument(
 }
 
 /**
- * On Node, install `AsyncLocalStorageContextManager` when no global context manager is set, so
- * the active span follows async code (`enrich()`, `markAgentRoot()`, inline `score()` and span
- * nesting work after `await register()`). A context manager you installed is kept.
- */
-async function ensureContextManager(): Promise<void> {
-  if (typeof process === "undefined" || !process.versions?.node) return;
-  if (hasContextManager()) return;
-  try {
-    const { AsyncLocalStorageContextManager } = await import("@opentelemetry/context-async-hooks");
-    context.setGlobalContextManager(new AsyncLocalStorageContextManager().enable());
-  } catch {
-    // Not resolvable (for example a bundle without it): spans still export, without async context.
-  }
-}
-
-/**
  * Set up the OTel traces pipeline and the logs pipeline that carries
  * evaluation events (`gen_ai.evaluation.result`).
  *
@@ -820,7 +804,7 @@ export async function register(
 
   const setGlobal = options.setGlobal ?? true;
   if (setGlobal) {
-    await ensureContextManager();
+    ensureContextManager();
     provider.register();
   }
 

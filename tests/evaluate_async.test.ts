@@ -320,30 +320,43 @@ describe('evaluate() keeps each case to its own spans with async tasks', () => {
     expect(result.cases[0].traceId).toBe(root.spanContext().traceId);
   });
 
-  it('without a context manager, stamps a lone run and leaves nothing active after overlapping runs', async () => {
+  it('where no context manager can be installed, stamps a lone run and no overlapping run', async () => {
     context.disable();
+    // Not Node: evaluate() cannot install AsyncLocalStorageContextManager.
+    const versions = Object.getOwnPropertyDescriptor(process, 'versions')!;
+    Object.defineProperty(process, 'versions', { ...versions, value: { ...process.versions, node: undefined } });
     try {
       const manual = (q: unknown) => {
         trace.getTracer('manual').startSpan('invoke_agent manual').end();
         return q;
       };
-      // One run at a time: the module-level fallback stamps the case's spans.
+      // One run at a time: every span is parentless and belongs to the only running case.
       await evaluate({ name: 'solo', task: manual, data: [{ input: 's', caseId: 's1' }], scores: [] });
       expect(stamped('invoke_agent manual').map(s => s.attributes['test.case.id'])).toEqual(['s1']);
       clearSpans();
 
+      // Both tasks start their span only once both cases run, and keep running after it.
+      let started = 0;
+      let release!: () => void;
+      const bothRunning = new Promise<void>(resolve => (release = resolve));
       const slow = async (q: unknown) => {
+        if (++started === 2) release();
+        await bothRunning;
+        manual(q);
         await tick();
-        return manual(q);
+        return q;
       };
       await Promise.all([
-        evaluate({ name: 'A', task: slow, data: [{ input: 'a1' }, { input: 'a2' }], scores: [] }),
+        evaluate({ name: 'A', task: slow, data: [{ input: 'a1' }], scores: [] }),
         evaluate({ name: 'B', task: slow, data: [{ input: 'b1' }], scores: [] }),
       ]);
+      // Both cases were running when their spans started: none is guessed.
+      expect(getFinishedSpans().filter(s => s.name === 'invoke_agent manual')).toHaveLength(2);
+      expect(stamped('invoke_agent manual')).toHaveLength(0);
       trace.getTracer('later').startSpan('unrelated').end();
       expect(stamped('unrelated')).toHaveLength(0);
-      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining('test cases overlap'));
     } finally {
+      Object.defineProperty(process, 'versions', versions);
       context.setGlobalContextManager(new AsyncLocalStorageContextManager().enable());
     }
   });

@@ -1012,9 +1012,10 @@ export type EvaluateResult<O extends EvaluateOptions = EvaluateOptions> =
  * started in a context without a case (`propagation.extract(ROOT_CONTEXT,
  * headers)`, `context.with(ROOT_CONTEXT, ...)`) is attached to the case only
  * while exactly one case runs and when it has no local parent; with
- * overlapping runs, start the agent inside the task's context. Without a
- * context manager every span is parentless, so the same rule stamps a lone
- * run and nothing for overlapping runs (with a warning). Scorers run after the task, outside
+ * overlapping runs, start the agent inside the task's context. On Node,
+ * evaluate() installs `AsyncLocalStorageContextManager` when no context
+ * manager is set; where none can be installed every span is parentless, so
+ * the same rule stamps a lone run and nothing for overlapping runs. Scorers run after the task, outside
  * the case and in an empty context: an LLM judge's spans are their own trace
  * (also when evaluate() runs inside a span) and are not stamped.
  *

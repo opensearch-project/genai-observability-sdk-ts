@@ -3,7 +3,7 @@
 
 import { createContextKey, trace, type Context, type SpanContext } from '@opentelemetry/api';
 import type { ReadableSpan, Span, SpanProcessor } from '@opentelemetry/sdk-trace-base';
-import { AGENT_NAME_KEY, AGENT_VERSION_KEY, hasContextManager } from './internal.js';
+import { AGENT_NAME_KEY, AGENT_VERSION_KEY, ensureContextManager } from './internal.js';
 
 /**
  * The test case evaluate() is running right now.
@@ -16,9 +16,11 @@ import { AGENT_NAME_KEY, AGENT_VERSION_KEY, hasContextManager } from './internal
  * a callback bound before the case) is attached to the case only when exactly
  * one case is running and the span has no local parent (no parent, or a
  * remote one). With overlapping evaluate() runs such a span is not guessed at:
- * the agent must then start inside the task's context. Without a context
- * manager the context is lost at once, so every span is parentless and the
- * same rule applies: a lone case is stamped, overlapping cases are not.
+ * the agent must then start inside the task's context. evaluate() installs
+ * `AsyncLocalStorageContextManager` on Node when no context manager is set.
+ * Where none can be installed the context is lost at once, so every span is
+ * parentless and the same rule applies: a lone case is stamped, overlapping
+ * cases are not.
  */
 export interface ActiveTestCase {
   attributes: Record<string, string>;
@@ -37,7 +39,6 @@ export interface ActiveTestCase {
 
 /** Cases running right now (see ActiveTestCase). */
 const runningCases = new Set<ActiveTestCase>();
-let overlapWarned = false;
 
 const AGENT_KEYS: ReadonlySet<string> = new Set([AGENT_NAME_KEY, AGENT_VERSION_KEY]);
 
@@ -50,14 +51,6 @@ export const TEST_CASE_KEY = createContextKey('opensearch-genai-observability-sd
  */
 export function enterTestCase(testCase: ActiveTestCase): () => void {
   runningCases.add(testCase);
-  if (runningCases.size > 1 && !hasContextManager() && !overlapWarned) {
-    overlapWarned = true;
-    console.warn(
-      "[opensearch-genai-observability-sdk-ts] evaluate(): test cases overlap and no OTel context " +
-        "manager is set, so their spans cannot be told apart and are not stamped with test.* " +
-        "attributes. Call register() (it installs one on Node) or run one evaluate() at a time.",
-    );
-  }
   return () => {
     runningCases.delete(testCase);
   };
@@ -92,8 +85,9 @@ function hasLocalParent(parent: string | undefined, parentContext: Context | und
  * incoming request headers). It is a case root when it has no parent, or when
  * its parent was not started inside the same case (a remote parent). A root
  * started in the task's context wins the case trace over one attached as the
- * only running case. Without a context manager every span is a root, so all
- * of them are stamped and the first one is used as the trace context.
+ * only running case. Without a context manager (none could be installed)
+ * every span is a root, so a lone case stamps all of them and uses the first
+ * one as the trace context.
  *
  * register() installs it. evaluate() also adds it to the global
  * BasicTracerProvider (OTel JS 1.x) when missing. With a provider that cannot
@@ -159,8 +153,12 @@ export function installTestCaseProcessor(provider: unknown): boolean {
   return true;
 }
 
-/** @internal Make sure the global tracer provider stamps test case root spans. */
+/**
+ * @internal Make sure the global tracer provider stamps test case root spans, and (on Node) that
+ * a context manager carries the case across `await`.
+ */
 export function ensureGlobalTestCaseProcessor(): void {
+  ensureContextManager();
   const global = trace.getTracerProvider() as unknown as { getDelegate?: () => unknown };
   const delegate = typeof global.getDelegate === 'function' ? global.getDelegate() : global;
   if (instrumented.has(delegate as object)) return;
