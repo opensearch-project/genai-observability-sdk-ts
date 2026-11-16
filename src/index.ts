@@ -60,6 +60,7 @@ export type {
   SyncScorerFn,
   ScorerSpec,
   EvaluateOptions,
+  EvaluateOptionsOf,
   EvaluateResult,
   BenchmarkOptions,
   TestCaseStatus,

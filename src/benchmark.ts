@@ -970,6 +970,16 @@ export interface EvaluateOptions {
   recordExpected?: boolean;
 }
 
+/**
+ * The options of an `evaluate()` call with task `T` and scorers `S`. Only the task and scorer
+ * types are inferred, so a misspelled option (`recordExpectd`) or data item field is still a
+ * compile error.
+ */
+export type EvaluateOptionsOf<T extends EvaluateOptions['task'], S extends ScorerFn> = Omit<
+  EvaluateOptions,
+  'task' | 'scores'
+> & { task: T; scores: S[] };
+
 type CallKind<F> = F extends (...args: never[]) => infer R
   ? unknown extends R
     ? 'maybe'
@@ -1034,8 +1044,10 @@ export type EvaluateResult<O extends EvaluateOptions = EvaluateOptions> =
  * `passed`, or `threshold` + `direction` from the score or its `defineScorer()`
  * declaration); else `pass`. Scores without a declared rule never fail a case.
  */
-export function evaluate<O extends EvaluateOptions>(options: O): EvaluateResult<O> {
-  return runMaybeAsync(evaluateSteps(options)) as EvaluateResult<O>;
+export function evaluate<T extends EvaluateOptions['task'], S extends ScorerFn>(
+  options: EvaluateOptionsOf<T, S>,
+): EvaluateResult<EvaluateOptionsOf<T, S>> {
+  return runMaybeAsync(evaluateSteps(options)) as EvaluateResult<EvaluateOptionsOf<T, S>>;
 }
 
 /** evaluate()'s run, yielding each Promise it has to wait for (see runMaybeAsync). */

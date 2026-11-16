@@ -37,3 +37,11 @@ export type Checks = [
   Expect<Equal<typeof _asyncScorer, Either>>,
   Expect<Equal<typeof _syncRun, BenchmarkResult>>,
 ];
+
+// Misspelled options are compile errors (excess-property checks), also in data items.
+// @ts-expect-error recordExpectd is not an option (recordExpected is)
+evaluate({ name: 'typo', task: (q: unknown) => q, data: [], scores: [], recordExpectd: false });
+// @ts-expect-error runname is not an option (runName is)
+evaluate({ name: 'typo', task: async (q: unknown) => q, data: [], scores: [], runname: 'x' });
+// @ts-expect-error caseID is not a data item field (caseId is)
+evaluate({ name: 'typo', task: (q: unknown) => q, data: [{ input: 1, caseID: 'c' }], scores: [] });
