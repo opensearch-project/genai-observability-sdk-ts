@@ -307,7 +307,9 @@ const tracedAgent = withTracing(myAgentFunction);
 | `gen_ai.input.messages` / `gen_ai.output.messages` | All ops except `execute_tool` |
 | `gen_ai.tool.call.arguments` / `gen_ai.tool.call.result` | When `op=Op.EXECUTE_TOOL` |
 
-Inputs are recorded as an object keyed by the function's parameter names (read from its source, so arrows compiled by tsx/esbuild such as `city=>...` work too); destructured or extra arguments are keyed `arg0`, `arg1`, .... The return value becomes `gen_ai.output.messages` (or `gen_ai.tool.call.result`) only when the function did not set it itself: messages set with `enrich({ outputMessages })` inside the function are kept.
+**Changed in 0.2.0.** Without `op`, `observe()` / `withObserve()` set no GenAI attributes (no `gen_ai.operation.name`, no `gen_ai.agent.name`), as in the Python SDK, and only `invoke_agent` / `create_agent` name an agent. So a root span from `observe(fn)` no longer names the agent that `evaluate()` and inline `score()` group results under, and `listRootSpans()` does not list it. Trace the agent's entry point with `op: Op.INVOKE_AGENT`, call `markAgentRoot()` in it, or pass `agentName` to `evaluate()` / `score()` / `register()`.
+
+Inputs are recorded as an object keyed by the function's parameter names (read from its source, so arrows compiled by tsx/esbuild such as `city=>...` work too); destructured or extra arguments are keyed `arg0`, `arg1`, ... (`_arg1` if a parameter is itself named `arg1`). The return value becomes `gen_ai.output.messages` (or `gen_ai.tool.call.result`) only when the function did not set it itself: messages set with `enrich({ outputMessages })` inside the function are kept.
 
 **Dynamic naming with `nameFrom`:**
 
