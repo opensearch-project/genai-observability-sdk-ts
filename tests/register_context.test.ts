@@ -2,12 +2,19 @@
 // Copyright OpenSearch Contributors
 
 // No tests/setup.ts here: this file proves register() alone gives enrich() an active span.
-import { describe, it, expect } from 'vitest';
-import { context, createContextKey, ROOT_CONTEXT } from '@opentelemetry/api';
+import { describe, it, expect, afterEach } from 'vitest';
+import { context, createContextKey, ROOT_CONTEXT, trace } from '@opentelemetry/api';
+import { AsyncLocalStorageContextManager } from '@opentelemetry/context-async-hooks';
 import { InMemorySpanExporter } from '@opentelemetry/sdk-trace-base';
 import { register } from '../src/register.js';
 import { withObserve, Op } from '../src/observe.js';
 import { enrich } from '../src/enrich.js';
+
+// Each test starts from no global context manager or tracer provider, in any order.
+afterEach(() => {
+  context.disable();
+  trace.disable();
+});
 
 describe('register() context manager', () => {
   it('installs one on Node, so enrich() works across await', async () => {
@@ -32,9 +39,13 @@ describe('register() context manager', () => {
   });
 
   it('keeps a context manager that is already set', async () => {
-    const before = (context as unknown as { _getContextManager(): unknown })._getContextManager();
+    const mine = new AsyncLocalStorageContextManager().enable();
+    expect(context.setGlobalContextManager(mine)).toBe(true);
     const provider = await register({ exporter: new InMemorySpanExporter(), logs: false, autoInstrument: false });
-    expect((context as unknown as { _getContextManager(): unknown })._getContextManager()).toBe(before);
-    await provider.shutdown();
+    try {
+      expect((context as unknown as { _getContextManager(): unknown })._getContextManager()).toBe(mine);
+    } finally {
+      await provider.shutdown();
+    }
   });
 });
