@@ -7,6 +7,7 @@ import { InMemorySpanExporter, type BasicTracerProvider } from '@opentelemetry/s
 import {
   register,
   instrumentationsFor,
+  isNotInstalled,
   OPENAI_INSTRUMENTATION,
   AWS_SDK_INSTRUMENTATION,
   type RegisterOptions,
@@ -50,5 +51,32 @@ describe('register({ autoInstrument }) values from JS callers', () => {
       autoInstrument: null as never,
     });
     expect(provider).toBeDefined();
+  });
+});
+
+describe('isNotInstalled()', () => {
+  const PKG = '@opentelemetry/instrumentation-openai';
+  const err = (code: string, message: string) => Object.assign(new Error(message), { code });
+
+  it('reads Node CJS and ESM resolver errors', () => {
+    expect(isNotInstalled(err('MODULE_NOT_FOUND', `Cannot find module '${PKG}'\nRequire stack:\n- /app/x.js`), PKG)).toBe(true);
+    expect(isNotInstalled(err('ERR_MODULE_NOT_FOUND', `Cannot find package '${PKG}' imported from /app/x.mjs`), PKG)).toBe(true);
+  });
+
+  it('reads a Yarn PnP error, which does not quote the package name', () => {
+    const pnp =
+      `@opensearch-project/genai-observability-sdk-ts tried to access ${PKG} (a peer dependency) but it ` +
+      `isn't provided by your application; this makes the require call ambiguous and unsound.`;
+    expect(isNotInstalled(err('MODULE_NOT_FOUND', pnp), PKG)).toBe(true);
+  });
+
+  it('a missing dependency of the installed package is not "not installed"', () => {
+    const nested = `Cannot find module '@opentelemetry/semantic-conventions' imported from /app/node_modules/${PKG}/build/src/index.js`;
+    expect(isNotInstalled(err('ERR_MODULE_NOT_FOUND', nested), PKG)).toBe(false);
+  });
+
+  it('another error code is not "not installed"', () => {
+    expect(isNotInstalled(err('ERR_REQUIRE_ESM', `require() of ES Module ${PKG} not supported`), PKG)).toBe(false);
+    expect(isNotInstalled(new Error(`Cannot find module '${PKG}'`), PKG)).toBe(false);
   });
 });

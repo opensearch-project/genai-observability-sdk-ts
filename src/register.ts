@@ -648,11 +648,22 @@ const instrumentations = new Map<string, InstrumentationLike>();
 /** Package#export keys that failed to load or enable: warned about once, not tried again. */
 const failedInstrumentations = new Set<string>();
 
-function isNotInstalled(err: unknown, packageName: string): boolean {
+/** The specifier a Node resolver error names: `Cannot find module 'x'` / `Cannot find package 'x'`. */
+const NODE_MISSING_RE = /Cannot find (?:module|package) ['"]([^'"]+)['"]/;
+
+/**
+ * @internal Whether `err` from importing `packageName` means it is not installed: a
+ * MODULE_NOT_FOUND / ERR_MODULE_NOT_FOUND error about that package itself. Node quotes the
+ * missing specifier; Yarn PnP names it unquoted ("tried to access <package> ..."). A missing
+ * dependency of the installed package (another specifier) is a broken install, not this.
+ */
+export function isNotInstalled(err: unknown, packageName: string): boolean {
   const e = err as { code?: string; message?: string } | undefined;
   if (e?.code !== "ERR_MODULE_NOT_FOUND" && e?.code !== "MODULE_NOT_FOUND") return false;
-  // A missing dependency of an installed package is a broken install, not "not installed".
-  return (e.message ?? "").includes(`'${packageName}'`) || (e.message ?? "").includes(`"${packageName}"`);
+  const message = String(e.message ?? "");
+  const missing = NODE_MISSING_RE.exec(message)?.[1];
+  if (missing !== undefined) return missing === packageName || missing.startsWith(`${packageName}/`);
+  return message.includes(packageName);
 }
 
 function instrumentationKey(spec: AutoInstrumentationSpec): string {
