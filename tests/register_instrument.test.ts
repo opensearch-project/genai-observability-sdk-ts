@@ -73,9 +73,9 @@ describe('register() auto-instrumentation', () => {
     expect(second.getFinishedSpans().filter((s) => s.attributes['gen_ai.operation.name'] === 'chat')).toHaveLength(1);
   });
 
-  it('patches the AWS SDK: a Bedrock Converse call becomes a span', async () => {
+  it('patches the AWS SDK with autoInstrument: { awsSdk: true }: a Bedrock Converse call becomes a span', async () => {
     const exporter = new InMemorySpanExporter();
-    provider = await register({ exporter, batch: false, logs: false, setGlobal: false });
+    provider = await register({ exporter, batch: false, logs: false, setGlobal: false, autoInstrument: { awsSdk: true } });
     const { BedrockRuntimeClient, ConverseCommand } = require(
       '@aws-sdk/client-bedrock-runtime',
     ) as typeof import('@aws-sdk/client-bedrock-runtime');

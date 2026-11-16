@@ -34,7 +34,8 @@ import { register, observe, Op, enrich } from '../src/index.js';
 // 1. ESM: let the instrumentation patch `import` statements.
 registerHooks('@opentelemetry/instrumentation/hook.mjs', import.meta.url);
 
-// 2. Turns on the installed instrumentations (autoInstrument defaults to true).
+// 2. Turns on the installed OpenAI instrumentation (autoInstrument defaults to true;
+//    pass autoInstrument: { awsSdk: true } to also trace AWS SDK clients such as Bedrock).
 const provider = await register({ serviceName: 'openai-app' });
 
 // 3. Load openai only now, so it is patched.

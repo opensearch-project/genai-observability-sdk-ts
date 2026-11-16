@@ -131,18 +131,21 @@ export interface RegisterOptions {
   serviceVersion?: string;
   batch?: boolean;
   /**
-   * Turn on the installed instrumentations of AUTO_INSTRUMENTATIONS
-   * (`@opentelemetry/instrumentation-openai`, `@opentelemetry/instrumentation-aws-sdk`)
-   * with this provider. Default true. They patch the library when it is
-   * loaded, so register() must finish before `openai` or the AWS SDK is
-   * imported; in an ES module app, call register() in a module loaded with
-   * `node --import` after registering the `@opentelemetry/instrumentation/hook.mjs`
-   * loader hook (see the README). Pass false when you register these
-   * instrumentations yourself, else every call is traced twice. A package
-   * that fails to load or enable logs one warning and is skipped: register()
-   * still resolves.
+   * Turn on installed instrumentations with this provider. `true` (the
+   * default) turns on `@opentelemetry/instrumentation-openai`; pass
+   * `{ awsSdk: true }` to also turn on `@opentelemetry/instrumentation-aws-sdk`,
+   * which traces every AWS SDK v3 client call (S3, DynamoDB, SQS, ...), not
+   * only Bedrock, so it is off by default. `false` turns on none.
+   *
+   * They patch the library when it is loaded, so register() must finish
+   * before `openai` or the AWS SDK is imported; in an ES module app, call
+   * register() in a module loaded with `node --import` after registering the
+   * `@opentelemetry/instrumentation/hook.mjs` loader hook (see the README).
+   * Turn one off when you register it yourself, else every call is traced
+   * twice. A package that fails to load or enable logs one warning and is
+   * skipped: register() still resolves.
    */
-  autoInstrument?: boolean;
+  autoInstrument?: boolean | AutoInstrumentOptions;
   /**
    * Custom span exporter. Replaces the traces endpoint, protocol and sigv4 for
    * traces only. With `exporter` and no logs destination (`logExporter`,
@@ -181,6 +184,18 @@ export interface RegisterOptions {
   agentVersion?: string;
 }
 
+/** Which instrumentations `register({ autoInstrument })` turns on, when installed. */
+export interface AutoInstrumentOptions {
+  /** `@opentelemetry/instrumentation-openai` (`OpenAIInstrumentation`). Default true. */
+  openai?: boolean;
+  /**
+   * `@opentelemetry/instrumentation-aws-sdk` (`AwsInstrumentation`): Bedrock Runtime
+   * calls become chat spans, and every other AWS SDK v3 client call is traced too.
+   * Default false.
+   */
+  awsSdk?: boolean;
+}
+
 /** An OpenTelemetry JS instrumentation package register() turns on when it is installed. */
 export interface AutoInstrumentationSpec {
   /** Package (or module URL) to import. */
@@ -191,18 +206,35 @@ export interface AutoInstrumentationSpec {
   supported: string;
 }
 
+// The supported ranges are the releases built on `@opentelemetry/instrumentation` 0.2xx:
+// later ones need `@opentelemetry/api` 1.10, and this SDK is on OTel JS 1.x (`@opentelemetry/api` 1.9).
+
+/** Chat Completions, Responses and Embeddings of the `openai` package (>=4.19 <7). */
+export const OPENAI_INSTRUMENTATION: AutoInstrumentationSpec = {
+  packageName: "@opentelemetry/instrumentation-openai",
+  exportName: "OpenAIInstrumentation",
+  supported: ">=0.14.0 <0.22.0",
+};
+
 /**
- * Instrumentations `autoInstrument` turns on, when installed. The supported
- * ranges are the releases built on `@opentelemetry/instrumentation` 0.2xx:
- * later ones need `@opentelemetry/api` 1.10, and this SDK is on OTel JS 1.x
- * (`@opentelemetry/api` 1.9).
+ * AWS SDK for JavaScript v3: Bedrock Runtime calls (Converse, InvokeModel) become chat spans.
+ * It traces every AWS SDK client, so register() turns it on only with `autoInstrument: { awsSdk: true }`.
  */
-export const AUTO_INSTRUMENTATIONS: readonly AutoInstrumentationSpec[] = [
-  // Chat Completions, Responses and Embeddings of the `openai` package (>=4.19 <7).
-  { packageName: "@opentelemetry/instrumentation-openai", exportName: "OpenAIInstrumentation", supported: ">=0.14.0 <0.22.0" },
-  // AWS SDK for JavaScript v3: Bedrock Runtime calls (Converse, InvokeModel) become chat spans.
-  { packageName: "@opentelemetry/instrumentation-aws-sdk", exportName: "AwsInstrumentation", supported: ">=0.50.0 <0.79.0" },
-];
+export const AWS_SDK_INSTRUMENTATION: AutoInstrumentationSpec = {
+  packageName: "@opentelemetry/instrumentation-aws-sdk",
+  exportName: "AwsInstrumentation",
+  supported: ">=0.50.0 <0.79.0",
+};
+
+/** Instrumentations `autoInstrument: true` (the default) turns on, when installed. */
+export const AUTO_INSTRUMENTATIONS: readonly AutoInstrumentationSpec[] = [OPENAI_INSTRUMENTATION];
+
+/** The instrumentations a `register({ autoInstrument })` value turns on. */
+function instrumentationsFor(option: boolean | AutoInstrumentOptions | undefined): AutoInstrumentationSpec[] {
+  if (option === false) return [];
+  const { openai = true, awsSdk = false } = option === undefined || option === true ? {} : option;
+  return [...(openai ? [OPENAI_INSTRUMENTATION] : []), ...(awsSdk ? [AWS_SDK_INSTRUMENTATION] : [])];
+}
 
 const SIGNAL_PATH_RE = /\/v1\/(traces|logs)$/;
 
@@ -801,9 +833,10 @@ export async function register(
     chainLoggerProvider(provider, loggerProvider);
   }
 
-  if (options.autoInstrument ?? true) {
+  const specs = instrumentationsFor(options.autoInstrument);
+  if (specs.length > 0) {
     try {
-      await autoInstrument(provider);
+      await autoInstrument(provider, specs);
     } catch (err) {
       // autoInstrument() warns per package; this only guards register() itself.
       console.warn(

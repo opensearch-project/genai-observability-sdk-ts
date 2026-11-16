@@ -10,6 +10,7 @@ export {
 } from './register.js';
 export type {
   RegisterOptions,
+  AutoInstrumentOptions,
   SigV4Options,
   OtlpProtocol,
   OtlpProtocolOption,

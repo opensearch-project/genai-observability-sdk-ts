@@ -137,7 +137,7 @@ await register({
   endpoint: "http://my-collector:4318",  // base URL for traces and logs, or use env vars
   serviceName: "my-app",
   batch: true,            // BatchSpanProcessor (true) or Simple (false)
-  autoInstrument: true,   // turn on installed OpenAI / AWS SDK instrumentations
+  autoInstrument: true,   // turn on the installed OpenAI instrumentation ({ awsSdk: true } adds the AWS SDK)
   agentName: "travel_planner", // optional: the agent this process evaluates
   agentVersion: "v3",          // optional: its version
 });
@@ -169,7 +169,7 @@ An unknown agent is left out, never invented. `evaluate()` also stamps the agent
 | `serviceName` | `string` | `"unknown_service"` | `service.name` resource attribute |
 | `serviceVersion` | `string` | none | `service.version` resource attribute |
 | `batch` | `boolean` | `true` | Use BatchSpanProcessor when true |
-| `autoInstrument` | `boolean` | `true` | Turn on the installed instrumentations listed in [Auto-instrumentation](#auto-instrumentation), with this provider |
+| `autoInstrument` | `boolean \| { openai?: boolean; awsSdk?: boolean }` | `true` (OpenAI on, AWS SDK off) | Turn on the installed instrumentations listed in [Auto-instrumentation](#auto-instrumentation), with this provider. `{ awsSdk: true }` adds the AWS SDK instrumentation; `false` turns on none |
 | `exporter` | `SpanExporter` | none | Custom span exporter, used as given (traces only). Without a logs destination, no logs pipeline is set up (see [Endpoints](#endpoints-traces-and-evaluation-logs)) |
 | `headers` | `Record<string, string>` | none | Headers for every export (traces and logs). Over gRPC they are sent as gRPC metadata with lowercased keys (gRPC rejects uppercase keys) |
 | `logs` | `boolean` | `true` | Set up a LoggerProvider for evaluation events |
@@ -179,12 +179,16 @@ An unknown agent is left out, never invented. `evaluate()` also stamps the agent
 
 #### Auto-instrumentation
 
-With `autoInstrument` (the default), `register()` turns on each of these packages that is installed, with its own provider (also with `setGlobal: false`). It needs nothing else from you: no `registerInstrumentations()` call.
+`register()` turns on each of these packages that is installed and selected, with its own provider (also with `setGlobal: false`). It needs nothing else from you: no `registerInstrumentations()` call.
 
-| Package | Instruments | Supported versions (tested) |
-|---|---|---|
-| `@opentelemetry/instrumentation-openai` | `openai` >= 4.19 < 7: Chat Completions, Responses, Embeddings become `chat <model>` / `embeddings <model>` spans | >= 0.14 < 0.22 (0.21) |
-| `@opentelemetry/instrumentation-aws-sdk` | AWS SDK for JavaScript v3; Bedrock Runtime `Converse` / `InvokeModel` become `chat <model>` spans | >= 0.50 < 0.79 (0.78) |
+| Package | Instruments | Turned on | Supported versions (tested) |
+|---|---|---|---|
+| `@opentelemetry/instrumentation-openai` | `openai` >= 4.19 < 7: Chat Completions, Responses, Embeddings become `chat <model>` / `embeddings <model>` spans | by default (`autoInstrument: true`); off with `{ openai: false }` | >= 0.14 < 0.22 (0.21) |
+| `@opentelemetry/instrumentation-aws-sdk` | AWS SDK for JavaScript v3; Bedrock Runtime `Converse` / `InvokeModel` become `chat <model>` spans | only with `autoInstrument: { awsSdk: true }` | >= 0.50 < 0.79 (0.78) |
+
+**The AWS SDK instrumentation is opt-in.** It traces every AWS SDK v3 client call in the process (S3, DynamoDB, SQS, STS, ...), not only Bedrock, so `register()` turns it on only when you ask: `await register({ autoInstrument: { awsSdk: true } })`. To trace only some clients, or to set `preRequestHook` / `responseHook`, register `AwsInstrumentation` yourself (see "Your own setup" below).
+
+**Failures.** An installed package that fails to load or to enable (for example a patch error on an incompatible library that is already loaded) logs one warning naming the package and is skipped; `register()` still resolves.
 
 **Versions.** This SDK is on OpenTelemetry JS 1.x (`@opentelemetry/api` 1.9). `@opentelemetry/instrumentation-openai` 0.22+ and `@opentelemetry/instrumentation-aws-sdk` 0.79+ are built on `@opentelemetry/instrumentation` 0.300, which needs `@opentelemetry/api` 1.10, so pin `~0.21.0` / `~0.78.0`. Both packages are optional peer dependencies with these ranges. An installed package that fails to load logs a warning naming the supported versions; one that is not installed is skipped silently.
 
@@ -203,7 +207,7 @@ export const provider = await register({ serviceName: "my-agent" });
 
 `@opentelemetry/instrumentation` must be resolvable from that file: install it, `~0.223.0`, the same line the instrumentations use. `app.ts` imports `openai` as usual and can import `provider` from `./otel.js` to flush it. In a single file, load the library after `register()` with `await import("openai")` (see [`05_openai_auto_instrument.ts`](examples/05_openai_auto_instrument.ts)). In CommonJS, `require()` the library after `await register()` resolves; no loader hook is needed.
 
-**Your own setup.** To configure an instrumentation (for example `captureMessageContent`, or `preRequestHook` / `responseHook` on `AwsInstrumentation`), pass `autoInstrument: false` and register it yourself, else every call is traced twice:
+**Your own setup.** To configure an instrumentation (for example `captureMessageContent`, or `preRequestHook` / `responseHook` on `AwsInstrumentation`), turn it off in `autoInstrument` (`false`, or `{ openai: false }`) and register it yourself, else every call is traced twice:
 
 ```typescript
 import { registerInstrumentations } from "@opentelemetry/instrumentation";
