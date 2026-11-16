@@ -7,9 +7,9 @@ short trip plan.
 
 The spans come from two places:
 
-- `@opentelemetry/instrumentation-openai` (set up in `instrumentation.ts`) turns each
-  `chat.completions.create` call into a `chat <model>` span with the model, token usage and
-  finish reason.
+- `@opentelemetry/instrumentation-openai` turns each `chat.completions.create` call into a
+  `chat <model>` span with the model, token usage and finish reason. `register()` turns it
+  on by itself when it is installed (`autoInstrument`, the default), in `otel.ts`.
 - The agent loop is plain code, so the SDK's `withObserve` makes the
   `invoke_agent travel_assistant` span (with the question and the final answer, via
   `enrich`) and `observe` an `execute_tool <name>` span per tool call, with
@@ -33,15 +33,19 @@ Needs Node.js 20+ and an OTLP endpoint (the observability stack listens on
 npm install
 
 # OpenAI
-OPENAI_API_KEY=<key> npx tsx --import ./instrumentation.ts agent.ts "Plan a one-day trip to Paris."
+OPENAI_API_KEY=<key> npx tsx --import ./otel.ts agent.ts "Plan a one-day trip to Paris."
 
 # No OpenAI key: Amazon Bedrock's OpenAI-compatible endpoint
 AWS_PROFILE=<profile> AWS_REGION=us-west-2 \
-  npx tsx --import ./instrumentation.ts agent.ts "Plan a one-day trip to Paris."
+  npx tsx --import ./otel.ts agent.ts "Plan a one-day trip to Paris."
 ```
 
-`--import ./instrumentation.ts` loads the instrumentation before the OpenAI SDK is imported;
-without it the `chat` spans are missing.
+The instrumentation patches the OpenAI SDK when it is loaded, so `register()` must finish
+before `openai` is imported. `--import ./otel.ts` runs `otel.ts` first: it registers the
+`@opentelemetry/instrumentation/hook.mjs` loader hook (ES modules only) and calls
+`register()`. `agent.ts` then imports `openai` as usual, and `provider` from `./otel.js` to
+flush it. Without `--import ./otel.ts` the `chat` spans are missing. This is the load order
+in the SDK README, section "Auto-instrumentation".
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
@@ -70,15 +74,16 @@ curl -sk -u admin:<password> "https://localhost:9200/otel-v1-apm-span-*/_search"
 ## Notes
 
 - For Chat Completions, `@opentelemetry/instrumentation-openai` sends prompts and
-  completions as log events (`gen_ai.user.message`, `gen_ai.choice`, ...), not as span
+  completions (when enabled) as log events (`gen_ai.user.message`, `gen_ai.choice`, ...), not as span
   attributes, so the `chat` spans have no `gen_ai.input.messages` / `gen_ai.output.messages`
   and Agent Traces shows no messages on them. The agent span carries the question and the
   answer.
-- The agent loop is async, so `agent.ts` installs an `AsyncLocalStorageContextManager`.
-  `register()` does not install one, and without it the tool and chat spans become
-  separate traces.
-- `register()` tries to enable `@opentelemetry/instrumentation-openai` by itself
-  (`autoInstrument`), but that package has no `register()` function, and in ESM it must be
-  loaded before `openai` is imported, so this example sets it up in `instrumentation.ts`.
+- `register()` installs an `AsyncLocalStorageContextManager` on Node, so the chat and tool spans
+  nest under the agent span across `await`; there is no context manager to set up.
+- Prompts and completions are not recorded by default. Set
+  `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=true` to have the instrumentation send
+  them (as log events). To configure the instrumentation in code, pass
+  `register({ autoInstrument: false })` and register it yourself (see
+  [tracing/bedrock](../bedrock/otel.ts)), else every call is traced twice.
 - `@opentelemetry/instrumentation-openai` is pinned to `~0.21.0`: later releases need
   `@opentelemetry/api` 1.10, and the SDK is on OpenTelemetry JS 1.x (`@opentelemetry/api` 1.9).

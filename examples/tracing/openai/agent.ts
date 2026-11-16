@@ -5,11 +5,11 @@
  * Travel assistant on the OpenAI Node SDK (Chat Completions with tools), traced
  * with the OpenSearch GenAI observability SDK.
  *
- * The chat spans come from @opentelemetry/instrumentation-openai (set up in
- * instrumentation.ts). The agent loop and the tools are plain code, so the SDK's
+ * The chat spans come from @opentelemetry/instrumentation-openai, which register()
+ * turns on in otel.ts. The agent loop and the tools are plain code, so the SDK's
  * `withObserve` / `observe` create the invoke_agent and execute_tool spans.
  *
- *   npx tsx --import ./instrumentation.ts agent.ts "Plan a one-day trip to Paris."
+ *   npx tsx --import ./otel.ts agent.ts "Plan a one-day trip to Paris."
  *
  * With OPENAI_API_KEY set it calls OpenAI. Without it, it calls the
  * OpenAI-compatible endpoint of Amazon Bedrock with a short-term Bedrock API key
@@ -17,16 +17,10 @@
  */
 
 import { readFileSync } from 'node:fs';
-import { context } from '@opentelemetry/api';
-import { AsyncLocalStorageContextManager } from '@opentelemetry/context-async-hooks';
 import OpenAI from 'openai';
-import { Op, enrich, observe, register, withObserve } from '@opensearch-project/genai-observability-sdk-ts';
-
-// Async code keeps the active span only with a context manager. Without it the
-// chat and execute_tool spans would not nest under the agent span.
-context.setGlobalContextManager(new AsyncLocalStorageContextManager().enable());
-
-const provider = await register({ serviceName: 'travel-assistant-openai' });
+import { Op, enrich, observe, withObserve } from '@opensearch-project/genai-observability-sdk-ts';
+// Already run by `--import ./otel.ts`, before `openai` was loaded; imported for its provider.
+import { provider } from './otel.js';
 
 // ------------------------------------------------------------ shared data + tools
 
