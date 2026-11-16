@@ -37,7 +37,7 @@ Some features use optional dependencies, which npm, pnpm and yarn install by def
 | Trace retrieval (`OpenSearchTraceRetriever`) | `@opensearch-project/opensearch` |
 | AWS SigV4 signing | `@aws-sdk/credential-providers`, `aws4` |
 
-Auto-instrumentation uses optional peer dependencies: `npm install @opentelemetry/instrumentation-openai@~0.21.0 @opentelemetry/instrumentation-aws-sdk@~0.78.0`. See [Auto-instrumentation](docs/configuration.md#auto-instrumentation) for supported versions and the ESM load order.
+Auto-instrumentation uses optional peer dependencies: `npm install @opentelemetry/instrumentation-openai@~0.21.0 @opentelemetry/instrumentation-aws-sdk@~0.78.0`. See [Auto-instrumentation](https://github.com/opensearch-project/genai-observability-sdk-ts/blob/main/docs/configuration.md#auto-instrumentation) for supported versions and the ESM load order.
 
 ## Quick start
 
@@ -56,7 +56,7 @@ const research = observe({ name: "research_agent", op: Op.INVOKE_AGENT }, (query
 research("What is OpenSearch?");
 ```
 
-This produces the span `invoke_agent research_agent`. A longer example and the span tree are in [Architecture](docs/architecture.md#spans).
+This produces the span `invoke_agent research_agent`. A longer example and the span tree are in [Architecture](https://github.com/opensearch-project/genai-observability-sdk-ts/blob/main/docs/architecture.md#spans).
 
 ### Evaluations
 
@@ -76,22 +76,22 @@ console.log(result.summary);
 await provider.forceFlush();
 ```
 
-Each case is its own agent trace, and each score is one `gen_ai.evaluation.result` event. To score live traffic, call `score({ name, value, traceId, spanId })`: see [`score()`](docs/api-reference.md#score) and [Getting started with agent evaluations](docs/getting-started-evaluations.md).
+Each case is its own agent trace, and each score is one `gen_ai.evaluation.result` event. To score live traffic, call `score({ name, value, traceId, spanId })`: see [`score()`](https://github.com/opensearch-project/genai-observability-sdk-ts/blob/main/docs/api-reference.md#score) and [Getting started with agent evaluations](https://github.com/opensearch-project/genai-observability-sdk-ts/blob/main/docs/getting-started-evaluations.md).
 
 ## Documentation
 
 | Document | What it covers |
 |---|---|
-| [docs/api-reference.md](docs/api-reference.md) | Every public API: `register()`, `observe()`, `withObserve()`, `Op`, `enrich()`, `markAgentRoot()`, `score()`, `evaluate()`, `Benchmark`, `OpenSearchTraceRetriever`, `AWSSigV4OTLPExporter` |
-| [docs/configuration.md](docs/configuration.md) | Environment variables, endpoints, AWS SigV4, ingestion pipelines, optional dependencies, auto-instrumentation |
-| [docs/architecture.md](docs/architecture.md) | How spans and evaluation events flow to OpenSearch |
-| [docs/agent-evaluations.md](docs/agent-evaluations.md) | Data model, attributes, what gets stored, index template, ingestion, verify, troubleshooting |
-| [docs/getting-started-evaluations.md](docs/getting-started-evaluations.md) | Guided walkthrough from instrumenting an agent to offline and online evals |
-| [examples/README.md](examples/README.md) | Every runnable example: basics, framework tracing, native evals, an end-to-end agent |
-| [examples/runbooks/tracing.md](examples/runbooks/tracing.md) | Step by step: stand up the stack, instrument, check the spans, open Agent Traces |
-| [examples/runbooks/evals.md](examples/runbooks/evals.md) | Step by step: offline evals, online evals, checking the results |
+| [docs/api-reference.md](https://github.com/opensearch-project/genai-observability-sdk-ts/blob/main/docs/api-reference.md) | Every public API: `register()`, `observe()`, `withObserve()`, `Op`, `enrich()`, `markAgentRoot()`, `score()`, `evaluate()`, `Benchmark`, `OpenSearchTraceRetriever`, `AWSSigV4OTLPExporter` |
+| [docs/configuration.md](https://github.com/opensearch-project/genai-observability-sdk-ts/blob/main/docs/configuration.md) | Environment variables, endpoints, AWS SigV4, ingestion pipelines, optional dependencies, auto-instrumentation |
+| [docs/architecture.md](https://github.com/opensearch-project/genai-observability-sdk-ts/blob/main/docs/architecture.md) | How spans and evaluation events flow to OpenSearch |
+| [docs/agent-evaluations.md](https://github.com/opensearch-project/genai-observability-sdk-ts/blob/main/docs/agent-evaluations.md) | Data model, attributes, what gets stored, index template, ingestion, verify, troubleshooting |
+| [docs/getting-started-evaluations.md](https://github.com/opensearch-project/genai-observability-sdk-ts/blob/main/docs/getting-started-evaluations.md) | Guided walkthrough from instrumenting an agent to offline and online evals |
+| [examples/README.md](https://github.com/opensearch-project/genai-observability-sdk-ts/blob/main/examples/README.md) | Every runnable example: basics, framework tracing, native evals, an end-to-end agent |
+| [examples/runbooks/tracing.md](https://github.com/opensearch-project/genai-observability-sdk-ts/blob/main/examples/runbooks/tracing.md) | Step by step: stand up the stack, instrument, check the spans, open Agent Traces |
+| [examples/runbooks/evals.md](https://github.com/opensearch-project/genai-observability-sdk-ts/blob/main/examples/runbooks/evals.md) | Step by step: offline evals, online evals, checking the results |
 
-The docs index is [docs/README.md](docs/README.md).
+The docs index is [docs/README.md](https://github.com/opensearch-project/genai-observability-sdk-ts/blob/main/docs/README.md).
 
 ## Python SDK
 
@@ -99,7 +99,7 @@ Looking for the Python version? See [opensearch-genai-observability-sdk-py](http
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, development commands (`pnpm build`, `pnpm test`, `pnpm typecheck`, `pnpm lint`) and the pull request process.
+See [CONTRIBUTING.md](https://github.com/opensearch-project/genai-observability-sdk-ts/blob/main/CONTRIBUTING.md) for setup, development commands (`pnpm build`, `pnpm test`, `pnpm typecheck`, `pnpm lint`) and the pull request process.
 
 ## Security
 
@@ -107,8 +107,8 @@ If you discover a potential security issue in this project we ask that you notif
 
 ## License
 
-This project is licensed under the [Apache License 2.0](LICENSE).
+This project is licensed under the [Apache License 2.0](https://github.com/opensearch-project/genai-observability-sdk-ts/blob/main/LICENSE).
 
 ## Copyright
 
-Copyright OpenSearch Contributors. See [NOTICE](NOTICE) for details.
+Copyright OpenSearch Contributors. See [NOTICE](https://github.com/opensearch-project/genai-observability-sdk-ts/blob/main/NOTICE) for details.
