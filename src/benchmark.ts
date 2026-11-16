@@ -224,14 +224,15 @@ function specOf(fn: ScorerFn): ScorerSpec | undefined {
 }
 
 /**
- * Fill unset fields of a score from its scorer's declaration, for the scorer's own evaluator
- * only: a score whose `evaluator` is unset or equals the declared one. A scorer that returns
- * results of other evaluators (for example `{ evaluator: 'deepeval.faithfulness' }`) does not
- * stamp its evaluator type, rule, bounds, description or judge on them.
+ * Fill unset fields of a score from its scorer's declaration, unless the score belongs to
+ * another evaluator: both the declaration and the score name an evaluator, and they differ.
+ * A scorer that declares `evaluator: 'wrapper'` and returns `{ evaluator: 'deepeval.faithfulness' }`
+ * does not stamp its evaluator type, rule, bounds, description or judge on it. A scorer that
+ * declares no evaluator applies its declaration (for example its threshold) to every score.
  */
 function applySpec(s: EvalScore, spec?: ScorerSpec): EvalScore {
   if (!spec) return s;
-  if (s.evaluator !== undefined && s.evaluator !== spec.evaluator) return s;
+  if (spec.evaluator !== undefined && s.evaluator !== undefined && s.evaluator !== spec.evaluator) return s;
   return {
     ...s,
     evaluator: s.evaluator ?? spec.evaluator,
@@ -1165,7 +1166,7 @@ function* evaluateSteps(options: EvaluateOptions): Generator<PromiseLike<unknown
         identity,
         { traceId: root?.traceId, spanId: root?.spanId },
         filteredMetadata,
-        // applySpec() filled the declared evaluator (own scores only).
+        // applySpec() filled the declared evaluator (not on another evaluator's scores).
         { errorType: group.errorType },
       );
     }

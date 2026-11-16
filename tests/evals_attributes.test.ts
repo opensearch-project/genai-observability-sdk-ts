@@ -431,6 +431,19 @@ describe('a scorer declaration applies only to its own evaluator', () => {
   });
 });
 
+describe('a scorer that declares no evaluator', () => {
+  it('applies its threshold to a score that names an evaluator, so a low score fails the case', () => {
+    const rel = defineScorer({ name: 'rel', threshold: 0.7 }, () => ({ name: 'rel', value: 0.1, evaluator: 'my-judge' }));
+    const result = evaluate({ name: 'suite', task: tracedTask, data: [{ input: 'a' }], scores: [rel] });
+    expect(result.cases[0].resultStatus).toBe('fail');
+    expect(result.cases[0].verdicts).toEqual({ rel: 'fail' });
+    const [record] = getFinishedLogRecords();
+    expect(record.attributes['opensearch.gen_ai.evaluation.evaluator.name']).toBe('my-judge');
+    expect(record.attributes['opensearch.gen_ai.evaluation.score.threshold']).toBe(0.7);
+    expect(record.attributes['gen_ai.evaluation.score.label']).toBe('fail');
+  });
+});
+
 describe('returned EvalScore fields are validated like defineScorer()', () => {
   for (const [field, bad] of [
     ['evaluatorType', 'llm-judge'],
