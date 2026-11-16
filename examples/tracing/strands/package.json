@@ -1,0 +1,26 @@
+{
+  "name": "travel-assistant-strands",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Travel assistant on Strands Agents (TypeScript), traced with the OpenSearch GenAI observability SDK",
+  "type": "module",
+  "scripts": {
+    "start": "tsx agent.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/client": "^2.0.0",
+    "@opensearch-project/genai-observability-sdk-ts": "^0.2.0",
+    "@opentelemetry/api": "~1.9.0",
+    "@strands-agents/sdk": "^1.25.0",
+    "zod": "^4.5.4"
+  },
+  "devDependencies": {
+    "@types/node": "^20.17.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  },
+  "overrides": {
+    "@opentelemetry/api": "$@opentelemetry/api"
+  }
+}
