@@ -138,7 +138,9 @@ export interface RegisterOptions {
    * imported; in an ES module app, call register() in a module loaded with
    * `node --import` after registering the `@opentelemetry/instrumentation/hook.mjs`
    * loader hook (see the README). Pass false when you register these
-   * instrumentations yourself, else every call is traced twice.
+   * instrumentations yourself, else every call is traced twice. A package
+   * that fails to load or enable logs one warning and is skipped: register()
+   * still resolves.
    */
   autoInstrument?: boolean;
   /**
@@ -603,6 +605,8 @@ interface InstrumentationLike {
 
 /** One instance per package and class for the process: a second register() must not patch twice. */
 const instrumentations = new Map<string, InstrumentationLike>();
+/** Package#export keys that failed to load or enable: warned about once, not tried again. */
+const failedInstrumentations = new Set<string>();
 
 function isNotInstalled(err: unknown, packageName: string): boolean {
   const e = err as { code?: string; message?: string } | undefined;
@@ -611,7 +615,14 @@ function isNotInstalled(err: unknown, packageName: string): boolean {
   return (e.message ?? "").includes(`'${packageName}'`) || (e.message ?? "").includes(`"${packageName}"`);
 }
 
+function instrumentationKey(spec: AutoInstrumentationSpec): string {
+  return `${spec.packageName}#${spec.exportName}`;
+}
+
 function warnInstrumentation(spec: AutoInstrumentationSpec, reason: string): void {
+  const key = instrumentationKey(spec);
+  if (failedInstrumentations.has(key)) return;
+  failedInstrumentations.add(key);
   console.warn(
     `[opensearch-genai-observability-sdk-ts] register(): ${spec.packageName} is installed but was not ` +
       `enabled: ${reason}. This SDK supports ${spec.packageName} ${spec.supported} (OpenTelemetry JS API 1.9). ` +
@@ -659,16 +670,24 @@ export async function autoInstrument(
 ): Promise<string[]> {
   const enabled: string[] = [];
   for (const spec of specs) {
-    const key = `${spec.packageName}#${spec.exportName}`;
+    const key = instrumentationKey(spec);
+    if (failedInstrumentations.has(key)) continue;
     let instrumentation = instrumentations.get(key);
     if (!instrumentation) {
       instrumentation = await loadInstrumentation(spec);
       if (!instrumentation) continue;
       instrumentations.set(key, instrumentation);
     }
-    // What registerInstrumentations({ instrumentations, tracerProvider }) does.
-    instrumentation.setTracerProvider(provider);
-    if (instrumentation.isEnabled?.() !== true) instrumentation.enable();
+    try {
+      // What registerInstrumentations({ instrumentations, tracerProvider }) does.
+      instrumentation.setTracerProvider(provider);
+      if (instrumentation.isEnabled?.() !== true) instrumentation.enable();
+    } catch (err) {
+      // A patch error (an incompatible, already loaded library) must not fail register().
+      instrumentations.delete(key);
+      warnInstrumentation(spec, err instanceof Error ? err.message : String(err));
+      continue;
+    }
     enabled.push(spec.packageName);
   }
   return enabled;
@@ -783,7 +802,16 @@ export async function register(
   }
 
   if (options.autoInstrument ?? true) {
-    await autoInstrument(provider);
+    try {
+      await autoInstrument(provider);
+    } catch (err) {
+      // autoInstrument() warns per package; this only guards register() itself.
+      console.warn(
+        `[opensearch-genai-observability-sdk-ts] register(): auto-instrumentation failed and was skipped: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
   }
 
   return provider;
