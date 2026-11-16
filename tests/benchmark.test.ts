@@ -169,18 +169,18 @@ describe('evaluate', () => {
     logSpy.mockRestore();
   });
 
-  it('rejects async task functions with a clear error', () => {
+  it('awaits async task functions (see evaluate_async.test.ts)', async () => {
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
-    const result = evaluate({
+    const result = await evaluate({
       name: 'async-task-test',
       task: async (input) => `answer: ${input}`,
       data: [{ input: 'q1' }],
       scores: [],
     });
 
-    expect(result.cases[0].status).toBe('fail');
-    expect(result.cases[0].error).toContain('does not support async task functions');
-    expect(result.summary.errorCount).toBe(1);
+    expect(result.cases[0].status).toBe('pass');
+    expect(result.cases[0].output).toBe('answer: q1');
+    expect(result.summary.errorCount).toBe(0);
     logSpy.mockRestore();
   });
 
@@ -1074,13 +1074,13 @@ describe('scorer return values', () => {
     });
   }
 
-  it('an un-awaited Promise warns, emits an error result and is not left unhandled', async () => {
-    const asyncScorer = defineScorer({ name: 'async_judge' }, (async () => { throw new Error('later'); }) as never);
-    const result = evaluate({ name: 'bad-promise', task: x => x, data: [{ input: 'q' }], scores: [asyncScorer] });
-    await new Promise(resolve => setTimeout(resolve, 0));
-    expect(scoreRecords()[0].attributes['error.type']).toBe('TypeError');
+  it('a rejected async scorer emits an error result with its error type, without a warning', async () => {
+    const asyncScorer = defineScorer({ name: 'async_judge' }, async () => { throw new Error('later'); });
+    const result = await evaluate({ name: 'bad-promise', task: x => x, data: [{ input: 'q' }], scores: [asyncScorer] });
+    expect(scoreRecords()[0].attributes['error.type']).toBe('Error');
     expect(result.cases[0].resultStatus).toBe('error');
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringMatching(/returned a Promise/));
+    expect(result.cases[0].scorerErrors).toEqual(['later']);
+    expect(warnSpy).not.toHaveBeenCalled();
   });
 
   it('accepts finite numbers, booleans, EvalScore and EvalScore[]', () => {

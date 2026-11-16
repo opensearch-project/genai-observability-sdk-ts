@@ -1,17 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright OpenSearch Contributors
 
-import { trace, type Context, type SpanContext } from '@opentelemetry/api';
+import { createContextKey, trace, type Context, type SpanContext } from '@opentelemetry/api';
 import type { ReadableSpan, Span, SpanProcessor } from '@opentelemetry/sdk-trace-base';
 import { AGENT_NAME_KEY, AGENT_VERSION_KEY } from './internal.js';
 
 /**
  * The test case evaluate() is running right now.
  *
- * A context manager may be missing (register() installs one only on Node with
- * `setGlobal`), so the case is not looked up through the active OTel context. evaluate() runs cases one at a time
- * and its task is synchronous, so a module-level "current case" is reliable:
- * every span started while it is set belongs to that case.
+ * The case is put in the OTel context the task runs in (TEST_CASE_KEY), so
+ * with a context manager (register() installs one on Node) it follows the task
+ * across `await`. A context manager may be missing, so evaluate() also keeps a
+ * module-level "current case" from the task call until its Promise settles:
+ * cases run one at a time, so every span started meanwhile belongs to it. A
+ * span whose context carries a case uses that one.
  */
 export interface ActiveTestCase {
   attributes: Record<string, string>;
@@ -27,15 +29,19 @@ let activeCase: ActiveTestCase | undefined;
 
 const AGENT_KEYS: ReadonlySet<string> = new Set([AGENT_NAME_KEY, AGENT_VERSION_KEY]);
 
-/** @internal Run `fn` with `testCase` as the current case (restores the previous one). */
-export function runInTestCase<T>(testCase: ActiveTestCase, fn: () => T): T {
+/** @internal Context key of the case a task runs in. */
+export const TEST_CASE_KEY = createContextKey('opensearch-genai-observability-sdk.testCase');
+
+/**
+ * @internal Make `testCase` the current case. Returns a function that restores
+ * the previous one; call it once the task has settled.
+ */
+export function enterTestCase(testCase: ActiveTestCase): () => void {
   const previous = activeCase;
   activeCase = testCase;
-  try {
-    return fn();
-  } finally {
-    activeCase = previous;
-  }
+  return () => {
+    if (activeCase === testCase) activeCase = previous;
+  };
 }
 
 function parentSpanId(span: Span): string | undefined {
@@ -59,8 +65,8 @@ function parentSpanId(span: Span): string | undefined {
  * `new BasicTracerProvider({ spanProcessors: [new TestCaseSpanProcessor(), ...] })`.
  */
 export class TestCaseSpanProcessor implements SpanProcessor {
-  onStart(span: Span, _parentContext: Context): void {
-    const testCase = activeCase;
+  onStart(span: Span, parentContext: Context): void {
+    const testCase = (parentContext?.getValue(TEST_CASE_KEY) as ActiveTestCase | undefined) ?? activeCase;
     if (!testCase) return;
 
     const ctx = span.spanContext();

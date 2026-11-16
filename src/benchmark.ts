@@ -48,7 +48,8 @@ import {
 } from './score.js';
 import {
   ensureGlobalTestCaseProcessor,
-  runInTestCase,
+  enterTestCase,
+  TEST_CASE_KEY,
   type ActiveTestCase,
 } from './testcase.js';
 
@@ -136,14 +137,24 @@ export interface ScorerSpec {
   judgePromptVersion?: string;
 }
 
+/** What a scorer returns: a finite number, a boolean (a verdict), an EvalScore or an EvalScore[]. */
+export type ScorerResult = EvalScore | EvalScore[] | number | boolean;
+
+/**
+ * A scorer: `(input, output, expected)` returning a ScorerResult, or a Promise
+ * of one (an async LLM judge).
+ */
 export type ScorerFn = (
   input: unknown,
   output: unknown,
   expected: unknown,
-) => EvalScore | EvalScore[] | number | boolean;
+) => ScorerResult | PromiseLike<ScorerResult>;
+
+/** A synchronous scorer: typing scorers with it keeps `evaluate()`'s result a plain `BenchmarkResult`. */
+export type SyncScorerFn = (input: unknown, output: unknown, expected: unknown) => ScorerResult;
 
 /** A scorer function with its declared name and rule attached. */
-export type Scorer = ScorerFn & { readonly scorerSpec: ScorerSpec };
+export type Scorer<F extends ScorerFn = ScorerFn> = F & { readonly scorerSpec: ScorerSpec };
 
 const DIRECTIONS: readonly ScoreDirection[] = ['maximize', 'minimize'];
 const EVALUATOR_TYPES: readonly EvaluatorType[] = ['llm_judge', 'code', 'human', 'external'];
@@ -158,11 +169,15 @@ const EVALUATOR_TYPES: readonly EvaluatorType[] = ['llm_judge', 'code', 'human',
  * );
  * ```
  *
+ * `fn` may be async (an LLM judge): `evaluate()` awaits it. The returned
+ * scorer has the same signature as `fn`, so an async `fn` keeps
+ * `evaluate()`'s result typed as a Promise.
+ *
  * Rule fields are defaults for every score the scorer returns; fields set on a
  * returned `EvalScore` win. Throws on an unknown `direction` / `evaluatorType`
  * or a non-finite `threshold` / `scoreMin` / `scoreMax`.
  */
-export function defineScorer(spec: ScorerSpec, fn: ScorerFn): Scorer {
+export function defineScorer<F extends ScorerFn>(spec: ScorerSpec, fn: F): Scorer<F> {
   if (spec.direction !== undefined && !DIRECTIONS.includes(spec.direction)) {
     throw new Error(`direction must be one of ${DIRECTIONS.join(', ')}; got "${spec.direction}"`);
   }
@@ -181,8 +196,12 @@ export function defineScorer(spec: ScorerSpec, fn: ScorerFn): Scorer {
     ...spec,
     direction: spec.direction ?? (spec.threshold !== undefined ? 'maximize' : undefined),
   };
-  const scorer = ((input: unknown, output: unknown, expected: unknown) =>
-    fn(input, output, expected)) as Scorer;
+  // An async fn gets an async wrapper, so evaluate() sees an async scorer before calling it.
+  const scorer = (
+    isAsyncFunction(fn)
+      ? async (input: unknown, output: unknown, expected: unknown) => fn(input, output, expected)
+      : (input: unknown, output: unknown, expected: unknown) => fn(input, output, expected)
+  ) as unknown as Scorer<F>;
   Object.defineProperty(scorer, 'name', { value: fn.name || spec.name || 'score' });
   Object.defineProperty(scorer, 'scorerSpec', { value: Object.freeze(resolved), enumerable: true });
   return scorer;
@@ -756,6 +775,42 @@ function isThenable(value: unknown): value is PromiseLike<unknown> {
   );
 }
 
+/** An `async function` (or async arrow), known to return a Promise before it is called. */
+function isAsyncFunction(fn: unknown): boolean {
+  return typeof fn === 'function' && (fn as { [Symbol.toStringTag]?: string })[Symbol.toStringTag] === 'AsyncFunction';
+}
+
+/**
+ * Run a generator that yields the Promises it waits for: synchronously while
+ * nothing is pending, so a fully synchronous run returns its value directly;
+ * from the first yielded Promise on, asynchronously, returning a Promise.
+ * A rejected Promise is thrown into the generator at its `yield`.
+ */
+function runMaybeAsync<T>(gen: Generator<PromiseLike<unknown>, T, unknown>): T | Promise<T> {
+  const step = gen.next();
+  return step.done ? step.value : continueAsync(gen, step.value);
+}
+
+async function continueAsync<T>(
+  gen: Generator<PromiseLike<unknown>, T, unknown>,
+  pending: PromiseLike<unknown>,
+): Promise<T> {
+  for (;;) {
+    let value: unknown;
+    let rejected = false;
+    let reason: unknown;
+    try {
+      value = await pending;
+    } catch (e) {
+      rejected = true;
+      reason = e;
+    }
+    const step = rejected ? gen.throw(reason) : gen.next(value);
+    if (step.done) return step.value;
+    pending = step.value;
+  }
+}
+
 function describeValue(value: unknown): string {
   if (value === null) return 'null';
   if (Array.isArray(value)) return 'an array';
@@ -807,20 +862,15 @@ function invalidEvalScore(value: unknown): string | undefined {
 }
 
 /**
- * The scores a scorer returned, or why the value cannot be used: a finite
- * number, a boolean (a verdict), an EvalScore or an EvalScore[] is used;
- * anything else (undefined, null, NaN, a bigint, a Promise, a malformed
- * object) is not.
+ * The scores a scorer returned (after awaiting it), or why the value cannot
+ * be used: a finite number, a boolean (a verdict), an EvalScore or an
+ * EvalScore[] is used; anything else (undefined, null, NaN, a bigint, a
+ * malformed object) is not.
  */
 function scorerResultScores(result: unknown, evalName: string): EvalScore[] | string {
   if (typeof result === 'boolean') return [{ name: evalName, value: result ? 1 : 0, passed: result }];
   if (typeof result === 'number') {
     return Number.isFinite(result) ? [{ name: evalName, value: result }] : `returned ${result}`;
-  }
-  if (isThenable(result)) {
-    // Do not leave a rejected Promise unhandled.
-    Promise.resolve(result).catch(() => {});
-    return 'returned a Promise (evaluate() scorers must be synchronous)';
   }
   const items = Array.isArray(result) ? result : [result];
   for (const item of items) {
@@ -832,9 +882,16 @@ function scorerResultScores(result: unknown, evalName: string): EvalScore[] | st
 
 export interface EvaluateOptions {
   name: string;
+  /**
+   * The agent under test: takes a case's input and returns its output, or a
+   * Promise of it (an async agent; evaluate() then returns a Promise).
+   */
   task: (input: unknown) => unknown;
   data: Array<{ input: unknown; expected?: unknown; caseId?: string; caseName?: string }>;
-  /** Scorer functions, optionally wrapped with `defineScorer()` to declare name and rule. */
+  /**
+   * Scorer functions, sync or async, optionally wrapped with `defineScorer()`
+   * to declare name and rule.
+   */
   scores: Array<ScorerFn | Scorer>;
   /**
    * Run metadata, stamped on every `gen_ai.evaluation.result` event of the run
@@ -884,31 +941,78 @@ export interface EvaluateOptions {
   recordExpected?: boolean;
 }
 
+type CallKind<F> = F extends (...args: never[]) => infer R
+  ? unknown extends R
+    ? 'maybe'
+    : [Extract<R, PromiseLike<unknown>>] extends [never]
+      ? 'sync'
+      : [Exclude<R, PromiseLike<unknown>>] extends [never]
+        ? 'async'
+        : 'maybe'
+  : 'maybe';
+
+type CallKinds<O extends EvaluateOptions> = CallKind<O['task']> | CallKind<O['scores'][number]>;
+
+/**
+ * What `evaluate(options)` returns: `Promise<BenchmarkResult>` when the task
+ * or a scorer is typed to return a Promise, `BenchmarkResult` when all are
+ * typed synchronous, else either (`await` it).
+ */
+export type EvaluateResult<O extends EvaluateOptions = EvaluateOptions> =
+  'async' extends CallKinds<O>
+    ? Promise<BenchmarkResult>
+    : 'maybe' extends CallKinds<O>
+      ? BenchmarkResult | Promise<BenchmarkResult>
+      : BenchmarkResult;
+
 /**
  * Run `task` on each data item, score it and record the results.
  *
- * Cases run one at a time and `task` must be synchronous. While a case runs,
- * the SDK's TestCaseSpanProcessor stamps `test.*` ids on the root span(s) the
- * task starts and remembers the first one, so score events are parented to the
- * agent run's own trace. A context manager may be missing (`register({ setGlobal:
- * false })`, your own OTel setup), so this uses a module-level "current case"
- * instead of the active OTel context.
+ * `task` and the scorers may be synchronous or async. When all are
+ * synchronous, evaluate() returns the result directly, as before. When the
+ * task or a scorer is an async function or returns a Promise, evaluate()
+ * awaits it and returns a `Promise<BenchmarkResult>`; `await evaluate(...)`
+ * works either way.
  *
- * A scorer returns a finite number, a boolean (a verdict), an `EvalScore` or
- * an `EvalScore[]`, synchronously. A scorer that throws, or returns anything
- * else (undefined, null, NaN, a Promise, a malformed object; with a warning),
- * emits an evaluator error result (`error.type`, no value, no label, no
- * explanation) named after its declared `name` (else the function name). The
- * exception message is kept only in the local `scorerErrors`. When the task
- * throws, the scorers are not run and every scorer emits such an error result
- * with the task's `error.type`.
+ * Cases run one at a time, in order, and so do the scorers of a case. Each
+ * case's task call is its own trace. While a case runs (until the task's
+ * Promise settles), the SDK's TestCaseSpanProcessor stamps `test.*` ids on the
+ * root span(s) the task starts and remembers the first one, so score events
+ * are parented to the agent run's own trace. The case rides in the OTel context
+ * of the task (across `await` with a context manager, which register()
+ * installs on Node) and in a module-level "current case" for setups without
+ * one, so run one evaluate() at a time. Scorers run after the task, outside
+ * the case: an LLM judge's spans are its own trace and are not stamped.
+ *
+ * A scorer returns (or resolves to) a finite number, a boolean (a verdict),
+ * an `EvalScore` or an `EvalScore[]`. A scorer that throws or rejects, or
+ * returns anything else (undefined, null, NaN, a malformed object; with a
+ * warning), emits an evaluator error result (`error.type`, no value, no label,
+ * no explanation) named after its declared `name` (else the function name).
+ * The exception message is kept only in the local `scorerErrors`. When the
+ * task throws or rejects, the scorers are not run and every scorer emits such
+ * an error result with the task's `error.type`.
  *
  * Local case status: `error` if the task threw or a result errored; else
  * `fail` if any score has a `fail` verdict (a `pass` / `fail` `label` /
  * `passed`, or `threshold` + `direction` from the score or its `defineScorer()`
  * declaration); else `pass`. Scores without a declared rule never fail a case.
  */
-export function evaluate(options: EvaluateOptions): BenchmarkResult {
+export function evaluate<O extends EvaluateOptions>(options: O): EvaluateResult<O> {
+  const declaredAsync = isAsyncFunction(options.task) || options.scores.some(isAsyncFunction);
+  let result: BenchmarkResult | Promise<BenchmarkResult>;
+  try {
+    result = runMaybeAsync(evaluateSteps(options));
+  } catch (e) {
+    if (!declaredAsync) throw e;
+    result = Promise.reject(e);
+  }
+  // An async task or scorer always gives a Promise, also when no case awaited one.
+  return (declaredAsync && !isThenable(result) ? Promise.resolve(result) : result) as EvaluateResult<O>;
+}
+
+/** evaluate()'s run, yielding each Promise it has to wait for (see runMaybeAsync). */
+function* evaluateSteps(options: EvaluateOptions): Generator<PromiseLike<unknown>, BenchmarkResult, unknown> {
   const runId = makeRunId(options.runId);
   const run = runAttributes(options.runName, options.runDescription);
   const filteredMetadata = toAttributes(safeMetadata(options.metadata, `evaluate:${options.name}`));
@@ -946,19 +1050,18 @@ export function evaluate(options: EvaluateOptions): BenchmarkResult {
       seen: new Set(),
     };
 
-    // Run task
+    // Run the task as its own trace (ROOT_CONTEXT), carrying the case in its context.
+    const leaveCase = enterTestCase(active);
     try {
-      output = runInTestCase(active, () => otelContext.with(ROOT_CONTEXT, () => options.task(item.input)));
-      if (output instanceof Promise) {
-        output.catch(() => {});
-        throw new Error(
-          "evaluate() does not support async task functions. " +
-          "The task returned a Promise: use a synchronous task or await the async call inside a sync wrapper."
-        );
-      }
+      const caseContext = ROOT_CONTEXT.setValue(TEST_CASE_KEY, active);
+      let out = otelContext.with(caseContext, () => options.task(item.input));
+      if (isThenable(out)) out = yield out;
+      output = out;
     } catch (e) {
       error = e instanceof Error ? e.message : String(e);
       errorType = errorTypeOf(e);
+    } finally {
+      leaveCase();
     }
 
     // The agent that ran: declared, else named on its root span, else the
@@ -987,6 +1090,7 @@ export function evaluate(options: EvaluateOptions): BenchmarkResult {
       let result: unknown;
       try {
         result = scorer(item.input, output, expected);
+        if (isThenable(result)) result = yield result;
       } catch (e) {
         scorerError(e instanceof Error ? e.message : String(e), errorTypeOf(e));
         continue;
