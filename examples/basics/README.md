@@ -10,7 +10,7 @@ Small, self-contained scripts that show one SDK feature each. They import the SD
 | [`04_async_tracing.ts`](04_async_tracing.ts) | Async functions, async generators, nested spans |
 | [`05_openai_auto_instrument.ts`](05_openai_auto_instrument.ts) | `register()` auto-instrumentation |
 | [`06_retrieval_and_eval.ts`](06_retrieval_and_eval.ts) | `evaluate()` and `OpenSearchTraceRetriever` |
-| [`07_benchmarks.ts`](07_benchmarks.ts) | `Benchmark` and `evaluate()` with scorers |
+| [`07_benchmarks.ts`](07_benchmarks.ts) | `Benchmark`, and `evaluate()` with sync and async tasks and scorers |
 
 ## Run
 

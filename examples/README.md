@@ -27,7 +27,7 @@ New here? Follow the runbooks:
 | Anthropic (`@anthropic-ai/sdk`) | [`tracing/anthropic`](tracing/anthropic/) | [`evals/native`](evals/native/) |
 | No framework (SDK only) | [`basics`](basics/) (`observe()`, `enrich()`, async) | [`basics`](basics/) (`score()`, `evaluate()`, `Benchmark`), [`evals/native`](evals/native/) |
 
-[`evals/native`](evals/native/) uses only this SDK: offline `evaluate()` / `Benchmark` over the shared test suite with a run name, and online `score()` on traces it reads back from OpenSearch. The approach works the same for any of the agents above.
+[`evals/native`](evals/native/) uses only this SDK: offline `evaluate()` over the shared test suite with an async agent and an async LLM judge, one run name per prompt version, and online `score()` on traces it reads back from OpenSearch. The approach works the same for any of the agents above.
 
 Eval-library integrations (DeepEval, RAGAS, MLflow, pytest) are Python libraries, so they live in the [Python SDK examples](https://github.com/opensearch-project/genai-observability-sdk-py/tree/main/examples). Their results land in the same index and show up in the same Dashboards pages as the results from this SDK.
 

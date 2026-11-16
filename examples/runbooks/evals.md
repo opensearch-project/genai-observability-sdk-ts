@@ -10,7 +10,7 @@ One case per line, with a stable case id (Compare matches cases by it) and an ex
 
 ## 2. Write scorers
 
-A scorer is `(input, output, expected) => ...` returning a `boolean` (a verdict), a number or an `EvalScore`. Declare the rule with `defineScorer({ name, threshold, direction }, fn)` so Dashboards shows pass / fail; without one a result is only "Scored".
+A scorer is `(input, output, expected) => ...` returning a `boolean` (a verdict), a number or an `EvalScore`, or a Promise of one (an async LLM judge). Declare the rule with `defineScorer({ name, threshold, direction }, fn)` so Dashboards shows pass / fail; without one a result is only "Scored".
 
 - Deterministic checks first (`evaluatorType: "code"`): tool called, data used, latency, tokens. Compute the truth when you score, not by hand: [end-to-end/.../offlineEval.ts](../end-to-end/strands-observability-agent/offlineEval.ts).
 - One LLM judge (`evaluatorType: "llm_judge"`) with `judgeModel`, `judgePromptName`, `judgePromptVersion` and `evaluatorDescription`, the judge's reason in `explanation`. The judge prompt is not stored on the result: trace the judge call in its own trace as a `chat` span (so it is not listed as an agent), record the prompt there with `enrich({ systemInstructions })`, and link it with `judgeTraceId`: [end-to-end/.../judge.ts](../end-to-end/strands-observability-agent/judge.ts), [evals/native](../evals/native/).
@@ -27,11 +27,17 @@ const mentionsCity = defineScorer(
   (input, output) => String(output).includes(String(input).split(" ").at(-1)!.replace(".", "")),
 );
 
-const result = evaluate({
+// An async LLM judge: evaluate() awaits it. It runs after the agent, as its own trace.
+const planQuality = defineScorer(
+  { name: "plan_quality", threshold: 4, scoreMin: 1, scoreMax: 5, evaluatorType: "llm_judge", judgeModel: JUDGE_MODEL_ID },
+  async (input, output, expected) => judgePlan(String(input), String(expected), String(output)), // returns an EvalScore
+);
+
+const result = await evaluate({
   name: "travel-assistant",              // test suite (test.suite.name), stable across runs
-  task: (input) => withObserve("travel_assistant", { op: Op.INVOKE_AGENT }, () => planSync(String(input))),
+  task: (input) => withObserve("travel_assistant", { op: Op.INVOKE_AGENT }, () => plan(String(input))), // async agent
   data: cases.map((c) => ({ input: c.input, expected: c.expected, caseId: c.id, caseName: c.name })),
-  scores: [mentionsCity],
+  scores: [mentionsCity, planQuality],
   runName: "v1 prompt",                  // shown in place of the run id
   runDescription: "Claude Haiku 4.5, default prompt",
 });
@@ -41,23 +47,22 @@ await provider.shutdown();
 
 Each case's agent run is its own trace with `test.suite.*` and `test.case.*` on the root span; each score is one result parented to it. Trace the task (as above): an untraced task records results with no trace to link to. Change one thing (prompt, model, tool) and run again with a new `runName` to have two runs to compare.
 
-`evaluate()` takes a synchronous task and synchronous scorers. Most agents and every LLM judge are async: run each case yourself and log it with `Benchmark`, passing the agent span's ids:
+The task and the scorers may be sync or async. With an async one, `evaluate()` returns a Promise: `await` it. A scorer that throws records an evaluator error result for that case (no value, no label); the other scorers still run.
+
+Results computed somewhere else (a run that already happened, another tool) go up with `Benchmark`, passing the agent span's ids:
 
 ```typescript
 import { Benchmark } from "@opensearch-project/genai-observability-sdk-ts";
 
 const bench = new Benchmark("travel-assistant", { runName: "v1 prompt", runDescription: "Claude Haiku 4.5" });
-for (const c of cases) {
-  const { answer, traceId, spanId } = await ask(c.input); // the ids of the agent's invoke_agent span
+for (const r of pastRuns) {
   bench.log({
-    caseId: c.id,
-    caseName: c.name,
-    input: c.input,
-    output: answer,
-    expected: c.expected,
-    traceId,
-    spanId,
-    scores: [await judgeAnswer(c.input, answer)], // EvalScore[] (or { name: value })
+    caseId: r.caseId,
+    input: r.input,
+    output: r.answer,
+    traceId: r.traceId, // the ids of the agent's invoke_agent span
+    spanId: r.spanId,
+    scores: r.scores, // EvalScore[] (or { name: value })
   });
 }
 bench.close(); // prints the summary
