@@ -13,7 +13,7 @@ OTel-native tracing and scoring for LLM applications. Instrument your AI workflo
 - **`withObserve()`** — block-level tracing (TypeScript equivalent of Python's context manager)
 - **`enrich()`** — add model, token usage, and other GenAI attributes to the active span from anywhere in your code
 - **`markAgentRoot()`** — mark the agent's span as the trace's agent root in OpenSearch Agent Traces
-- **Auto-instrumentation** — automatically discovers and activates installed instrumentor packages (OpenAI, etc.)
+- **Auto-instrumentation**: turns on the installed OpenTelemetry instrumentations for the OpenAI SDK and the AWS SDK (Bedrock); see [Auto-instrumentation](#auto-instrumentation)
 - **Scoring**: `score()` emits each evaluation result as an OTel `gen_ai.evaluation.result` log event, parented to the evaluated span
 - **Benchmarks**: `evaluate()` runs your agent against a dataset with scorers; `Benchmark` uploads results from any eval framework. Each case is its own agent trace plus one `gen_ai.evaluation.result` log event per score
 - **Getting started with agent evaluations**: [docs/getting-started-evaluations.md](docs/getting-started-evaluations.md) goes from instrumenting an agent to offline eval runs and online evals (sample traces, judge them, post results back), with an eval cookbook, Dashboards deep links and copyable LLM prompts
@@ -137,7 +137,7 @@ await register({
   endpoint: "http://my-collector:4318",  // base URL for traces and logs, or use env vars
   serviceName: "my-app",
   batch: true,            // BatchSpanProcessor (true) or Simple (false)
-  autoInstrument: true,   // discover installed instrumentor packages
+  autoInstrument: true,   // turn on installed OpenAI / AWS SDK instrumentations
   agentName: "travel_planner", // optional: the agent this process evaluates
   agentVersion: "v3",          // optional: its version
 });
@@ -169,13 +169,56 @@ An unknown agent is left out, never invented. `evaluate()` also stamps the agent
 | `serviceName` | `string` | `"unknown_service"` | `service.name` resource attribute |
 | `serviceVersion` | `string` | none | `service.version` resource attribute |
 | `batch` | `boolean` | `true` | Use BatchSpanProcessor when true |
-| `autoInstrument` | `boolean` | `true` | Discover and activate instrumentor packages |
+| `autoInstrument` | `boolean` | `true` | Turn on the installed instrumentations listed in [Auto-instrumentation](#auto-instrumentation), with this provider |
 | `exporter` | `SpanExporter` | none | Custom span exporter, used as given (traces only). Without a logs destination, no logs pipeline is set up (see [Endpoints](#endpoints-traces-and-evaluation-logs)) |
 | `headers` | `Record<string, string>` | none | Headers for every export (traces and logs). Over gRPC they are sent as gRPC metadata with lowercased keys (gRPC rejects uppercase keys) |
 | `logs` | `boolean` | `true` | Set up a LoggerProvider for evaluation events |
 | `logExporter` | `LogRecordExporter` | none | Custom log exporter, used as given (logs only) |
 
 **Logs pipeline.** `register()` also creates a `LoggerProvider` with a batch processor (simple when `batch: false`) and a log exporter for evaluation events, over the same protocol rules as traces. `provider.forceFlush()` and `provider.shutdown()` flush and shut down both pipelines. If a global `LoggerProvider` is already registered (for example by `NodeSDK`), `register()` leaves it in place and `score()` emits through it.
+
+#### Auto-instrumentation
+
+With `autoInstrument` (the default), `register()` turns on each of these packages that is installed, with its own provider (also with `setGlobal: false`). It needs nothing else from you: no `registerInstrumentations()` call.
+
+| Package | Instruments | Supported versions (tested) |
+|---|---|---|
+| `@opentelemetry/instrumentation-openai` | `openai` >= 4.19 < 7: Chat Completions, Responses, Embeddings become `chat <model>` / `embeddings <model>` spans | >= 0.14 < 0.22 (0.21) |
+| `@opentelemetry/instrumentation-aws-sdk` | AWS SDK for JavaScript v3; Bedrock Runtime `Converse` / `InvokeModel` become `chat <model>` spans | >= 0.50 < 0.79 (0.78) |
+
+**Versions.** This SDK is on OpenTelemetry JS 1.x (`@opentelemetry/api` 1.9). `@opentelemetry/instrumentation-openai` 0.22+ and `@opentelemetry/instrumentation-aws-sdk` 0.79+ are built on `@opentelemetry/instrumentation` 0.300, which needs `@opentelemetry/api` 1.10, so pin `~0.21.0` / `~0.78.0`. Both packages are optional peer dependencies with these ranges. An installed package that fails to load logs a warning naming the supported versions; one that is not installed is skipped silently.
+
+**Load order.** An instrumentation patches its library when the library is loaded, so `register()` must finish before `openai` or the AWS SDK is imported. Static `import`s run before the code of the module, so in the module that imports the library, calling `register()` is too late. In an ES module app:
+
+```typescript
+// otel.ts: loaded with `node --import ./otel.js app.js` (or `tsx --import ./otel.ts app.ts`)
+import { register as registerHooks } from "node:module";
+import { register } from "@opensearch-project/genai-observability-sdk-ts";
+
+// Let the instrumentations patch `import` statements (ESM only).
+registerHooks("@opentelemetry/instrumentation/hook.mjs", import.meta.url);
+
+export const provider = await register({ serviceName: "my-agent" });
+```
+
+`@opentelemetry/instrumentation` must be resolvable from that file: install it, `~0.223.0`, the same line the instrumentations use. `app.ts` imports `openai` as usual and can import `provider` from `./otel.js` to flush it. In a single file, load the library after `register()` with `await import("openai")` (see [`05_openai_auto_instrument.ts`](examples/05_openai_auto_instrument.ts)). In CommonJS, `require()` the library after `await register()` resolves; no loader hook is needed.
+
+**Your own setup.** To configure an instrumentation (for example `captureMessageContent`, or `preRequestHook` / `responseHook` on `AwsInstrumentation`), pass `autoInstrument: false` and register it yourself, else every call is traced twice:
+
+```typescript
+import { registerInstrumentations } from "@opentelemetry/instrumentation";
+import { OpenAIInstrumentation } from "@opentelemetry/instrumentation-openai";
+
+const provider = await register({ serviceName: "my-agent", autoInstrument: false });
+registerInstrumentations({
+  instrumentations: [new OpenAIInstrumentation({ captureMessageContent: true })],
+  tracerProvider: provider,
+});
+```
+
+The OpenAI instrumentation records prompts and completions as log events (`gen_ai.user.message`, `gen_ai.choice`), not span attributes, and only with `captureMessageContent: true` (or `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=true`). To show messages on the span, add them with `enrich({ inputMessages, outputMessages })` in your own `observe()` span.
+
+**Other libraries.** The Anthropic SDK (1.x) emits OpenTelemetry spans itself through the global tracer provider, so it needs no instrumentation package. LangChain.js / LangGraph.js and the OpenAI Agents SDK have no OpenTelemetry GenAI instrumentation in OpenTelemetry JS: trace their model and tool calls with `observe()` / `withObserve()`. Any other OpenTelemetry JS instrumentation works with `registerInstrumentations({ instrumentations, tracerProvider: provider })` as above, if it supports `@opentelemetry/api` 1.9.
 
 #### Endpoints: traces and evaluation logs
 
@@ -742,7 +785,7 @@ See the [`examples/`](examples/) directory:
 | [`02_scoring.ts`](examples/02_scoring.ts) | Span-level, trace-level, and standalone scoring |
 | [`03_aws_sigv4.ts`](examples/03_aws_sigv4.ts) | AWS SigV4 authentication with `AWSSigV4OTLPExporter` |
 | [`04_async_tracing.ts`](examples/04_async_tracing.ts) | Async function and generator tracing |
-| [`05_openai_auto_instrument.ts`](examples/05_openai_auto_instrument.ts) | OpenAI auto-instrumentation via `register()` |
+| [`05_openai_auto_instrument.ts`](examples/05_openai_auto_instrument.ts) | OpenAI auto-instrumentation via `register()`, with the ESM load order |
 | [`06_retrieval_and_eval.ts`](examples/06_retrieval_and_eval.ts) | Retrieve traces from OpenSearch, evaluate, write scores back |
 | [`07_benchmarks.ts`](examples/07_benchmarks.ts) | `evaluate()` with scorers, `Benchmark` with manual logging |
 
