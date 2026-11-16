@@ -90,7 +90,7 @@ export interface ScoreOptions {
    * exporters register() uses (OTLP/HTTP, gRPC, AWSSigV4OTLPLogExporter, and an
    * OTLP `logExporter` you pass) send whole numbers as `doubleValue` too; an
    * exporter of a LoggerProvider you configured sends them as `intValue` unless
-   * you call `sendScoresAsDouble` on it. See README.
+   * you call `sendScoresAsDouble` on it. See docs/api-reference.md#score.
    */
   value?: number;
   /** Trace of the evaluated span. Without `spanId` the score is trace-level. */

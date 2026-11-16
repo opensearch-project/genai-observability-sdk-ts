@@ -141,7 +141,7 @@ export interface RegisterOptions {
    * They patch the library when it is loaded, so register() must finish
    * before `openai` or the AWS SDK is imported; in an ES module app, call
    * register() in a module loaded with `node --import` after registering the
-   * `@opentelemetry/instrumentation/hook.mjs` loader hook (see the README).
+   * `@opentelemetry/instrumentation/hook.mjs` loader hook (see docs/configuration.md#load-order).
    * Turn one off when you register it yourself. A function another
    * instrumentation already patched (your own `OpenAIInstrumentation`
    * enabled before register()) is left to it, with one warning; one you
@@ -776,7 +776,7 @@ async function loadInstrumentation(spec: AutoInstrumentationSpec): Promise<Instr
  * switches it to the new provider. Returns the package names that are on.
  *
  * Patching happens when the instrumented library is loaded, so this must run
- * before the library is imported (see the README, "Auto-instrumentation").
+ * before the library is imported (see docs/configuration.md#load-order).
  */
 export async function autoInstrument(
   provider: TracerProvider,
