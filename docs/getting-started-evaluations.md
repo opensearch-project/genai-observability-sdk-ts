@@ -270,7 +270,7 @@ await provider.forceFlush();
 
 - Run it on a schedule (cron, a loop with a sleep, a Lambda). The example's `onlineEval.ts --interval 300` loops.
 - Pair the LLM judge with a cheap deterministic check (for example "the answer names a service that exists"): it costs nothing and catches regressions the judge misses.
-- `listRootSpans()` returns each trace's agent root, the same span Agent Traces lists: the trace root when it is a GenAI span, or the marked agent span below an HTTP handler. Its `agentName` and `agentVersion` come from the span; pass both to `score()`, or the results are grouped under "(no version)" on the agent page.
+- `listRootSpans()` returns one agent root per trace: the span marked `derived.gen_ai.is_root` (for example the agent span below an HTTP handler), or a trace root (no parent) whose `gen_ai.operation.name` is `invoke_agent` or `create_agent`. A judge's own parentless `chat` span is never listed. When a trace has no parentless agent root and several marked spans (agents of several services), the earliest marked span is returned. Its `agentName` and `agentVersion` come from the span; pass both to `score()`, or the results are grouped under "(no version)" on the agent page.
 - `findEvaluatedTraceIds(traceIds, { evaluator })` makes the job safe to re-run: a trace that already has a result from this evaluator is skipped. Without `evaluator` (or `evaluationName`), a result from any evaluator counts, so a new judge would skip traces another evaluator already scored. Results count as done once indexed (the pipeline flush interval), so do not run two passes at once.
 - Run the judge outside the agent's span. If the judge is itself traced, pass `judgeTraceId` so the result links to the judge's run.
 
@@ -557,7 +557,7 @@ Add an online evaluator for this TypeScript agent with the OpenSearch GenAI obse
 | No evaluation events | The pipeline does not accept OTLP logs on `/v1/logs`, or does not route `eventName == "gen_ai.evaluation.result"` | Check the logs pipeline; without the route Data Prepper writes them to `logs-otel-v1*` |
 | Results not linked to the agent trace | No `traceId` / `spanId` passed | Pass the ids of the agent span to `Benchmark.log()` or `score()` |
 | `evaluate()` throws about a Promise | The task or a scorer is async | Use `Benchmark` for async agents and judges |
-| Online evaluator finds no traces | Wrong service, agent name or time window | `listRootSpans()` filters on `serviceName` and `startTime`; check the `serviceName` passed to `register()` |
+| Online evaluator finds no traces | Wrong service, agent name or time window, or the agent span is not a root | `listRootSpans()` filters on `serviceName` and `startTime`; check the `serviceName` passed to `register()`. A root is a span marked `derived.gen_ai.is_root` or a parentless `invoke_agent` / `create_agent` span: call `markAgentRoot()` in the agent's span or trace it with `observe({ op: Op.INVOKE_AGENT })`. When nothing matches, the SDK logs this rule once (`console.info`) |
 | A trace is graded twice | Two passes overlapped, or ran before the last results were indexed | Run one pass at a time, wait for the pipeline flush interval |
 | Runs show an id instead of a name | No `runName` | Pass `runName` to `evaluate()` or `new Benchmark()` |
 | Judge model or prompt version missing | Not set on the score | Set `judgeModel`, `judgePromptName`, `judgePromptVersion` (on `EvalScore`, `score()` or `defineScorer()`) |

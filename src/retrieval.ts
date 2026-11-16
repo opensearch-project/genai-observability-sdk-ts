@@ -5,15 +5,56 @@ import { AGENT_ROOT_ATTRIBUTE } from './enrich.js';
 import { EVALUATION_RESULT_EVENT } from './score.js';
 
 /**
- * Agent Traces lists a trace by its AI root: a trace root that is a GenAI span (has
- * `gen_ai.operation.name`), or a span marked `derived.gen_ai.is_root` (by Data Prepper, an SDK
- * or the user), for example the agent span below an HTTP server span.
+ * `listRootSpans()` lists a trace by its agent root: a span marked `derived.gen_ai.is_root` (by
+ * Data Prepper, an SDK or the user), for example the agent span below an HTTP server span, or a
+ * trace root (no parent) that is an agent operation. A judge's own parentless chat span is not an
+ * agent root.
  */
 const AI_ROOT_FIELD = `attributes.${AGENT_ROOT_ATTRIBUTE}`;
 const OPERATION_FIELD = 'attributes.gen_ai.operation.name';
+const AGENT_OPERATIONS = ['invoke_agent', 'create_agent'];
 const CONVERSATION_FIELD = 'attributes.gen_ai.conversation.id';
 const EVALUATOR_NAME_FIELD = 'attributes.opensearch.gen_ai.evaluation.evaluator.name';
 const EVALUATION_NAME_FIELD = 'attributes.gen_ai.evaluation.name';
+const TRACE_ID_FIELD = 'traceId';
+
+/** Logged once per process when `listRootSpans()` finds nothing. */
+export const ROOT_RULE_HINT =
+  'listRootSpans() found no agent roots. A root is a span marked derived.gen_ai.is_root, ' +
+  'or a span without a parent whose gen_ai.operation.name is invoke_agent or create_agent. ' +
+  "Call markAgentRoot() in the agent's span, or trace the agent with observe({ op: Op.INVOKE_AGENT }).";
+let rootHintLogged = false;
+
+function logRootHintOnce(): void {
+  if (rootHintLogged) return;
+  rootHintLogged = true;
+  console.info(ROOT_RULE_HINT);
+}
+
+/** For tests: log the no-roots hint again. */
+export function resetRootHint(): void {
+  rootHintLogged = false;
+}
+
+/** A marked span, or a parentless span of an agent operation. */
+function agentRootQuery(): Record<string, unknown> {
+  return {
+    bool: {
+      should: [
+        { term: { [AI_ROOT_FIELD]: true } },
+        {
+          bool: {
+            filter: [
+              { term: { parentSpanId: '' } },
+              { terms: { [OPERATION_FIELD]: AGENT_OPERATIONS } },
+            ],
+          },
+        },
+      ],
+      minimum_should_match: 1,
+    },
+  };
+}
 
 /** Upper bound on the traces `getTraces()` collects for one conversation. */
 export const DEFAULT_MAX_CONVERSATION_TRACES = 1000;
@@ -28,18 +69,6 @@ function sourcesOf(response: Record<string, unknown>): Record<string, unknown>[]
   const hits = responseBody(response)['hits'] as Record<string, unknown> | undefined;
   const hitList = (hits?.['hits'] as Record<string, unknown>[]) ?? [];
   return hitList.map((hit) => (hit['_source'] as Record<string, unknown>) ?? hit);
-}
-
-/**
- * Drops marked spans whose trace is also listed through its GenAI root. Only spans without a
- * parent pass the GenAI-root condition, so a trace with such a hit keeps that one; marked spans
- * deeper in the same trace (an SDK marking a nested span) are dropped, as in Agent Traces.
- */
-export function dropShadowedAiRoots(
-  docs: Record<string, unknown>[],
-): Record<string, unknown>[] {
-  const rootTraceIds = new Set(docs.filter((d) => !d['parentSpanId']).map((d) => d['traceId']));
-  return docs.filter((d) => !d['parentSpanId'] || !rootTraceIds.has(d['traceId']));
 }
 
 export interface Message {
@@ -357,71 +386,85 @@ export class OpenSearchTraceRetriever {
     return {
       sessionId: identifier,
       traces,
-      truncated: docs.length > 0 && (moreTraces || totalHits > size || docs.length >= size),
+      truncated: docs.length > 0 && (moreTraces || totalHits > size),
     };
   }
 
   /**
-   * The AI roots of recent traces, newest first: the same rule as Agent Traces. A span is an AI
-   * root when it is a trace root that is a GenAI span (no parent, has `gen_ai.operation.name`)
-   * or it is marked `derived.gen_ai.is_root`. For an agent behind an HTTP handler this returns
-   * the marked agent span (with its messages and agent name), not the HTTP server span. A marked
-   * span in a trace that also has a GenAI root is left out, so a trace is listed once, unless
-   * several agents in it are marked (one record each). Indices where the marker is not mapped
-   * yet are fine: the marker condition matches nothing there.
+   * The agent roots of recent traces, newest first, one per trace.
+   *
+   * A span is an agent root when it is marked `derived.gen_ai.is_root` (by Data Prepper,
+   * `markAgentRoot()` or the user), or when it has no parent and its `gen_ai.operation.name` is
+   * `invoke_agent` or `create_agent`. Other parentless GenAI spans, such as a traced LLM judge's
+   * own `chat` span, are not listed. For an agent behind an HTTP handler this returns the marked
+   * agent span (with its messages and agent name), not the HTTP server span.
+   *
+   * Each trace is listed once: by its parentless agent root when it has one, else by its
+   * earliest marked span (for example when the agents of several services in one trace are
+   * marked). Traces are picked by their newest matching span since `since`; the returned root may
+   * have started earlier.
+   *
+   * When nothing matches, one `console.info` line per process names this rule. Indices where the
+   * marker is not mapped yet (no marked span so far) are fine: the marker condition matches
+   * nothing there.
    */
   async listRootSpans(options?: {
     /** Only spans of these services (the span index's `serviceName`). */
     services?: string[];
+    /** Only traces with an agent root started at or after this time. */
     since?: Date;
+    /** Maximum number of traces (root spans) to return. Default 50. */
     maxResults?: number;
   }): Promise<SpanRecord[]> {
-    const { client, search } = await this._search();
     const maxResults = options?.maxResults ?? 50;
+    if (maxResults <= 0) return [];
+    const { client, search } = await this._search();
 
-    const filters: Record<string, unknown>[] = [
-      {
-        bool: {
-          should: [
-            {
-              bool: {
-                filter: [
-                  { term: { parentSpanId: '' } },
-                  { exists: { field: OPERATION_FIELD } },
-                ],
-              },
-            },
-            { term: { [AI_ROOT_FIELD]: true } },
-          ],
-          minimum_should_match: 1,
-        },
-      },
-    ];
+    const serviceFilter: Record<string, unknown>[] =
+      options?.services && options.services.length > 0
+        ? [{ terms: { serviceName: options.services } }]
+        : [];
+    const sinceFilter: Record<string, unknown>[] = options?.since
+      ? [{ range: { startTime: { gte: options.since.toISOString() } } }]
+      : [];
 
-    if (options?.services && options.services.length > 0) {
-      filters.push({
-        terms: { serviceName: options.services },
-      });
-    }
-
-    if (options?.since) {
-      filters.push({
-        range: { startTime: { gte: options.since.toISOString() } },
-      });
-    }
-
-    const response = await search.call(client, {
+    // 1. Up to maxResults distinct traces with an agent root (since `since`), newest first.
+    const tracesResponse = await search.call(client, {
       index: this._index,
       body: {
-        query: { bool: { filter: filters } },
-        // A shadowed marked span takes a slot in the page; fetch extra so dropping it still
-        // leaves maxResults roots when there are more.
-        size: Math.min(maxResults * 2, 10000),
+        size: Math.min(maxResults, 10000),
+        _source: [TRACE_ID_FIELD],
         sort: [{ startTime: { order: 'desc' } }],
+        collapse: { field: TRACE_ID_FIELD },
+        query: { bool: { filter: [agentRootQuery(), ...sinceFilter, ...serviceFilter] } },
       },
     });
+    const traceIds = [
+      ...new Set(sourcesOf(tracesResponse).map((d) => String(d[TRACE_ID_FIELD] ?? ''))),
+    ].filter(Boolean);
+    if (traceIds.length === 0) {
+      logRootHintOnce();
+      return [];
+    }
 
-    return dropShadowedAiRoots(sourcesOf(response)).slice(0, maxResults).map(mapSpanDoc);
+    // 2. The root of each of those traces, at any time: the parentless agent root (scores 1)
+    // first, else the earliest marked span.
+    const rootsResponse = await search.call(client, {
+      index: this._index,
+      body: {
+        size: traceIds.length,
+        sort: [{ _score: { order: 'desc' } }, { startTime: { order: 'asc' } }],
+        collapse: { field: TRACE_ID_FIELD },
+        query: {
+          bool: {
+            filter: [agentRootQuery(), { terms: { [TRACE_ID_FIELD]: traceIds } }, ...serviceFilter],
+            should: [{ constant_score: { filter: { term: { parentSpanId: '' } } } }],
+          },
+        },
+      },
+    });
+    const byTrace = new Map(sourcesOf(rootsResponse).map((d) => [String(d[TRACE_ID_FIELD] ?? ''), d]));
+    return traceIds.filter((id) => byTrace.has(id)).map((id) => mapSpanDoc(byTrace.get(id)!));
   }
 
   /**

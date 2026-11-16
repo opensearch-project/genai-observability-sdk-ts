@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright OpenSearch Contributors
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import {
   parseMessages,
   extractMessagesFromDoc,
   mapSpanDoc,
-  dropShadowedAiRoots,
   OpenSearchTraceRetriever,
+  ROOT_RULE_HINT,
+  resetRootHint,
 } from '../src/retrieval.js';
 
 describe('parseMessages', () => {
@@ -352,9 +353,15 @@ describe('getTraces', () => {
     expect(session.truncated).toBe(true);
   });
 
-  it('is truncated when maxSpans is reached', async () => {
-    const { retriever } = stub(traceBuckets(['t1']), hits([spanDoc(), spanDoc({ spanId: 's2' })]));
-    expect((await retriever.getTraces('conv-1', 2)).truncated).toBe(true);
+  it('is truncated only when the trace has more spans than maxSpans', async () => {
+    const twoSpans = (total: number) => ({
+      body: { hits: { total: { value: total, relation: 'eq' }, hits: [spanDoc(), spanDoc({ spanId: 's2' })].map((d) => ({ _source: d })) } },
+    });
+    // Exactly maxSpans spans: every span was returned.
+    const exact = stub(traceBuckets(['t1']), twoSpans(2));
+    expect((await exact.retriever.getTraces('conv-1', 2)).truncated).toBe(false);
+    const more = stub(traceBuckets(['t1']), twoSpans(3));
+    expect((await more.retriever.getTraces('conv-1', 2)).truncated).toBe(true);
   });
 
   it('falls back to a trace id and gives the same TraceRecord', async () => {
@@ -377,39 +384,70 @@ describe('getTraces', () => {
   });
 });
 
-describe('listRootSpans', () => {
-  it('uses the Agent Traces AI-root rule and filters services on serviceName', async () => {
-    const { retriever, search } = stub(hits([]));
-    const since = new Date('2026-01-01T00:00:00Z');
-    await retriever.listRootSpans({ services: ['observability-assistant'], since, maxResults: 5 });
-    const body = search.mock.calls[0][0].body;
-    expect(body.size).toBe(10);
-    expect(body.query.bool.filter).toEqual([
+const AGENT_ROOT_QUERY = {
+  bool: {
+    should: [
+      { term: { 'attributes.derived.gen_ai.is_root': true } },
       {
         bool: {
-          should: [
-            {
-              bool: {
-                filter: [
-                  { term: { parentSpanId: '' } },
-                  { exists: { field: 'attributes.gen_ai.operation.name' } },
-                ],
-              },
-            },
-            { term: { 'attributes.derived.gen_ai.is_root': true } },
+          filter: [
+            { term: { parentSpanId: '' } },
+            { terms: { 'attributes.gen_ai.operation.name': ['invoke_agent', 'create_agent'] } },
           ],
-          minimum_should_match: 1,
         },
       },
-      { terms: { serviceName: ['observability-assistant'] } },
+    ],
+    minimum_should_match: 1,
+  },
+};
+
+describe('listRootSpans', () => {
+  beforeEach(() => resetRootHint());
+
+  it('collapses on traceId: distinct traces first, then each trace\'s root', async () => {
+    const { retriever, search } = stub(
+      hits([{ traceId: 't2' }, { traceId: 't1' }]),
+      hits([spanDoc({ traceId: 't1', spanId: 'r1' }), spanDoc({ traceId: 't2', spanId: 'r2' })]),
+    );
+    const since = new Date('2026-01-01T00:00:00Z');
+    const roots = await retriever.listRootSpans({ services: ['observability-assistant'], since, maxResults: 5 });
+    // Newest trace first, as picked by the first query.
+    expect(roots.map((r) => r.spanId)).toEqual(['r2', 'r1']);
+
+    const traces = search.mock.calls[0][0].body;
+    expect(traces.size).toBe(5);
+    expect(traces.collapse).toEqual({ field: 'traceId' });
+    expect(traces.sort).toEqual([{ startTime: { order: 'desc' } }]);
+    expect(traces.query.bool.filter).toEqual([
+      AGENT_ROOT_QUERY,
       { range: { startTime: { gte: since.toISOString() } } },
+      { terms: { serviceName: ['observability-assistant'] } },
     ]);
-    expect(body.query.bool.filter).not.toContainEqual({ term: { parentSpanId: '' } });
+
+    const rootsBody = search.mock.calls[1][0].body;
+    expect(rootsBody.size).toBe(2);
+    expect(rootsBody.collapse).toEqual({ field: 'traceId' });
+    // The parentless agent root wins, else the earliest marked span.
+    expect(rootsBody.sort).toEqual([{ _score: { order: 'desc' } }, { startTime: { order: 'asc' } }]);
+    expect(rootsBody.query.bool.filter).toEqual([
+      AGENT_ROOT_QUERY,
+      { terms: { traceId: ['t2', 't1'] } },
+      { terms: { serviceName: ['observability-assistant'] } },
+    ]);
+    expect(rootsBody.query.bool.should).toEqual([{ constant_score: { filter: { term: { parentSpanId: '' } } } }]);
+  });
+
+  it('a parentless root counts only for agent operations, not a judge\'s chat span', async () => {
+    const { retriever, search } = stub(hits([]));
+    await retriever.listRootSpans();
+    const filter = search.mock.calls[0][0].body.query.bool.filter[0];
+    expect(JSON.stringify(filter)).not.toContain('exists');
+    expect(filter).toEqual(AGENT_ROOT_QUERY);
   });
 
   it('returns the marked agent span behind an HTTP root, with agent and messages', async () => {
     const agent = spanDoc({ spanId: 'agent', parentSpanId: 'http', name: 'invoke_agent travel_planner', agent: 'travel_planner', marked: true });
-    const { retriever } = stub(hits([agent]));
+    const { retriever } = stub(hits([{ traceId: 't1' }]), hits([agent]));
     const [root] = await retriever.listRootSpans();
     expect(root.spanId).toBe('agent');
     expect(root.agentName).toBe('travel_planner');
@@ -417,45 +455,26 @@ describe('listRootSpans', () => {
     expect(root.inputMessages[0].content).toBe('hello');
   });
 
-  it('drops a marked span shadowed by its trace\'s GenAI root', async () => {
-    const docs = [
-      spanDoc({ traceId: 't1', spanId: 'nested', parentSpanId: 'root', marked: true }),
-      spanDoc({ traceId: 't1', spanId: 'root' }),
-      spanDoc({ traceId: 't2', spanId: 'agent2', parentSpanId: 'http2', marked: true }),
-    ];
-    const { retriever } = stub(hits(docs));
-    expect((await retriever.listRootSpans()).map((r) => r.spanId)).toEqual(['root', 'agent2']);
+  it('logs the root rule once when nothing matches', async () => {
+    const info = vi.spyOn(console, 'info').mockImplementation(() => {});
+    try {
+      const { retriever, search } = stub(hits([]), hits([]));
+      expect(await retriever.listRootSpans()).toEqual([]);
+      expect(await retriever.listRootSpans()).toEqual([]);
+      expect(search).toHaveBeenCalledTimes(2); // no second query without traces
+      expect(info).toHaveBeenCalledTimes(1);
+      expect(info).toHaveBeenCalledWith(ROOT_RULE_HINT);
+      expect(ROOT_RULE_HINT).toContain('markAgentRoot()');
+      expect(ROOT_RULE_HINT).toContain('invoke_agent');
+    } finally {
+      info.mockRestore();
+    }
   });
 
-  it('lists parallel marked agents of one trace each', async () => {
-    const docs = [
-      spanDoc({ spanId: 'a', parentSpanId: 'http', marked: true }),
-      spanDoc({ spanId: 'b', parentSpanId: 'http', marked: true }),
-    ];
-    const { retriever } = stub(hits(docs));
-    expect((await retriever.listRootSpans()).map((r) => r.spanId)).toEqual(['a', 'b']);
-  });
-
-  it('keeps maxResults after dropping shadowed spans', async () => {
-    const docs = [
-      spanDoc({ traceId: 't1', spanId: 'n1', parentSpanId: 'r1', marked: true }),
-      spanDoc({ traceId: 't1', spanId: 'r1' }),
-      spanDoc({ traceId: 't2', spanId: 'r2' }),
-      spanDoc({ traceId: 't3', spanId: 'r3' }),
-    ];
-    const { retriever } = stub(hits(docs));
-    expect((await retriever.listRootSpans({ maxResults: 2 })).map((r) => r.spanId)).toEqual(['r1', 'r2']);
-  });
-});
-
-describe('dropShadowedAiRoots', () => {
-  it('keeps parentless hits and marked spans of traces without one', () => {
-    const docs = [
-      { traceId: 't1', parentSpanId: 'p' },
-      { traceId: 't1', parentSpanId: '' },
-      { traceId: 't2', parentSpanId: 'p' },
-    ];
-    expect(dropShadowedAiRoots(docs)).toEqual([docs[1], docs[2]]);
+  it('returns nothing, without a query, for maxResults <= 0', async () => {
+    const { retriever, search } = stub();
+    expect(await retriever.listRootSpans({ maxResults: 0 })).toEqual([]);
+    expect(search).not.toHaveBeenCalled();
   });
 });
 
