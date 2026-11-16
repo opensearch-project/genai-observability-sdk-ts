@@ -23,8 +23,8 @@ How `register()` finds its endpoints, the environment variables it reads, AWS Si
 | `OTEL_EXPORTER_OTLP_TIMEOUT` / `OTEL_EXPORTER_OTLP_<SIGNAL>_TIMEOUT` | Timeout of each export request, in milliseconds. `timeoutMillis` wins over them | `10000` |
 | `OTEL_EXPORTER_OTLP_HEADERS` / `OTEL_EXPORTER_OTLP_<SIGNAL>_HEADERS` | Extra headers (`key=value,key2=value2`). `headers` wins per key; the SigV4 exporters sign them | none |
 | `OTEL_BSP_MAX_EXPORT_BATCH_SIZE` | Spans per export batch. Lower it when large GenAI spans exceed a pipeline's request limit | `512` |
-| `AWS_DEFAULT_REGION` | AWS region for SigV4 signing | — |
-| `AWS_REGION` | AWS region for SigV4 signing (fallback) | — |
+| `AWS_DEFAULT_REGION` | AWS region for SigV4 signing | none |
+| `AWS_REGION` | AWS region for SigV4 signing (fallback) | none |
 
 ## Endpoints: traces and evaluation logs
 
