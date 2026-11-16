@@ -47,7 +47,7 @@ examples/
 ## How to run
 
 1. Start a local stack (OTel Collector, Data Prepper, OpenSearch, OpenSearch Dashboards): see [`runbooks/tracing.md`](runbooks/tracing.md#1-stand-up-the-stack).
-2. Pick an example folder, then `npm install` and `npx tsx agent.ts`. Each folder is standalone (its own `package.json`, depending on `@opensearch-project/genai-observability-sdk-ts`) and its README lists its env vars.
+2. Pick an example folder, then `npm install` and `npx tsx agent.ts`. Each folder is standalone (its own `package.json`, depending on `@opensearch-project/genai-observability-sdk-ts`) and its README lists its env vars. The examples depend on `^0.2.0`; until that version is on npm, build and pack the SDK from a clone (`pnpm install && pnpm build && npm pack` in the repository root) and run `npm install --no-save <path to the .tgz>` in the example folder (it installs the other dependencies too). The Strands folders ship an `.npmrc` with `legacy-peer-deps=true`: Strands declares optional OpenTelemetry JS 2.x peers and the SDK is on 1.x, so a plain `npm install` fails with `ERESOLVE` without it.
 3. Open Agent Traces at `http://localhost:5601/app/agentTraces`, and evaluations at `http://localhost:5601/app/agentTraces/evaluations`.
 
 The basics are the exception: they import the SDK from `../../src`, so run them from a clone of this repository (`pnpm install`, then `npx tsx examples/basics/01_tracing_basics.ts`).

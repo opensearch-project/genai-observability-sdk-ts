@@ -55,7 +55,7 @@ export AWS_REGION=us-west-2                                    # plus your AWS c
 
 `package.json` keeps a single `@opentelemetry/api` (an `overrides` entry): two copies of the OTel API in one process cannot share the global tracer provider, and the spans are then silently dropped. `.npmrc` sets `legacy-peer-deps`: `@strands-agents/sdk` declares optional peers on OpenTelemetry JS 2.x, which only its own telemetry setup uses (this example does not call it), while the SDK is on 1.x. With that flag npm does not install peers, so `package.json` lists the one Strands needs (`@modelcontextprotocol/client`).
 
-To try an unreleased SDK from a clone of this repository, build and pack it (`pnpm install && pnpm build && npm pack` in the repository root) and `npm install ../../../opensearch-project-genai-observability-sdk-ts-<version>.tgz` here.
+To try an unreleased SDK from a clone of this repository, build and pack it (`pnpm install && pnpm build && npm pack` in the repository root) and `npm install --no-save ../../../opensearch-project-genai-observability-sdk-ts-<version>.tgz` here.
 
 | Env var | Default | Meaning |
 |---|---|---|
