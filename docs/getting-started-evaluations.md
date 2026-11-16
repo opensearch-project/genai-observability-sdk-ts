@@ -193,7 +193,10 @@ const bench = new Benchmark("observability-assistant-core", {
 });
 
 for (const c of cases) {
+  const start = performance.now();
   const { answer, traceId, spanId } = await ask(c.input);
+  // One AgentRun per case: the trace's spans are fetched once and shared by every scorer.
+  const run = await agentRun(answer, traceId, performance.now() - start);
   bench.log({
     caseId: c.caseId,
     caseName: c.caseName,
@@ -203,8 +206,9 @@ for (const c of cases) {
     traceId,
     spanId,
     scores: [
-      await answerCorrectness(c, answer), // deterministic, live ground truth
+      await answerCorrectness(run), // deterministic, live ground truth
       await answerQualityJudge(c.input, answer), // LLM judge, see the cookbook
+      noLoops(run), // from the trace's spans
     ],
   });
 }
@@ -303,14 +307,43 @@ Offline evals catch regressions before a release; online evals catch what the su
 
 ## Eval cookbook
 
-Copy and adapt. Each scorer returns an `EvalScore` (or a number or boolean) and works with `Benchmark.log({ scores })`; the synchronous ones also work as `evaluate()` scorers through `defineScorer()`. Runnable versions are in the Strands observability example ([#101](https://github.com/opensearch-project/genai-observability-sdk-ts/pull/101)). `AgentRun` is whatever your `ask()` returns, plus the spans of its trace (from `OpenSearchTraceRetriever.getTraces(traceId)` or your own span processor).
+Copy and adapt. Each scorer returns an `EvalScore` (or a number or boolean) and works with `Benchmark.log({ scores })`; the synchronous ones also work as `evaluate()` scorers through `defineScorer()`. Runnable versions are in the Strands observability example ([#101](https://github.com/opensearch-project/genai-observability-sdk-ts/pull/101)). `AgentRun` is whatever your `ask()` returns, plus the spans of its trace. Build it once per case with `agentRun()` and pass the same object to every scorer: the spans are fetched from OpenSearch once per trace id (cached), not once per scorer.
 
 ```typescript
-import { defineScorer, type EvalScore, type SpanRecord } from "@opensearch-project/genai-observability-sdk-ts";
+import {
+  OpenSearchTraceRetriever,
+  defineScorer,
+  type EvalScore,
+  type SpanRecord,
+} from "@opensearch-project/genai-observability-sdk-ts";
 
 interface AgentRun { answer: string; spans: SpanRecord[]; durationMs: number }
+
+const retriever = new OpenSearchTraceRetriever({
+  host: "https://localhost:9200",
+  auth: { username: "admin", password: process.env.OPENSEARCH_PASSWORD! },
+  verifyCerts: false, // local self-signed certificate only
+});
+
+// Spans per trace id, fetched once and shared by every scorer of the case.
+const spansByTrace = new Map<string, Promise<SpanRecord[]>>();
+function spansOf(traceId: string): Promise<SpanRecord[]> {
+  let spans = spansByTrace.get(traceId);
+  if (!spans) {
+    spans = retriever.getTraces(traceId).then((s) => s.traces.flatMap((t) => t.spans));
+    spansByTrace.set(traceId, spans);
+  }
+  return spans;
+}
+
+async function agentRun(answer: string, traceId: string, durationMs: number): Promise<AgentRun> {
+  return { answer, durationMs, spans: await spansOf(traceId) };
+}
+
 const toolCalls = (run: AgentRun) => run.spans.filter((s) => s.operationName === "execute_tool").map((s) => s.toolName);
 ```
+
+The spans must be in OpenSearch before `getTraces()` runs: flush the tracer provider after `ask()` (`await provider.forceFlush()`) and allow for the pipeline's flush interval, or collect the spans in process with your own span processor and skip the lookup.
 
 ### answerCorrectness (deterministic)
 
