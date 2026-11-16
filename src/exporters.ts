@@ -464,18 +464,28 @@ function doubleAttributesSerializer(base: LogsSerializer): LogsSerializer {
 }
 
 /**
- * Make an `@opentelemetry/exporter-logs-otlp-proto` OTLPLogExporter send
- * double-typed attributes (for example `gen_ai.evaluation.score.value`) as
- * `double_value` even when the value is a whole number. Wraps the exporter's
- * protobuf serializer; returns false (and changes nothing) when the exporter
- * does not have the expected internals.
+ * Make an OpenTelemetry OTLP log exporter (`@opentelemetry/exporter-logs-otlp-proto`
+ * or `@opentelemetry/exporter-logs-otlp-grpc`) send double-typed attributes (for
+ * example `gen_ai.evaluation.score.value`) as `double_value` even when the value
+ * is a whole number. Wraps the exporter's protobuf serializer; returns false (and
+ * changes nothing) when the exporter does not have the expected internals, such as
+ * the OTLP/HTTP JSON exporter or a custom exporter. Calling it twice is harmless.
  */
+const SCORES_AS_DOUBLE = Symbol.for("opensearch-genai-observability-sdk.scoresAsDouble");
+
 export function sendScoresAsDouble(exporter: unknown): boolean {
   const delegate = (exporter as { _delegate?: { _serializer?: LogsSerializer & { deserializeResponse?: unknown } } })
     ?._delegate;
-  const serializer = delegate?._serializer;
+  const serializer = delegate?._serializer as (LogsSerializer & { [SCORES_AS_DOUBLE]?: true }) | undefined;
   if (!delegate || typeof serializer?.serializeRequest !== "function") return false;
-  delegate._serializer = { ...serializer, ...doubleAttributesSerializer(serializer) };
+  // Already wrapped (register() and the caller both applied it): keep one wrapper.
+  if (serializer[SCORES_AS_DOUBLE]) return true;
+  const wrapped: LogsSerializer & { [SCORES_AS_DOUBLE]?: true } = {
+    ...serializer,
+    ...doubleAttributesSerializer(serializer),
+    [SCORES_AS_DOUBLE]: true,
+  };
+  delegate._serializer = wrapped;
   return true;
 }
 

@@ -28,6 +28,21 @@ import {
 import { score } from '../src/score.js';
 import { getSdkLoggerProvider, setSdkLoggerProvider } from '../src/logs.js';
 import { AWSSigV4OTLPExporter, AWSSigV4OTLPLogExporter } from '../src/exporters.js';
+import { createRequire } from 'module';
+
+// Independent OTLP decoder (as in exporters.test.ts): the protobufjs root of the otlp-transformer.
+const otlpRoot = createRequire(createRequire(import.meta.url).resolve('@opentelemetry/exporter-trace-otlp-proto'))(
+  '@opentelemetry/otlp-transformer/build/src/generated/root',
+) as {
+  opentelemetry: { proto: { collector: { logs: { v1: { ExportLogsServiceRequest: {
+    decode(buf: Uint8Array): unknown;
+    toObject(msg: unknown, opts: Record<string, unknown>): Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
+  } } } } } };
+};
+const decodeLogs = (body: Uint8Array) => {
+  const type = otlpRoot.opentelemetry.proto.collector.logs.v1.ExportLogsServiceRequest;
+  return type.toObject(type.decode(body), { longs: Number, bytes: String, defaults: false });
+};
 
 describe('default endpoints', () => {
   it('are the OTel standard localhost:4318 (HTTP) and localhost:4317 (gRPC)', () => {
@@ -389,6 +404,30 @@ describe('register - exporters', () => {
     expect(logExporter).toBeInstanceOf(GrpcLogExporter);
     await spans.shutdown();
     await logExporter.shutdown();
+  });
+
+  it('the gRPC and custom OTLP log exporters send whole-number scores as doubleValue', async () => {
+    const memory = new InMemoryLogRecordExporter();
+    const provider = new LoggerProvider({ processors: [new SimpleLogRecordProcessor({ exporter: memory })] });
+    provider.getLogger('judge').emit({
+      eventName: 'gen_ai.evaluation.result',
+      attributes: { 'gen_ai.evaluation.name': 'acc', 'gen_ai.evaluation.score.value': 4 },
+    });
+    const scoreOf = (exporter: unknown) => {
+      const body = (exporter as { _delegate: { _serializer: { serializeRequest(l: unknown[]): Uint8Array } } })
+        ._delegate._serializer.serializeRequest(memory.getFinishedLogRecords());
+      const record = decodeLogs(body).resourceLogs[0].scopeLogs[0].logRecords[0];
+      return record.attributes.find((a: { key: string }) => a.key === 'gen_ai.evaluation.score.value').value;
+    };
+    const grpc = await createLogExporter({ endpoint: 'grpc://c:4317' });
+    expect(grpc).toBeInstanceOf(GrpcLogExporter);
+    expect(scoreOf(grpc)).toEqual({ doubleValue: 4 });
+    const custom = new OTLPLogExporter({ url: 'http://c:4318/v1/logs' });
+    expect(await createLogExporter({ logExporter: custom })).toBe(custom);
+    expect(scoreOf(custom)).toEqual({ doubleValue: 4 });
+    await provider.shutdown();
+    await grpc.shutdown();
+    await custom.shutdown();
   });
 
   it('grpcMetadata lowercases header keys and is undefined without headers', async () => {

@@ -12,6 +12,7 @@ import {
 } from '@opentelemetry/sdk-logs';
 import { createRequire } from 'module';
 import { OTLPLogExporter } from '@opentelemetry/exporter-logs-otlp-proto';
+import { OTLPLogExporter as GrpcLogExporter } from '@opentelemetry/exporter-logs-otlp-grpc';
 import { BasicTracerProvider, SimpleSpanProcessor } from '@opentelemetry/sdk-trace-base';
 import aws4 from 'aws4';
 import { createHash } from 'crypto';
@@ -260,7 +261,7 @@ describe('double-typed attributes over OTLP protobuf', () => {
     return provider;
   }
 
-  function serializedOf(exporter: OTLPLogExporter) {
+  function serializedOf(exporter: OTLPLogExporter | GrpcLogExporter) {
     return (exporter as unknown as {
       _delegate: { _serializer: { serializeRequest(l: unknown[]): Uint8Array } };
     })._delegate._serializer;
@@ -317,6 +318,35 @@ describe('double-typed attributes over OTLP protobuf', () => {
     expect(hex(record.traceId)).toBe(TRACE_ID);
     expect(hex(record.spanId)).toBe(SPAN_ID);
     await provider.shutdown();
+    await exporter.shutdown();
+  });
+
+  it('the gRPC OTLPLogExporter sends a score of 1 as doubleValue after sendScoresAsDouble', async () => {
+    const exporter = new GrpcLogExporter({ url: 'http://localhost:1' });
+    const memory = new InMemoryLogRecordExporter();
+    const provider = emitTo(memory, 1);
+    const records = memory.getFinishedLogRecords();
+    // Without it, the gRPC exporter sends whole numbers as intValue, like OTLP/HTTP.
+    expect(attrsOf(firstRecord(serializedOf(exporter).serializeRequest(records)))['gen_ai.evaluation.score.value'])
+      .toEqual({ intValue: 1 });
+    expect(sendScoresAsDouble(exporter)).toBe(true);
+    const record = firstRecord(serializedOf(exporter).serializeRequest(records));
+    expect(attrsOf(record)['gen_ai.evaluation.score.value']).toEqual({ doubleValue: 1 });
+    expect(attrsOf(record)['opensearch.gen_ai.evaluation.score.threshold']).toEqual({ doubleValue: 4 });
+    expect(attrsOf(record)['other.count']).toEqual({ intValue: 3 });
+    await provider.shutdown();
+    await exporter.shutdown();
+  });
+
+  it('sendScoresAsDouble wraps once, and leaves exporters without a protobuf serializer alone', async () => {
+    const exporter = new OTLPLogExporter({ url: 'http://localhost:1/v1/logs' });
+    expect(sendScoresAsDouble(exporter)).toBe(true);
+    const wrapped = serializedOf(exporter);
+    expect(sendScoresAsDouble(exporter)).toBe(true);
+    expect(serializedOf(exporter)).toBe(wrapped);
+    const memory = new InMemoryLogRecordExporter();
+    expect(sendScoresAsDouble(memory)).toBe(false);
+    expect(sendScoresAsDouble(undefined)).toBe(false);
     await exporter.shutdown();
   });
 
