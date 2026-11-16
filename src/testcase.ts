@@ -10,12 +10,15 @@ import { AGENT_NAME_KEY, AGENT_VERSION_KEY, hasContextManager } from './internal
  *
  * The case is put in the OTel context the task runs in (TEST_CASE_KEY). With a
  * context manager (register() installs one on Node) it follows the task across
- * `await`, and only spans started in that context belong to the case: a timer,
- * poller or another request started outside it is never stamped. Without a
- * context manager the context is lost at once, so evaluate() then also keeps
- * a module-level "current case" until the task settles. That fallback is used
- * only while exactly one case is running: with overlapping evaluate() runs and
- * no context manager no span can be told apart, so none is stamped.
+ * `await`, and spans started in that context belong to the case. A span
+ * started in a context without a case (an HTTP handler's
+ * `propagation.extract(ROOT_CONTEXT, headers)`, `context.with(ROOT_CONTEXT, ...)`,
+ * a callback bound before the case) is attached to the case only when exactly
+ * one case is running and the span has no local parent (no parent, or a
+ * remote one). With overlapping evaluate() runs such a span is not guessed at:
+ * the agent must then start inside the task's context. Without a context
+ * manager the context is lost at once, so every span is parentless and the
+ * same rule applies: a lone case is stamped, overlapping cases are not.
  */
 export interface ActiveTestCase {
   attributes: Record<string, string>;
@@ -23,12 +26,17 @@ export interface ActiveTestCase {
   root?: SpanContext;
   /** That root span itself: its final attributes name the agent that ran. */
   rootSpan?: Span;
+  /**
+   * The root was attached as the only running case, not found in the task's context: a root
+   * started in the task's context later replaces it.
+   */
+  rootAttached?: boolean;
   /** Span ids started while the case ran, to tell roots from their children. */
   readonly seen: Set<string>;
 }
 
-/** Cases running without a context manager (see ActiveTestCase). */
-const fallbackCases = new Set<ActiveTestCase>();
+/** Cases running right now (see ActiveTestCase). */
+const runningCases = new Set<ActiveTestCase>();
 let overlapWarned = false;
 
 const AGENT_KEYS: ReadonlySet<string> = new Set([AGENT_NAME_KEY, AGENT_VERSION_KEY]);
@@ -37,14 +45,12 @@ const AGENT_KEYS: ReadonlySet<string> = new Set([AGENT_NAME_KEY, AGENT_VERSION_K
 export const TEST_CASE_KEY = createContextKey('opensearch-genai-observability-sdk.testCase');
 
 /**
- * @internal Make `testCase` the current case. Returns a function that restores
- * the previous one; call it once the task has settled.
+ * @internal Mark `testCase` as running. Returns a function that ends it; call
+ * it once the task has settled.
  */
 export function enterTestCase(testCase: ActiveTestCase): () => void {
-  // With a context manager the case rides in the task's context only.
-  if (hasContextManager()) return () => {};
-  fallbackCases.add(testCase);
-  if (fallbackCases.size > 1 && !overlapWarned) {
+  runningCases.add(testCase);
+  if (runningCases.size > 1 && !hasContextManager() && !overlapWarned) {
     overlapWarned = true;
     console.warn(
       "[opensearch-genai-observability-sdk-ts] evaluate(): test cases overlap and no OTel context " +
@@ -53,19 +59,25 @@ export function enterTestCase(testCase: ActiveTestCase): () => void {
     );
   }
   return () => {
-    fallbackCases.delete(testCase);
+    runningCases.delete(testCase);
   };
 }
 
-/** The fallback case, when exactly one case runs without a context manager. */
-function fallbackCase(): ActiveTestCase | undefined {
-  if (fallbackCases.size !== 1) return undefined;
-  return fallbackCases.values().next().value;
+/** The only running case, when exactly one runs. */
+function onlyRunningCase(): ActiveTestCase | undefined {
+  if (runningCases.size !== 1) return undefined;
+  return runningCases.values().next().value;
 }
 
 function parentSpanId(span: Span): string | undefined {
   const s = span as unknown as { parentSpanId?: string; parentSpanContext?: SpanContext };
   return s.parentSpanContext?.spanId ?? s.parentSpanId;
+}
+
+/** Whether a span with parent span id `parent` has a parent in this process (not a remote one). */
+function hasLocalParent(parent: string | undefined, parentContext: Context | undefined): boolean {
+  if (!parent) return false;
+  return parentContext ? trace.getSpanContext(parentContext)?.isRemote !== true : true;
 }
 
 /**
@@ -74,9 +86,14 @@ function parentSpanId(span: Span): string | undefined {
  * while evaluate() runs it, and remembers the first root span so the case's
  * score events are parented to it.
  *
- * A span is a case root when it has no parent, or when its parent was not
- * started inside the same case (for example a remote parent). Without a context manager every span is a root,
- * so all of them are stamped and the first one is used as the trace context.
+ * A span belongs to a case when it starts in the task's context, or, when
+ * exactly one case is running, when it starts in a context without a case and
+ * has no local parent (no parent, or a remote parent such as one read from
+ * incoming request headers). It is a case root when it has no parent, or when
+ * its parent was not started inside the same case (a remote parent). A root
+ * started in the task's context wins the case trace over one attached as the
+ * only running case. Without a context manager every span is a root, so all
+ * of them are stamped and the first one is used as the trace context.
  *
  * register() installs it. evaluate() also adds it to the global
  * BasicTracerProvider (OTel JS 1.x) when missing. With a provider that cannot
@@ -85,11 +102,12 @@ function parentSpanId(span: Span): string | undefined {
  */
 export class TestCaseSpanProcessor implements SpanProcessor {
   onStart(span: Span, parentContext: Context): void {
-    const testCase = (parentContext?.getValue(TEST_CASE_KEY) as ActiveTestCase | undefined) ?? fallbackCase();
+    const parent = parentSpanId(span);
+    const fromContext = parentContext?.getValue(TEST_CASE_KEY) as ActiveTestCase | undefined;
+    const testCase = fromContext ?? (hasLocalParent(parent, parentContext) ? undefined : onlyRunningCase());
     if (!testCase) return;
 
     const ctx = span.spanContext();
-    const parent = parentSpanId(span);
     const isRoot = !parent || !testCase.seen.has(parent);
     testCase.seen.add(ctx.spanId);
     if (!isRoot) return;
@@ -100,9 +118,10 @@ export class TestCaseSpanProcessor implements SpanProcessor {
       if (AGENT_KEYS.has(key) && existing[key] !== undefined) continue;
       span.setAttribute(key, value);
     }
-    if (!testCase.root) {
+    if (!testCase.root || (testCase.rootAttached && fromContext)) {
       testCase.root = { traceId: ctx.traceId, spanId: ctx.spanId, traceFlags: ctx.traceFlags };
       testCase.rootSpan = span;
+      testCase.rootAttached = !fromContext;
     }
   }
 

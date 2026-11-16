@@ -2,7 +2,14 @@
 // Copyright OpenSearch Contributors
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { context, trace } from '@opentelemetry/api';
+import {
+  context,
+  propagation,
+  ROOT_CONTEXT,
+  trace,
+  type Context,
+  type TextMapPropagator,
+} from '@opentelemetry/api';
 import { AsyncLocalStorageContextManager } from '@opentelemetry/context-async-hooks';
 import { evaluate, defineScorer, type EvalScore } from '../src/benchmark.js';
 import { observe, withObserve, Op } from '../src/observe.js';
@@ -279,26 +286,35 @@ describe('evaluate() keeps each case to its own spans with async tasks', () => {
     expect(stamped('unrelated')).toHaveLength(0);
   });
 
-  it('does not stamp a background span started while the task awaits', async () => {
+  it('keeps the agent trace when a background span starts while the task awaits', async () => {
     let fire!: () => void;
     const fired = new Promise<void>(resolve => (fire = resolve));
+    const tracer = trace.getTracer('background');
+    // A poller span started before the case: its children have a local parent.
+    const poller = tracer.startSpan('poller');
     // Scheduled outside the case, like a poller or another request.
     const timer = setTimeout(() => {
-      trace.getTracer('background').startSpan('background').end();
+      tracer.startSpan('background').end();
+      context.with(trace.setSpan(ROOT_CONTEXT, poller), () => tracer.startSpan('poll').end());
       fire();
     }, 1);
     const result = await evaluate({
       name: 'bg',
       task: async (q: unknown) => {
-        await fired; // the background span starts during this await
+        await fired; // the background spans start during this await
         return agent(q);
       },
       data: [{ input: 'q', caseId: 'c1' }],
       scores: [],
     });
     clearTimeout(timer);
+    poller.end();
 
-    expect(stamped('background')).toHaveLength(0);
+    // A parentless span is attached to the only running case (it cannot be told
+    // from an agent root started in a fresh context), but the case trace is the
+    // root started in the task's context, and a child of a local span is not stamped.
+    expect(stamped('background')).toHaveLength(1);
+    expect(stamped('poll')).toHaveLength(0);
     const root = getFinishedSpans().find(s => s.name === 'invoke_agent travel_agent')!;
     expect(root.attributes['test.case.id']).toBe('c1');
     expect(result.cases[0].traceId).toBe(root.spanContext().traceId);
@@ -330,5 +346,105 @@ describe('evaluate() keeps each case to its own spans with async tasks', () => {
     } finally {
       context.setGlobalContextManager(new AsyncLocalStorageContextManager().enable());
     }
+  });
+});
+
+/** Reads a W3C `traceparent` header into a remote span context, like the W3C propagator. */
+const traceparentPropagator: TextMapPropagator = {
+  inject() {},
+  extract(ctx: Context, carrier: unknown) {
+    const header = (carrier as Record<string, string>).traceparent;
+    const [, traceId, spanId, flags] = header.split('-');
+    return trace.setSpanContext(ctx, { traceId, spanId, traceFlags: parseInt(flags, 16), isRemote: true });
+  },
+  fields: () => ['traceparent'],
+};
+
+describe('evaluate() links an agent root started in a fresh context to the only running case', () => {
+  const stampedIds = (name: string) =>
+    getFinishedSpans()
+      .filter(s => s.name === name)
+      .map(s => s.attributes['test.case.id']);
+
+  it('stamps a root started under context.with(ROOT_CONTEXT) and takes it as the case trace', async () => {
+    const tracer = trace.getTracer('server');
+    const result = await evaluate({
+      name: 'fresh',
+      task: async (q: unknown) => {
+        await tick();
+        return context.with(ROOT_CONTEXT, () =>
+          tracer.startActiveSpan('server', async span => {
+            await tick();
+            tracer.startSpan('db').end(); // a child of server: not a root
+            span.end();
+            return q;
+          }),
+        );
+      },
+      data: [{ input: 'q', caseId: 'c1' }],
+      scores: [() => 1],
+    });
+    const server = getFinishedSpans().find(s => s.name === 'server')!;
+    expect(server.attributes['test.case.id']).toBe('c1');
+    expect(stampedIds('db')).toEqual([undefined]);
+    expect(result.cases[0].traceId).toBe(server.spanContext().traceId);
+    expect(scoreRecords()[0].spanContext?.traceId).toBe(server.spanContext().traceId);
+  });
+
+  it('stamps a root whose parent was extracted from incoming headers (a remote parent)', async () => {
+    propagation.setGlobalPropagator(traceparentPropagator);
+    try {
+      const remoteTrace = '4bf92f3577b34da6a3ce929d0e0e4736';
+      const headers = { traceparent: `00-${remoteTrace}-00f067aa0ba902b7-01` };
+      const result = await evaluate({
+        name: 'remote',
+        task: async (q: unknown) => {
+          await tick();
+          const incoming = propagation.extract(ROOT_CONTEXT, headers);
+          trace.getTracer('http').startSpan('POST /agent', {}, incoming).end();
+          return q;
+        },
+        data: [{ input: 'q', caseId: 'r1' }],
+        scores: [],
+      });
+      const handler = getFinishedSpans().find(s => s.name === 'POST /agent')!;
+      expect(handler.attributes['test.case.id']).toBe('r1');
+      expect(result.cases[0].traceId).toBe(remoteTrace);
+      expect(result.cases[0].spanId).toBe(handler.spanContext().spanId);
+    } finally {
+      propagation.disable();
+    }
+  });
+
+  it('prefers a root started in the task context over one attached as the only running case', async () => {
+    const tracer = trace.getTracer('mixed');
+    const result = await evaluate({
+      name: 'prefer',
+      task: async (q: unknown) => {
+        context.with(ROOT_CONTEXT, () => tracer.startSpan('library').end());
+        return agent(q);
+      },
+      data: [{ input: 'q', caseId: 'p1' }],
+      scores: [],
+    });
+    const root = getFinishedSpans().find(s => s.name === 'invoke_agent travel_agent')!;
+    expect(result.cases[0].traceId).toBe(root.spanContext().traceId);
+  });
+
+  it('does not guess with overlapping cases: a fresh-context root is not stamped', async () => {
+    const tracer = trace.getTracer('overlap');
+    const fresh = async (q: unknown) => {
+      await tick();
+      context.with(ROOT_CONTEXT, () => tracer.startSpan('detached').end());
+      return agent(q);
+    };
+    const [a, b] = await Promise.all([
+      evaluate({ name: 'A', task: fresh, data: [{ input: 'a' }], scores: [] }),
+      evaluate({ name: 'B', task: fresh, data: [{ input: 'b' }], scores: [] }),
+    ]);
+    expect(stampedIds('detached')).toEqual([undefined, undefined]);
+    // Each case still has the root it started in its own context.
+    const roots = getFinishedSpans().filter(s => s.name === 'invoke_agent travel_agent');
+    expect([a.cases[0].traceId, b.cases[0].traceId].sort()).toEqual(roots.map(r => r.spanContext().traceId).sort());
   });
 });
