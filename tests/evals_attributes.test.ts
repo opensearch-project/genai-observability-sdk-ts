@@ -444,6 +444,31 @@ describe('returned EvalScore fields are validated like defineScorer()', () => {
   }
 });
 
+describe('Benchmark.log() validates scores like evaluate()', () => {
+  for (const [label, options] of [
+    ['log evaluatorType', { evaluatorType: 'llm-judge', scores: [{ name: 'x', value: 1 }] }],
+    ['log evaluator', { evaluator: 5, scores: [{ name: 'x', value: 1 }] }],
+    ['EvalScore judgeModel', { scores: [{ name: 'x', value: 1, judgeModel: 5 }] }],
+    ['EvalScore evaluatorType', { scores: [{ name: 'x', value: 1, evaluatorType: 'llm-judge' }] }],
+    ['EvalScore threshold', { scores: [{ name: 'x', value: 1, threshold: Number.NaN }] }],
+    ['EvalScore value', { scores: [{ name: 'x', value: 'high' }] }],
+  ] as const) {
+    it(`throws a TypeError for an invalid ${label} and emits nothing`, () => {
+      const bm = new Benchmark('suite');
+      expect(() => bm.log(options as never)).toThrow(TypeError);
+      expect(getFinishedLogRecords()).toHaveLength(0);
+    });
+  }
+
+  it('treats null EvalScore fields as unset', () => {
+    const bm = new Benchmark('suite');
+    bm.log({ scores: [JSON.parse('{"name":"rel","value":0.9,"explanation":null,"threshold":null}') as EvalScore] });
+    const [r] = getFinishedLogRecords();
+    expect(r.attributes['gen_ai.evaluation.score.value']).toBe(0.9);
+    expect(bm.close().passCount).toBe(1);
+  });
+});
+
 describe('null optional EvalScore fields are unset', () => {
   it('keeps a JSON judge score whose explanation, label and bounds are null', () => {
     const judge = function rel() {

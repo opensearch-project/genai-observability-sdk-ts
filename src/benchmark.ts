@@ -606,6 +606,8 @@ export interface BenchmarkOptions {
  * Upload results of cases you ran yourself. Each `log()` emits one
  * `gen_ai.evaluation.result` event per score, parented to the evaluated span
  * when `traceId` + `spanId` are given. `close()` returns the local summary.
+ * `log()` checks scores like evaluate() checks a scorer's result and throws a
+ * TypeError, emitting nothing, for an invalid one.
  */
 export class Benchmark {
   private _name: string;
@@ -712,9 +714,7 @@ export class Benchmark {
     if (options.status !== undefined && !CASE_STATUSES.includes(options.status)) {
       throw new Error(`status must be one of ${CASE_STATUSES.join(', ')}; got "${options.status}"`);
     }
-    const evalScores: EvalScore[] = Array.isArray(options.scores)
-      ? options.scores
-      : Object.entries(options.scores ?? {}).map(([name, value]) => ({ name, value }));
+    const evalScores = validLogScores(options);
     const errorType = options.errorType;
     const verdicts = errorType ? {} : verdictsOf(evalScores);
     const failed = hasFailVerdict(verdicts);
@@ -769,6 +769,31 @@ export class Benchmark {
     console.log(formatSummary(summary));
     return summary;
   }
+}
+
+/**
+ * The scores of a `Benchmark.log()` call, checked like the scores a scorer returns in
+ * evaluate() (null fields count as unset). Throws a TypeError, before anything is emitted,
+ * for an invalid score or an invalid `evaluator` / `evaluatorType` default.
+ */
+function validLogScores(options: {
+  scores?: Record<string, number> | EvalScore[];
+  evaluator?: unknown;
+  evaluatorType?: unknown;
+}): EvalScore[] {
+  if (options.evaluator !== undefined && typeof options.evaluator !== 'string') {
+    throw new TypeError(`Benchmark.log(): evaluator must be a string; got ${describeValue(options.evaluator)}`);
+  }
+  const invalidDefault = ruleError({ evaluatorType: options.evaluatorType });
+  if (invalidDefault) throw new TypeError(`Benchmark.log(): ${invalidDefault}`);
+  const items: unknown[] = Array.isArray(options.scores)
+    ? options.scores
+    : Object.entries(options.scores ?? {}).map(([name, value]) => ({ name, value }));
+  for (const item of items) {
+    const reason = invalidEvalScore(item);
+    if (reason) throw new TypeError(`Benchmark.log(): scores has ${reason}`);
+  }
+  return items.map(item => withoutNulls(item as object) as unknown as EvalScore);
 }
 
 // ---------------------------------------------------------------------------
