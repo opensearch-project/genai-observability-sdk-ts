@@ -17,7 +17,7 @@
  * 3. Load `openai`. Here with a dynamic `import()`; a static `import OpenAI
  *    from 'openai'` at the top of this file would run before register(). In a
  *    larger app, put steps 1 and 2 in their own file and start the app with
- *    `node --import ./otel.js app.js` (see the README, "Auto-instrumentation").
+ *    `node --import ./otel.js app.js` (see docs/configuration.md#load-order).
  *
  * Prerequisites:
  * - npm install openai @opentelemetry/instrumentation-openai@~0.21.0 @opentelemetry/instrumentation@~0.223.0
