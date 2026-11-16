@@ -482,6 +482,26 @@ describe('Benchmark.log() validates scores like evaluate()', () => {
     });
   }
 
+  it('with errorType, skips the value checks and logs the error result (a timed-out metric)', () => {
+    const bm = new Benchmark('suite');
+    bm.log({ errorType: 'TimeoutError', scores: { faithfulness: Number.NaN } });
+    bm.log({ errorType: 'TimeoutError', scores: [{ name: 'relevance', value: Number.NaN, label: 5 as never, passed: 'no' as never }] });
+    const records = getFinishedLogRecords();
+    expect(records.map((r) => r.attributes['gen_ai.evaluation.name'])).toEqual(['faithfulness', 'relevance']);
+    for (const r of records) {
+      expect(r.attributes['error.type']).toBe('TimeoutError');
+      expect(r.attributes['gen_ai.evaluation.score.value']).toBeUndefined();
+      expect(r.attributes['gen_ai.evaluation.score.label']).toBeUndefined();
+    }
+    expect(bm.close().errorCount).toBe(2);
+  });
+
+  it('with errorType, still needs a score name', () => {
+    const bm = new Benchmark('suite');
+    expect(() => bm.log({ errorType: 'TimeoutError', scores: [{ value: 1 } as never] })).toThrow(TypeError);
+    expect(getFinishedLogRecords()).toHaveLength(0);
+  });
+
   it('treats null EvalScore fields as unset', () => {
     const bm = new Benchmark('suite');
     bm.log({ scores: [JSON.parse('{"name":"rel","value":0.9,"explanation":null,"threshold":null}') as EvalScore] });

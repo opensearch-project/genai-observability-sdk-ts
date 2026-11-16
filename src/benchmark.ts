@@ -669,7 +669,8 @@ export class Benchmark {
     /**
      * `error.type` for an errored case (exception class name or similar). Every
      * score in `scores` is then emitted as an evaluator error result: `error.type`
-     * set, no score value and no label.
+     * set, no score value and no label. Its `value`, `label` and `passed` are
+     * then not checked (a timed-out metric may report NaN); its name still is.
      */
     errorType?: string;
     /**
@@ -772,24 +773,38 @@ export class Benchmark {
   }
 }
 
+/** The fields an error result does not send (see emitCaseScores): they are not checked either. */
+const ERROR_DROPPED_FIELDS = ['value', 'label', 'passed'] as const;
+
 /**
  * The scores of a `Benchmark.log()` call, checked like the scores a scorer returns in
- * evaluate() (null fields count as unset). Throws a TypeError, before anything is emitted,
- * for an invalid score or an invalid `evaluator` / `evaluatorType` default.
+ * evaluate() (null fields count as unset). With `errorType` the case errored and its values
+ * are not sent, so `value`, `label` and `passed` are dropped unchecked (a timed-out metric
+ * may report NaN). Throws a TypeError, before anything is emitted, for an invalid score or an
+ * invalid `evaluator` / `evaluatorType` default.
  */
 function validLogScores(options: {
   scores?: Record<string, number> | EvalScore[];
   evaluator?: unknown;
   evaluatorType?: unknown;
+  errorType?: string;
 }): EvalScore[] {
   if (options.evaluator !== undefined && typeof options.evaluator !== 'string') {
     throw new TypeError(`Benchmark.log(): evaluator must be a string; got ${describeValue(options.evaluator)}`);
   }
   const invalidDefault = ruleError({ evaluatorType: options.evaluatorType });
   if (invalidDefault) throw new TypeError(`Benchmark.log(): ${invalidDefault}`);
-  const items: unknown[] = Array.isArray(options.scores)
+  let items: unknown[] = Array.isArray(options.scores)
     ? options.scores
     : Object.entries(options.scores ?? {}).map(([name, value]) => ({ name, value }));
+  if (options.errorType !== undefined) {
+    items = items.map(item => {
+      if (typeof item !== 'object' || item === null || Array.isArray(item)) return item;
+      const rest: Record<string, unknown> = { ...item };
+      for (const key of ERROR_DROPPED_FIELDS) delete rest[key];
+      return rest;
+    });
+  }
   for (const item of items) {
     const reason = invalidEvalScore(item);
     if (reason) throw new TypeError(`Benchmark.log(): scores has ${reason}`);
