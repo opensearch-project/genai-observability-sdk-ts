@@ -12,7 +12,7 @@ The walkthrough that goes with it is [docs/getting-started-evaluations.md](../..
 | [`judge.ts`](judge.ts) | The LLM judge (same provider as the agent): one model call, traced as its own `chat` trace |
 | [`test_suite.jsonl`](test_suite.jsonl) | `observability-assistant-core`: 9 questions about the cluster |
 | [`safety_suite.jsonl`](safety_suite.jsonl) | `observability-assistant-safety`: 3 starter safety cases |
-| [`offlineEval.ts`](offlineEval.ts) | Runs both suites with `Benchmark`: one eval run per suite |
+| [`offlineEval.ts`](offlineEval.ts) | Runs both suites with `evaluate()`: one eval run per suite |
 | [`traffic.ts`](traffic.ts) | Runs the agent on a list of questions, to generate online traffic |
 | [`onlineEval.ts`](onlineEval.ts) | Samples recent agent traces, judges them, posts the results back with `score()` |
 
@@ -94,7 +94,7 @@ AGENT_VERSION=1.1.0 PROMPT_VARIANT=terse npx tsx offlineEval.ts \
 
 Each invocation is one eval run of each suite (`--suite core|safety|all`, `--limit N` for the first N cases, `--no-judge` to skip the LLM judge). It prints each case's status and trace id, each suite's summary, and a link to each run.
 
-The agent and the judge are async, and `evaluate()` takes a synchronous task and synchronous scorers, so `offlineEval.ts` runs each case itself and uploads it with `Benchmark.log({ traceId, spanId, scores })`, linked to the agent's root span. It also sets the `test.*` ids on that span, as `evaluate()` does, so the online evaluator can tell offline runs apart.
+Each suite is one `await evaluate({ task, data, scores, runName, runDescription, agentName, agentVersion })`. The agent, the judge and the reference-query scorers are async: `evaluate()` awaits them. It stamps the `test.*` ids on each case's agent root span (so the online evaluator can tell offline runs apart) and links every result to that span. A scorer that throws records an evaluator error result (no value, no label); when the agent throws, every scorer records one.
 
 Scorers:
 
@@ -191,7 +191,7 @@ https://github.com/opensearch-project/genai-observability-sdk-ts).
 
 ```text
 Write an offline evaluation for this TypeScript agent with the OpenSearch GenAI observability
-SDK (Benchmark, EvalScore), modeled on
+SDK (evaluate, defineScorer, EvalScore), modeled on
 examples/end-to-end/strands-observability-agent/offlineEval.ts.
 
 - Create test_suite.jsonl with 8 to 12 realistic cases: {"caseId", "caseName", "input",
@@ -203,14 +203,15 @@ examples/end-to-end/strands-observability-agent/offlineEval.ts.
 - Add right_tool (the expected tool was called) and, if the agent is multi-step,
   trajectory_match against a golden tool path.
 - One LLM-judge scorer (evaluatorType "llm_judge") for answer quality on a 1 to 5 scale with
-  threshold 4, using the agent's model provider. Set evaluatorDescription, judgeModel,
-  judgePromptName and judgePromptVersion on the EvalScore, and put the judge's reason in
-  explanation. Trace the judge call as its own chat span (not invoke_agent, so it is not
+  threshold 4, using the agent's model provider. Declare evaluatorDescription, judgeModel,
+  judgePromptName and judgePromptVersion with defineScorer(), put the judge's reason in
+  explanation and the judge's trace id in judgeTraceId. Trace the judge call as its own chat span (not invoke_agent, so it is not
   listed as an agent) and record its prompt there with enrich({ systemInstructions }).
-- new Benchmark(<suite>, { runName, runDescription, agentName, agentVersion }); for each case
-  await the agent, then bench.log({ caseId, caseName, input, output, expected, traceId,
-  spanId, scores }).
-- Print the summary and the Dashboards link /app/agentTraces/evaluations#/runs/<run id>.
+- await evaluate({ name: <suite>, task: (input) => agent(input), data: [{ input, expected,
+  caseId, caseName }], scores, runName, runDescription, agentName, agentVersion }). The task
+  and the scorers may be async.
+- Print the summary and the Dashboards link /app/agentTraces/evaluations#/runs/<run id>
+  (result.summary.runId).
 ```
 
 **3. Set up online evaluations**

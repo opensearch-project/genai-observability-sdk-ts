@@ -19,18 +19,19 @@
  * agent's model provider and records its model, prompt name / version and (opt-in)
  * system instructions on every result.
  *
- * The agent is async, and `evaluate()` takes a synchronous task, so each case is run
- * here and uploaded with `Benchmark.log()`, linked to the agent's root span.
+ * Each suite is one `evaluate()` run. The agent and some scorers (the LLM judge, the
+ * reference queries) are async: evaluate() awaits them. Each case is its own agent
+ * trace, and every result is linked to the agent's root span.
  */
 
 import { readFileSync } from 'node:fs';
 import { parseArgs } from 'node:util';
 import {
-  Benchmark,
-  score,
+  defineScorer,
+  evaluate,
   type EvalScore,
-  type EvaluatorType,
-  type ScoreDirection,
+  type ScorerResult,
+  type ScorerSpec,
 } from '@opensearch-project/genai-observability-sdk-ts';
 import { askDetailed, telemetry, type AgentAnswer } from './agent.js';
 import { AGENT_NAME, AGENT_VERSION, SERVICE_NAME, judgeModelId } from './config.js';
@@ -96,48 +97,16 @@ async function loadCases(file: string): Promise<Case[]> {
 
 // ------------------------------------------------------------------- scorers
 
-/** What a scorer declares about its results (the `defineScorer()` fields). */
-interface ScorerSpec {
-  name: string;
-  threshold?: number;
-  direction?: ScoreDirection;
-  scoreMin?: number;
-  scoreMax?: number;
-  evaluator?: string;
-  evaluatorType?: EvaluatorType;
-  evaluatorDescription?: string;
-  judgeModel?: string;
-  judgePromptName?: string;
-  judgePromptVersion?: string;
-}
+/** A scorer of this suite: the task's output is an AgentAnswer, `expected` the case's object. */
+type CaseScorerFn = (
+  input: string,
+  output: AgentAnswer,
+  expected: Expected,
+) => ScorerResult | Promise<ScorerResult>;
 
-type ScorerResult = EvalScore | number | boolean;
-
-/**
- * An async scorer: `defineScorer()` for `Benchmark`. `evaluate()` scorers must be
- * synchronous, and an LLM judge is not, so the spec is applied here.
- */
-interface AsyncScorer {
-  spec: ScorerSpec;
-  fn: (input: string, output: AgentAnswer, expected: Expected) => Promise<ScorerResult> | ScorerResult;
-}
-
-function scorer(spec: ScorerSpec, fn: AsyncScorer['fn']): AsyncScorer {
-  return { spec, fn };
-}
-
-/** The scorer's result as an EvalScore, with the declared fields filled in. */
-function withSpec(result: ScorerResult, spec: ScorerSpec): EvalScore {
-  const { name, ...declared } = spec;
-  const s: EvalScore =
-    typeof result === 'boolean'
-      ? { name, value: result ? 1 : 0, passed: result }
-      : typeof result === 'number'
-        ? { name, value: result }
-        : result;
-  const out: Record<string, unknown> = { ...s };
-  for (const [k, v] of Object.entries(declared)) if (out[k] === undefined) out[k] = v;
-  return out as unknown as EvalScore;
+/** `defineScorer()` with this suite's input, output and expected types. */
+function scorer(spec: ScorerSpec, fn: CaseScorerFn) {
+  return defineScorer(spec, (input, output, expected) => fn(String(input), output as AgentAnswer, expected as Expected));
 }
 
 function numbers(text: string): Set<number> {
@@ -333,7 +302,7 @@ const answerQuality = scorer(
   },
 );
 
-const SUITES: Record<string, [string, string, AsyncScorer[]]> = {
+const SUITES: Record<string, [string, string, ReturnType<typeof scorer>[]]> = {
   core: [
     'observability-assistant-core',
     'test_suite.jsonl',
@@ -344,18 +313,22 @@ const SUITES: Record<string, [string, string, AsyncScorer[]]> = {
 
 // ----------------------------------------------------------------------- run
 
-function errorTypeOf(e: unknown): string {
-  return e instanceof Error ? e.constructor.name || e.name : typeof e;
-}
-
-/** Run one suite as one eval run. Returns the run id. */
+/**
+ * Run one suite as one eval run. Returns the run id. evaluate() records an error
+ * result (no value, no label) for a scorer that throws, and for every scorer when
+ * the agent throws.
+ */
 async function runSuite(
   suiteName: string,
   cases: Case[],
-  scorers: AsyncScorer[],
+  scorers: ReturnType<typeof scorer>[],
   run: { runName: string; runDescription: string },
 ): Promise<string> {
-  const bench = new Benchmark(suiteName, {
+  const result = await evaluate({
+    name: suiteName,
+    task: (input) => askDetailed(String(input)),
+    data: cases.map((c) => ({ input: c.input, expected: c.expected, caseId: c.caseId, caseName: c.caseName })),
+    scores: scorers,
     runName: run.runName,
     runDescription: run.runDescription,
     agentName: AGENT_NAME,
@@ -363,75 +336,18 @@ async function runSuite(
     // recordExpected: true is the default: each case's expected value is
     // sent as opensearch.test.case.expected.
   });
-  for (const c of cases) {
-    const ids = {
-      'test.suite.name': suiteName,
-      'test.suite.run.id': bench.runId,
-      'test.case.id': c.caseId,
-      'test.case.name': c.caseName,
-    };
-    let output: AgentAnswer;
-    try {
-      output = await askDetailed(c.input, ids);
-    } catch (e) {
-      // The agent failed: one error result per scorer, no value, no label.
-      bench.log({
-        caseId: c.caseId,
-        caseName: c.caseName,
-        input: c.input,
-        expected: c.expected,
-        error: e instanceof Error ? e.message : String(e),
-        errorType: errorTypeOf(e),
-        scores: scorers.map((s) => withSpec({ name: s.spec.name }, s.spec)),
-      });
-      console.log(`  error  ${c.caseId}: ${errorTypeOf(e)}`);
-      continue;
-    }
-    const scores: EvalScore[] = [];
-    const failedScorers: string[] = [];
-    for (const s of scorers) {
-      try {
-        scores.push(withSpec(await s.fn(c.input, output, c.expected), s.spec));
-      } catch (e) {
-        // The scorer failed: an evaluator error result on the same trace.
-        failedScorers.push(`${s.spec.name}: ${errorTypeOf(e)}`);
-        score({
-          ...s.spec,
-          traceId: output.traceId,
-          spanId: output.spanId,
-          errorType: errorTypeOf(e),
-          agentName: AGENT_NAME,
-          agentVersion: AGENT_VERSION,
-          attributes: {
-            ...ids,
-            'opensearch.test.suite.run.name': run.runName,
-            'opensearch.test.suite.run.description': run.runDescription,
-          },
-        });
-      }
-    }
-    bench.log({
-      caseId: c.caseId,
-      caseName: c.caseName,
-      input: c.input,
-      output: output.answer,
-      expected: c.expected,
-      traceId: output.traceId,
-      spanId: output.spanId,
-      scores,
-      ...(failedScorers.length ? { status: 'error' as const, error: failedScorers.join('; ') } : {}),
-    });
-    const failed = scores.filter((s) => s.passed === false || (s.threshold !== undefined && s.value !== undefined &&
-      (s.direction === 'minimize' ? s.value > s.threshold : s.value < s.threshold)));
-    const status = failedScorers.length ? 'error' : failed.length ? 'fail' : 'pass';
+  for (const c of result.cases) {
+    const failed = Object.entries(c.verdicts ?? {})
+      .filter(([, v]) => v === 'fail')
+      .map(([name]) => name);
     console.log(
-      `  ${status.padEnd(5)}  ${c.caseId}  trace ${output.traceId}` +
-        (failed.length ? `  failed: ${failed.map((s) => s.name).join(', ')}` : '') +
-        (failedScorers.length ? `  errors: ${failedScorers.join(', ')}` : ''),
+      `  ${c.resultStatus.padEnd(5)}  ${c.caseId}  trace ${c.traceId}` +
+        (failed.length ? `  failed: ${failed.join(', ')}` : '') +
+        (c.scorerErrors?.length ? `  errors: ${c.scorerErrors.join('; ')}` : '') +
+        (c.error ? `  agent error: ${c.errorType}` : ''),
     );
   }
-  const summary = bench.close();
-  return summary.runId;
+  return result.summary.runId;
 }
 
 async function main(): Promise<void> {
