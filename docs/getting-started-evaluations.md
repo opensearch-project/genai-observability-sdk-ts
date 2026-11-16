@@ -636,3 +636,6 @@ console.log(`${base}/app/agentTraces/evaluations#/compare/${e(runA)}/${e(runB)}`
 
 - [From day one to healthy production: instrumenting and evaluating AI agents with OpenSearch](https://github.com/anirudha/os-agent-observability-evals/blob/main/blog.md): the same journey end to end, with a sample support agent in several frameworks.
 - [Agent evaluations](agent-evaluations.md): the full attribute reference, ingestion pipelines and index templates.
+- [API reference](api-reference.md): every option of `register()`, `score()`, `evaluate()`, `Benchmark` and `OpenSearchTraceRetriever`.
+- [Configuration](configuration.md): endpoints, environment variables and auto-instrumentation.
+- [Evals runbook](../examples/runbooks/evals.md): the same steps as commands to run against the example agents.

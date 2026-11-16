@@ -122,13 +122,7 @@ const provider = await register({
 await provider.forceFlush();
 ```
 
-Endpoints: each signal (traces, and logs for the evaluation events) is resolved the same way, following the OTel exporter spec. See the [README](../README.md#endpoints-traces-and-evaluation-logs) for details. There are no port options: the port is part of each URL.
-
-- Endpoint (code options always win over env vars): `tracesEndpoint` / `logsEndpoint` (full URL), else `endpoint` (base URL) + `/v1/traces` or `/v1/logs` over HTTP, as-is over gRPC, else `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` / `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` (full URL), else `OTEL_EXPORTER_OTLP_ENDPOINT` (base URL, same rule), else `http://localhost:4318` (`http://localhost:4317` over gRPC). For example `register({ endpoint: "http://collector:4318" })` sends logs to `http://collector:4318/v1/logs` even when `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` is set.
-- `endpoint` is always a base URL: a path ending in `/v1/traces` or `/v1/logs` throws. `tracesEndpoint` and `logsEndpoint` must be passed together (`logExporter` stands in for `logsEndpoint`), else `register()` throws.
-- Protocol: `protocol`, else a `grpc://` / `grpcs://` scheme on a URL passed in code, else `OTEL_EXPORTER_OTLP_<SIGNAL>_PROTOCOL`, else `OTEL_EXPORTER_OTLP_PROTOCOL`, else the URL scheme. Over gRPC, logs go to the same host and port as traces, and `headers` are sent as gRPC metadata with lowercased keys. OTLP/HTTP is always binary protobuf (`application/x-protobuf`): OTLP/JSON hex ids are corrupted by Data Prepper and OSIS, so `protocol: "http/json"` throws. gRPC is for a local OTel Collector (default `localhost:4317`) or a self-hosted Data Prepper, whose OTLP sources accept framed gRPC natively; OSIS does not support it.
-- Compression: `compression: "none" | "gzip"`, else `OTEL_EXPORTER_OTLP_<SIGNAL>_COMPRESSION`, else `OTEL_EXPORTER_OTLP_COMPRESSION`, else none. It must match the pipeline: OSIS accepts only none or gzip and the client must use the pipeline's `compression`.
-- Request size: OSIS `otel_*` sources cap requests at 1 MB to 4 MB (1 MB by default with the persistent buffer). For large GenAI spans, lower `OTEL_BSP_MAX_EXPORT_BATCH_SIZE`.
+Endpoints, protocol, compression, request size and SigV4 are resolved the same way for traces and for the evaluation logs. The rules are in [Endpoints: traces and evaluation logs](configuration.md#endpoints-traces-and-evaluation-logs); this section only shows the three common setups.
 
 Pick the setup that matches your ingestion (see [Ingestion](#ingestion) for the pipelines):
 
@@ -149,7 +143,7 @@ await register({
 });
 ```
 
-(c) Separate `otel_trace_source` and `otel_logs_source` pipelines: pass both full URLs. On Data Prepper the default ports are 21890 (traces) and 21892 (logs); set `path:` on each source and `unframed_requests: true`, and `ssl: false` for `http://` or a CA your process trusts (`NODE_EXTRA_CA_CERTS`) for `https://`. On OSIS, add `sigv4: { service: "osis", region }`.
+(c) Separate `otel_trace_source` and `otel_logs_source` pipelines: pass both full URLs. On OSIS, add `sigv4: { service: "osis", region }`. The Data Prepper source settings (ports, `path:`, `unframed_requests`, TLS) are in [Configuration](configuration.md#three-setups) and [Ingestion pipelines](configuration.md#ingestion-pipelines).
 
 ```typescript
 await register({
@@ -378,12 +372,7 @@ await provider.forceFlush();
 if (result.summary.failCount || result.summary.errorCount) process.exitCode = 1;
 ```
 
-- The task and the scorers may be synchronous or async, mixed. Once a task or scorer call returns a Promise (an async function, an `observe()`-wrapped one, or any function returning a thenable), `evaluate()` awaits it and returns a `Promise<BenchmarkResult>`; when all calls return plain values it returns the result directly. The declared type is `BenchmarkResult` when the task and scorers are typed synchronous, else `BenchmarkResult | Promise<BenchmarkResult>`, so `await evaluate(...)`. Invalid options (an empty `runId`) throw synchronously.
-- A scorer receives `(input, output, expected)` and returns (or resolves to) a finite number, a boolean (a verdict), an `EvalScore` or an `EvalScore[]`. A `null` field of an `EvalScore` (for example `"explanation": null` in parsed judge JSON) counts as unset. The `EvalScore` fields are read by name, so a class instance with getters (a framework's score object) works too. Anything else (`undefined`, `null`, `NaN`, an object without a `name`) logs a warning and emits an error result with `error.type` = `TypeError`. A scorer that throws or rejects (for example a judge call that fails) emits an error result with `error.type` = the exception class name.
-- `defineScorer(spec, fn)` declares the evaluation name, `threshold`, `direction`, `scoreMin`, `scoreMax`, `evaluator` and `evaluatorType`, for the scorer's own results (see [Judge context](#judge-context)). Fields set on a returned `EvalScore` win.
-- `EvalScore.judgeTraceId` sets `opensearch.gen_ai.evaluation.judge.trace_id`, in `evaluate()` and in `Benchmark.log()`.
-- Scorers run in an empty OTel context, outside the agent trace and outside any span that wraps `evaluate()`, so a traced judge gets its own trace.
-- Cases run one at a time, and a case's scorers run in order after its task settles. The running case rides in the task's OTel context, so with a context manager (`register()` installs one on Node) spans the task starts after an `await` are still stamped, and another `evaluate()` running at the same time stays apart. A span started in a fresh context (an HTTP handler under `propagation.extract(ROOT_CONTEXT, headers)`, `context.with(ROOT_CONTEXT, ...)`) is attached to the case only while exactly one case runs and only when it has no local parent; with overlapping runs, start the agent inside the task's context. `evaluate()` installs `AsyncLocalStorageContextManager` on Node when no context manager is set; where none can be installed, every span is parentless and the same rule applies, so run one `evaluate()` at a time there. See [How root spans are found](../README.md#evaluate).
+Async tasks and judges, what a scorer may return, `defineScorer()`, `judgeTraceId` and how the SDK finds each case's root span are in the [`evaluate()` reference](api-reference.md#evaluate). Scorers run in an empty OTel context, outside the agent trace and outside any span that wraps `evaluate()`, so a traced judge gets its own trace.
 
 ### Benchmark
 
