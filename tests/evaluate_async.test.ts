@@ -167,6 +167,28 @@ describe('evaluate() with async scorers', () => {
     expect(record.spanContext?.spanId).toBe(agentSpan.spanContext().spanId);
   });
 
+  it('runs judges as their own trace, also when evaluate() runs inside a span', async () => {
+    const judge = defineScorer({ name: 'q', evaluatorType: 'llm_judge' }, async (): Promise<EvalScore> =>
+      withObserve('judge', { op: Op.CHAT }, async (span) => {
+        await tick();
+        return { name: 'q', value: 1, judgeTraceId: span.spanContext().traceId };
+      }),
+    );
+    const sync = function sync_judge() {
+      return withObserve('sync judge', { op: Op.CHAT }, () => 1);
+    };
+    await withObserve('ci-run', async () =>
+      evaluate({ name: 'nested', task: (q: unknown) => q, data: [{ input: 'q' }], scores: [judge, sync] }),
+    );
+    const spans = getFinishedSpans();
+    const ci = spans.find(s => s.name === 'ci-run')!;
+    for (const name of ['chat judge', 'chat sync judge']) {
+      const judgeSpan = spans.find(s => s.name === name)!;
+      expect(judgeSpan.spanContext().traceId).not.toBe(ci.spanContext().traceId);
+      expect(judgeSpan.parentSpanId).toBeUndefined();
+    }
+  });
+
   it('an async judge that throws becomes an error result', async () => {
     const judge = defineScorer({ name: 'faithfulness', evaluatorType: 'llm_judge' }, async () => {
       await tick();

@@ -982,7 +982,8 @@ export type EvaluateResult<O extends EvaluateOptions = EvaluateOptions> =
  * the task (timers, other requests) are kept apart. Without a context manager
  * a module-level "current case" stands in while one case runs; overlapping
  * runs then stamp nothing (with a warning). Scorers run after the task, outside
- * the case: an LLM judge's spans are its own trace and are not stamped.
+ * the case and in an empty context: an LLM judge's spans are their own trace
+ * (also when evaluate() runs inside a span) and are not stamped.
  *
  * A scorer returns (or resolves to) a finite number, a boolean (a verdict),
  * an `EvalScore` or an `EvalScore[]`; a `null` field of an EvalScore (as in
@@ -1081,7 +1082,8 @@ function* evaluateSteps(options: EvaluateOptions): Generator<PromiseLike<unknown
       };
       let result: unknown;
       try {
-        result = scorer(item.input, output, expected);
+        // Its own trace (ROOT_CONTEXT), not a child of whatever span wraps evaluate().
+        result = otelContext.with(ROOT_CONTEXT, () => scorer(item.input, output, expected));
         if (isThenable(result)) result = yield result;
       } catch (e) {
         scorerError(e instanceof Error ? e.message : String(e), errorTypeOf(e));

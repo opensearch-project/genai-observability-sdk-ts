@@ -382,7 +382,7 @@ if (result.summary.failCount || result.summary.errorCount) process.exitCode = 1;
 - A scorer receives `(input, output, expected)` and returns (or resolves to) a finite number, a boolean (a verdict), an `EvalScore` or an `EvalScore[]`. A `null` field of an `EvalScore` (for example `"explanation": null` in parsed judge JSON) counts as unset. Anything else (`undefined`, `null`, `NaN`, an object without a `name`) logs a warning and emits an error result with `error.type` = `TypeError`. A scorer that throws or rejects (for example a judge call that fails) emits an error result with `error.type` = the exception class name.
 - `defineScorer(spec, fn)` declares the evaluation name, `threshold`, `direction`, `scoreMin`, `scoreMax`, `evaluator` and `evaluatorType`. Fields set on a returned `EvalScore` win.
 - `EvalScore.judgeTraceId` sets `opensearch.gen_ai.evaluation.judge.trace_id`, in `evaluate()` and in `Benchmark.log()`.
-- Scorers run outside the agent trace, so a traced judge gets its own trace.
+- Scorers run in an empty OTel context, outside the agent trace and outside any span that wraps `evaluate()`, so a traced judge gets its own trace.
 - Cases run one at a time, and a case's scorers run in order after its task settles. The running case rides in the task's OTel context, so with a context manager (`register()` installs one on Node) spans the task starts after an `await` are still stamped, and spans started outside the task (timers, other requests, another `evaluate()`) are not. Without one, the SDK falls back to module state held until the task settles, used only while one case runs, so run one `evaluate()` at a time in that setup. See [How root spans are found](../README.md#evaluate).
 
 ### Benchmark
