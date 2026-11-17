@@ -141,7 +141,7 @@ export interface RegisterOptions {
    * They patch the library when it is loaded, so register() must finish
    * before `openai` or the AWS SDK is imported; in an ES module app, call
    * register() in a module loaded with `node --import` after registering the
-   * `@opentelemetry/instrumentation/hook.mjs` loader hook (see docs/configuration.md#load-order).
+   * `@opentelemetry/instrumentation/hook.mjs` loader hook (see https://github.com/opensearch-project/genai-observability-sdk-ts/blob/main/docs/configuration.md#load-order).
    * Turn one off when you register it yourself. A function another
    * instrumentation already patched (your own `OpenAIInstrumentation`
    * enabled before register()) is left to it, with one warning; one you
@@ -571,6 +571,22 @@ function logsResource(attributes: Record<string, string>): LogsResource {
   return resource;
 }
 
+async function newLoggerProvider(
+  options: RegisterOptions,
+  resourceAttrs: Record<string, string>,
+): Promise<LoggerProvider> {
+  const exporter = await createLogExporter(options);
+  const processor =
+    options.batch === false
+      ? new SimpleLogRecordProcessor({ exporter })
+      : new BatchLogRecordProcessor({ exporter });
+  return new LoggerProvider({
+    resource: logsResource(resourceAttrs),
+    // TraceOnlyContextProcessor first: trace-level events carry their trace id.
+    processors: [new TraceOnlyContextProcessor(), processor],
+  });
+}
+
 async function setupLogs(
   options: RegisterOptions,
   resourceAttrs: Record<string, string>,
@@ -578,6 +594,13 @@ async function setupLogs(
 ): Promise<LoggerProvider | null> {
   if (options.logs === false) return null;
   const previous = getSdkLoggerProvider();
+  if (!setGlobal && previous !== undefined) {
+    // A side pipeline next to an existing one leaves the SDK's evaluation-result
+    // LoggerProvider (and the global one) alone: score() and evaluate() keep emitting through
+    // it. Its own logs destination, when given, gets a provider chained to its shutdown.
+    if (!options.logExporter && !hasLogsDestination(options)) return null;
+    return newLoggerProvider(options, resourceAttrs);
+  }
   const globalIsOurs = previous !== undefined && logs.getLoggerProvider() === previous;
   if (setGlobal && hasGlobalLoggerProvider() && !globalIsOurs) {
     // Respect a user-configured global LoggerProvider; score() emits through it.
@@ -596,16 +619,7 @@ async function setupLogs(
     return null;
   }
 
-  const exporter = await createLogExporter(options);
-  const processor =
-    options.batch === false
-      ? new SimpleLogRecordProcessor({ exporter })
-      : new BatchLogRecordProcessor({ exporter });
-  const loggerProvider = new LoggerProvider({
-    resource: logsResource(resourceAttrs),
-    // TraceOnlyContextProcessor first: trace-level events carry their trace id.
-    processors: [new TraceOnlyContextProcessor(), processor],
-  });
+  const loggerProvider = await newLoggerProvider(options, resourceAttrs);
 
   // Replace a provider left over from a previous register() call.
   if (previous instanceof LoggerProvider) {
@@ -776,7 +790,7 @@ async function loadInstrumentation(spec: AutoInstrumentationSpec): Promise<Instr
  * switches it to the new provider. Returns the package names that are on.
  *
  * Patching happens when the instrumented library is loaded, so this must run
- * before the library is imported (see docs/configuration.md#load-order).
+ * before the library is imported (see https://github.com/opensearch-project/genai-observability-sdk-ts/blob/main/docs/configuration.md#load-order).
  */
 export async function autoInstrument(
   provider: TracerProvider,
@@ -877,7 +891,8 @@ export async function register(
 ): Promise<BasicTracerProvider> {
   assertSignalEndpointsPaired(options);
   if (options.endpoint) assertBaseUrl(options.endpoint, "endpoint");
-  setAgentDefaults(options.agentName, options.agentVersion);
+  // Only the global pipeline sets the agent defaults: a setGlobal: false side pipeline keeps them.
+  if (options.setGlobal ?? true) setAgentDefaults(options.agentName, options.agentVersion);
 
   const serviceName =
     options.serviceName ?? options.projectName ?? "unknown_service";
