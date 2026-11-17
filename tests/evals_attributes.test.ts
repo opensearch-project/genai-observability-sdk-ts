@@ -283,13 +283,63 @@ describe('evaluator on EvalScore', () => {
   it('a returned EvalScore evaluator wins over the declaration, without its type', () => {
     const s = defineScorer(
       { name: 'q', evaluator: 'declared', evaluatorType: 'code' },
-      function q() { return { name: 'q', value: 1, evaluator: 'actual' }; },
+      function q() { return { name: 'other', value: 1, evaluator: 'actual' }; },
     );
     evaluate({ name: 'suite', task: tracedTask, data: [{ input: 'a' }], scores: [s] });
     const [r] = getFinishedLogRecords();
     expect(r.attributes['opensearch.gen_ai.evaluation.evaluator.name']).toBe('actual');
     // Another evaluator's result: the declared type describes "declared", not "actual".
     expect(r.attributes['opensearch.gen_ai.evaluation.evaluator.type']).toBeUndefined();
+  });
+
+  it("a score named like the scorer's evaluation is its own, whatever evaluator it names", () => {
+    const s = defineScorer(
+      { name: 'rel', evaluator: 'rel', threshold: 0.7 },
+      function rel() { return { name: 'rel', value: 0.1, evaluator: 'my-judge' }; },
+    );
+    const result = evaluate({ name: 'suite', task: tracedTask, data: [{ input: 'a' }], scores: [s] });
+    const [r] = getFinishedLogRecords();
+    expect(r.attributes['opensearch.gen_ai.evaluation.evaluator.name']).toBe('my-judge');
+    expect(r.attributes['gen_ai.evaluation.score.label']).toBe('fail');
+    expect(result.cases[0].resultStatus).toBe('fail');
+  });
+
+  it("a scorer with no evaluator keeps its rule off other evaluators' scores", () => {
+    const s = defineScorer(
+      { name: 'quality', threshold: 4, scoreMin: 1, scoreMax: 5, evaluatorType: 'llm_judge' },
+      function quality() {
+        return [
+          { name: 'quality', value: 4.5 },
+          { name: 'faith', value: 0.9, evaluator: 'deepeval.faithfulness' },
+        ];
+      },
+    );
+    const result = evaluate({ name: 'suite', task: tracedTask, data: [{ input: 'a' }], scores: [s] });
+    const byName = Object.fromEntries(
+      getFinishedLogRecords().map(r => [r.attributes['gen_ai.evaluation.name'], r.attributes]),
+    );
+    for (const key of ['threshold', 'min', 'max', 'direction']) {
+      expect(byName.faith[`opensearch.gen_ai.evaluation.score.${key}`]).toBeUndefined();
+    }
+    expect(byName.faith['opensearch.gen_ai.evaluation.evaluator.type']).toBeUndefined();
+    expect(byName.quality['gen_ai.evaluation.score.label']).toBe('pass');
+    expect(result.cases[0].resultStatus).toBe('pass');
+  });
+
+  it('another evaluator does not inherit the scorer direction', () => {
+    const s = defineScorer(
+      { name: 'latency', direction: 'minimize', threshold: 12 },
+      function latency() {
+        return [
+          { name: 'latency', value: 3 },
+          { name: 'faith', value: 0.9, threshold: 0.7, evaluator: 'deepeval.faithfulness' },
+        ];
+      },
+    );
+    const result = evaluate({ name: 'suite', task: tracedTask, data: [{ input: 'a' }], scores: [s] });
+    const faith = getFinishedLogRecords().find(r => r.attributes['gen_ai.evaluation.name'] === 'faith')!;
+    expect(faith.attributes['gen_ai.evaluation.score.label']).toBe('pass');
+    expect(result.cases[0].resultStatus).toBe('pass');
   });
 
   it('Benchmark.log() evaluator defaults apply to every score; an EvalScore wins', () => {

@@ -225,15 +225,26 @@ function specOf(fn: ScorerFn): ScorerSpec | undefined {
 }
 
 /**
- * Fill unset fields of a score from its scorer's declaration, unless the score belongs to
- * another evaluator: both the declaration and the score name an evaluator, and they differ.
- * A scorer that declares `evaluator: 'wrapper'` and returns `{ evaluator: 'deepeval.faithfulness' }`
- * does not stamp its evaluator type, rule, bounds, description or judge on it. A scorer that
- * declares no evaluator applies its declaration (for example its threshold) to every score.
+ * Whether a returned score is the scorer's own: its `evaluator` is unset or equals the
+ * evaluator the scorer declares, or its `name` is the scorer's evaluation name. Other
+ * evaluators' results (for example `{ name: 'faith', evaluator: 'deepeval.faithfulness' }`) are
+ * not, whether or not the scorer declares an evaluator.
  */
-function applySpec(s: EvalScore, spec?: ScorerSpec): EvalScore {
+function ownsScore(s: EvalScore, spec: ScorerSpec, evalName: string | undefined): boolean {
+  if (s.evaluator === undefined) return true;
+  if (spec.evaluator && s.evaluator === spec.evaluator) return true;
+  return evalName !== undefined && s.name === evalName;
+}
+
+/**
+ * Fill unset fields of a score from its scorer's declaration, for the scorer's own scores only
+ * (see `ownsScore`). One check decides the evaluator, evaluator type, rule, bounds,
+ * description and judge fields, so they always agree: a scorer that returns DeepEval or RAGAS
+ * scores does not stamp any of them on those.
+ */
+function applySpec(s: EvalScore, spec: ScorerSpec | undefined, evalName?: string): EvalScore {
   if (!spec) return s;
-  if (spec.evaluator !== undefined && s.evaluator !== undefined && s.evaluator !== spec.evaluator) return s;
+  if (!ownsScore(s, spec, evalName)) return s;
   return {
     ...s,
     evaluator: s.evaluator ?? spec.evaluator,
@@ -1166,7 +1177,7 @@ function* evaluateSteps(options: EvaluateOptions): Generator<PromiseLike<unknown
         const evalName = spec?.name || scorer.name || 'score';
         if (error !== undefined) {
           // The task threw: one error result per scorer, without the exception message.
-          scoreGroups.push({ scores: [applySpec({ name: evalName }, spec)], spec, errorType });
+          scoreGroups.push({ scores: [applySpec({ name: evalName }, spec, evalName)], spec, errorType });
           continue;
         }
         // Error result (error.type, no value, no explanation) under the evaluation
@@ -1175,7 +1186,7 @@ function* evaluateSteps(options: EvaluateOptions): Generator<PromiseLike<unknown
         const scorerError = (message: string, type: string) => {
           scorerErrors.push(message);
           errorType ??= type;
-          scoreGroups.push({ scores: [applySpec({ name: evalName }, spec)], spec, errorType: type });
+          scoreGroups.push({ scores: [applySpec({ name: evalName }, spec, evalName)], spec, errorType: type });
         };
         let result: unknown;
         try {
@@ -1196,7 +1207,7 @@ function* evaluateSteps(options: EvaluateOptions): Generator<PromiseLike<unknown
           scorerError(`scorer "${evalName}" ${produced}`, INVALID_SCORER_RESULT);
           continue;
         }
-        const withSpec = produced.map(s => applySpec(s, spec));
+        const withSpec = produced.map(s => applySpec(s, spec, evalName));
         for (const es of withSpec) {
           if (es.value !== undefined) caseScores[es.name] = es.value;
         }
