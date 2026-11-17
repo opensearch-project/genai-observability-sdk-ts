@@ -99,7 +99,7 @@ export interface EvalScore {
   /** Judge / evaluator context; unset fields fall back to the scorer's `defineScorer()` declaration. */
   /**
    * `opensearch.gen_ai.evaluation.evaluator.description`: what the evaluator
-   * checks (its criteria or rubric summary).
+   * checks (its criteria or rubric summary). Truncated to 1024 characters.
    */
   evaluatorDescription?: string;
   /** `gen_ai.request.model`: the model used by the LLM judge. */
@@ -127,7 +127,7 @@ export interface ScorerSpec {
   evaluatorType?: EvaluatorType;
   /**
    * `opensearch.gen_ai.evaluation.evaluator.description`: what the evaluator
-   * checks (its criteria or rubric summary).
+   * checks (its criteria or rubric summary). Truncated to 1024 characters.
    */
   evaluatorDescription?: string;
   /** `gen_ai.request.model`: the model used by the LLM judge. */

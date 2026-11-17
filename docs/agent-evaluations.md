@@ -82,7 +82,7 @@ Attributes (each is set only when it has a value):
 | `opensearch.gen_ai.evaluation.score.threshold` | OpenSearch | all | Pass threshold |
 | `opensearch.gen_ai.evaluation.score.direction` | OpenSearch | all | `maximize` or `minimize` |
 | `opensearch.gen_ai.evaluation.judge.trace_id` | OpenSearch | all | Trace of the judge's own run |
-| `opensearch.gen_ai.evaluation.evaluator.description` | OpenSearch | all | What the evaluator checks (criteria or rubric summary) |
+| `opensearch.gen_ai.evaluation.evaluator.description` | OpenSearch | all | What the evaluator checks (criteria or rubric summary), truncated to 1024 characters (it is repeated on every result) |
 | `gen_ai.request.model` | OTel | all (also settable through metadata) | Model used by the LLM judge |
 | `gen_ai.prompt.name` | OTel | all (also settable through metadata) | Name of the judge prompt template |
 | `gen_ai.prompt.version` | OTel | all (also settable through metadata) | Version of the judge prompt (`name@version` identifies the prompt) |
@@ -229,7 +229,7 @@ Record how an LLM judge graded, so a reader can tell two judge setups apart:
 
 | Option | Attribute |
 |---|---|
-| `evaluatorDescription` | `opensearch.gen_ai.evaluation.evaluator.description`: what the evaluator checks |
+| `evaluatorDescription` | `opensearch.gen_ai.evaluation.evaluator.description`: what the evaluator checks, truncated to 1024 characters |
 | `judgeModel` | `gen_ai.request.model`: the judge model |
 | `judgePromptName` | `gen_ai.prompt.name`: the judge prompt template |
 | `judgePromptVersion` | `gen_ai.prompt.version`: its version |

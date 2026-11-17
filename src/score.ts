@@ -17,6 +17,7 @@ import {
   normalizeSpanId,
   normalizeTraceId,
   resolveAgent,
+  truncateChars,
 } from './internal.js';
 import { getEventLogger, takeTraceOnlyHandled, traceOnlyContext } from './logs.js';
 
@@ -29,8 +30,13 @@ export const EVALUATION_RESULT_EVENT = "gen_ai.evaluation.result";
  */
 export const JUDGE_LABEL_KEY = "opensearch.gen_ai.evaluation.judge_label";
 
-/** What the evaluator checks (its criteria or rubric summary). */
+/** What the evaluator checks (its criteria or rubric summary), truncated to 1024 characters. */
 export const EVALUATOR_DESCRIPTION_KEY = "opensearch.gen_ai.evaluation.evaluator.description";
+/**
+ * Maximum length of `opensearch.gen_ai.evaluation.evaluator.description`, in characters: it is
+ * repeated on every result, so a long rubric is cut like `opensearch.test.suite.run.description`.
+ */
+export const EVALUATOR_DESCRIPTION_LIMIT = 1024;
 /** Model used by the LLM judge (standard GenAI semconv name). */
 export const JUDGE_MODEL_KEY = "gen_ai.request.model";
 /** Name of the judge prompt template (standard GenAI semconv name). */
@@ -113,7 +119,7 @@ export interface ScoreOptions {
   evaluatorType?: EvaluatorType;
   /**
    * `opensearch.gen_ai.evaluation.evaluator.description`: what the evaluator
-   * checks (its criteria or rubric summary).
+   * checks (its criteria or rubric summary). Truncated to 1024 characters.
    */
   evaluatorDescription?: string;
   /** `gen_ai.request.model`: the model used by the LLM judge. */
@@ -326,12 +332,15 @@ export interface JudgeContext {
 }
 
 /**
- * @internal The judge / evaluator context attributes: evaluator description,
- * judge model, prompt name and version. Never the judge's system prompt.
+ * @internal The judge / evaluator context attributes: evaluator description
+ * (truncated to 1024 characters), judge model, prompt name and version. Never
+ * the judge's system prompt.
  */
 export function judgeAttributes(ctx: JudgeContext): Attributes {
   const attrs: Attributes = {};
-  if (ctx.evaluatorDescription) attrs[EVALUATOR_DESCRIPTION_KEY] = ctx.evaluatorDescription;
+  if (ctx.evaluatorDescription) {
+    attrs[EVALUATOR_DESCRIPTION_KEY] = truncateChars(ctx.evaluatorDescription, EVALUATOR_DESCRIPTION_LIMIT).text;
+  }
   if (ctx.judgeModel) attrs[JUDGE_MODEL_KEY] = ctx.judgeModel;
   if (ctx.judgePromptName) attrs[JUDGE_PROMPT_NAME_KEY] = ctx.judgePromptName;
   if (ctx.judgePromptVersion) attrs[JUDGE_PROMPT_VERSION_KEY] = ctx.judgePromptVersion;

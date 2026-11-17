@@ -345,3 +345,20 @@ describe('score attributes', () => {
     expect(warnSpy).toHaveBeenCalledWith(expect.stringMatching(/dropped attributes the SDK sets itself \("gen_ai.evaluation.name"/));
   });
 });
+
+describe('score() evaluatorDescription', () => {
+  it('is capped at 1024 characters (code points), like runDescription', () => {
+    score({ name: 'rubric', value: 1, evaluatorDescription: '😀'.repeat(1500) });
+    const description = onlyRecord().attributes['opensearch.gen_ai.evaluation.evaluator.description'] as string;
+    expect(Array.from(description)).toHaveLength(1024);
+    expect(description).toBe('😀'.repeat(1024));
+    expect(onlyRecord().attributes['opensearch.gen_ai.evaluation.evaluator.description_truncated']).toBeUndefined();
+  });
+
+  it('keeps a description within the cap as is', () => {
+    score({ name: 'rubric', value: 1, evaluatorDescription: 'Checks the answer cites a source.' });
+    expect(onlyRecord().attributes['opensearch.gen_ai.evaluation.evaluator.description']).toBe(
+      'Checks the answer cites a source.',
+    );
+  });
+});

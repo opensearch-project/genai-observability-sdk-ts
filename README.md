@@ -520,7 +520,7 @@ sendScoresAsDouble(exporter); // returns false, and changes nothing, for a JSON 
 | `agentVersion` | `string` | `gen_ai.agent.version` | Its version. Default: the active span's, else `register({ agentVersion })` |
 | `errorType` | `string` | `error.type` | Set when the evaluator failed |
 | `judgeTraceId` | `string` | `opensearch.gen_ai.evaluation.judge.trace_id` | The judge's own trace |
-| `evaluatorDescription` | `string` | `opensearch.gen_ai.evaluation.evaluator.description` | What the evaluator checks (criteria or rubric summary) |
+| `evaluatorDescription` | `string` | `opensearch.gen_ai.evaluation.evaluator.description` | What the evaluator checks (criteria or rubric summary). Truncated to 1024 characters |
 | `judgeModel` | `string` | `gen_ai.request.model` | Model used by the LLM judge |
 | `judgePromptName` | `string` | `gen_ai.prompt.name` | Name of the judge prompt template |
 | `judgePromptVersion` | `string` | `gen_ai.prompt.version` | Version of the judge prompt |
