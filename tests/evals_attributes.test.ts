@@ -511,6 +511,38 @@ describe('Benchmark.log() validates scores like evaluate()', () => {
   });
 });
 
+describe('an EvalScore that is a class instance', () => {
+  /** A judge result whose fields are prototype getters, like a framework's score class. */
+  class JudgeScore {
+    constructor(private readonly raw: { metric: string; score: number; reason: string }) {}
+    get name(): string { return this.raw.metric; }
+    get value(): number { return this.raw.score; }
+    get explanation(): string { return this.raw.reason; }
+    get threshold(): number { return 0.5; }
+  }
+
+  it('is read through its getters in evaluate()', () => {
+    const judge = function rel() { return new JudgeScore({ metric: 'rel', score: 0.9, reason: 'on topic' }) as unknown as EvalScore; };
+    const result = evaluate({ name: 'suite', task: tracedTask, data: [{ input: 'a' }], scores: [judge] });
+    expect(result.cases[0].resultStatus).toBe('pass');
+    expect(result.cases[0].scores).toEqual({ rel: 0.9 });
+    const [r] = getFinishedLogRecords();
+    expect(r.attributes['error.type']).toBeUndefined();
+    expect(r.attributes['gen_ai.evaluation.explanation']).toBe('on topic');
+    expect(r.attributes['gen_ai.evaluation.score.label']).toBe('pass');
+  });
+
+  it('is read through its getters in Benchmark.log()', () => {
+    const bm = new Benchmark('suite');
+    bm.log({ scores: [new JudgeScore({ metric: 'rel', score: 0.2, reason: 'off topic' }) as unknown as EvalScore] });
+    const [r] = getFinishedLogRecords();
+    expect(r.attributes['gen_ai.evaluation.name']).toBe('rel');
+    expect(r.attributes['gen_ai.evaluation.score.value']).toBe(0.2);
+    expect(r.attributes['gen_ai.evaluation.score.label']).toBe('fail');
+    expect(bm.close().failCount).toBe(1);
+  });
+});
+
 describe('null optional EvalScore fields are unset', () => {
   it('keeps a JSON judge score whose explanation, label and bounds are null', () => {
     const judge = function rel() {

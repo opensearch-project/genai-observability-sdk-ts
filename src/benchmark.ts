@@ -794,22 +794,18 @@ function validLogScores(options: {
   }
   const invalidDefault = ruleError({ evaluatorType: options.evaluatorType });
   if (invalidDefault) throw new TypeError(`Benchmark.log(): ${invalidDefault}`);
-  let items: unknown[] = Array.isArray(options.scores)
+  const items: unknown[] = Array.isArray(options.scores)
     ? options.scores
     : Object.entries(options.scores ?? {}).map(([name, value]) => ({ name, value }));
-  if (options.errorType !== undefined) {
-    items = items.map(item => {
-      if (typeof item !== 'object' || item === null || Array.isArray(item)) return item;
-      const rest: Record<string, unknown> = { ...item };
-      for (const key of ERROR_DROPPED_FIELDS) delete rest[key];
-      return rest;
-    });
-  }
-  for (const item of items) {
-    const reason = invalidEvalScore(item);
-    if (reason) throw new TypeError(`Benchmark.log(): scores has ${reason}`);
-  }
-  return items.map(item => withoutNulls(item as object) as unknown as EvalScore);
+  return items.map(item => {
+    const read = readEvalScore(item);
+    if (read && options.errorType !== undefined) {
+      for (const key of ERROR_DROPPED_FIELDS) delete read[key];
+    }
+    const score = read ? checkedEvalScore(read) : describeValue(item);
+    if (typeof score === 'string') throw new TypeError(`Benchmark.log(): scores has ${score}`);
+    return score;
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -865,18 +861,51 @@ function describeValue(value: unknown): string {
   return typeof value === 'object' ? 'an object' : `a ${typeof value}`;
 }
 
+/** Every EvalScore field: the keys read from a returned score (the Record makes the list complete). */
+const EVAL_SCORE_FIELDS: Record<keyof EvalScore, true> = {
+  name: true,
+  value: true,
+  label: true,
+  explanation: true,
+  metadata: true,
+  passed: true,
+  threshold: true,
+  direction: true,
+  scoreMin: true,
+  scoreMax: true,
+  judgeTraceId: true,
+  evaluator: true,
+  evaluatorType: true,
+  evaluatorDescription: true,
+  judgeModel: true,
+  judgePromptName: true,
+  judgePromptVersion: true,
+};
+const EVAL_SCORE_KEYS = Object.keys(EVAL_SCORE_FIELDS) as (keyof EvalScore)[];
+
 /**
- * `value` without its null fields: a JSON judge's `"explanation": null` means
- * "not set", like a missing key, as on main where these were truthiness checks.
+ * The EvalScore fields of `value`, read by name, so a class instance with prototype getters
+ * works; null and undefined fields are left out (a JSON judge's `"explanation": null` means "not
+ * set", like a missing key). Undefined when `value` is not an object.
  */
-function withoutNulls(value: object): Record<string, unknown> {
-  return Object.fromEntries(Object.entries(value).filter(([, v]) => v !== null));
+function readEvalScore(value: unknown): Record<string, unknown> | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
+  const out: Record<string, unknown> = {};
+  for (const key of EVAL_SCORE_KEYS) {
+    const v = (value as Record<string, unknown>)[key];
+    if (v !== null && v !== undefined) out[key] = v;
+  }
+  return out;
 }
 
-/** Why `value` is not a usable EvalScore, or undefined when it is one. Null fields count as unset. */
-function invalidEvalScore(value: unknown): string | undefined {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) return describeValue(value);
-  const s = withoutNulls(value);
+/** The EvalScore read by readEvalScore(), or why it is not a usable one. */
+function checkedEvalScore(s: Record<string, unknown>): EvalScore | string {
+  const reason = invalidReadScore(s);
+  return reason ?? (s as unknown as EvalScore);
+}
+
+/** Why the fields read by readEvalScore() are not a usable EvalScore, or undefined when they are. */
+function invalidReadScore(s: Record<string, unknown>): string | undefined {
   if (typeof s.name !== 'string' || s.name === '') return 'an object without a string name';
   if (s.value !== undefined && (typeof s.value !== 'number' || !Number.isFinite(s.value))) {
     return `an EvalScore "${s.name}" whose value is ${describeValue(s.value)}`;
@@ -918,11 +947,14 @@ function scorerResultScores(result: unknown, evalName: string): EvalScore[] | st
     return Number.isFinite(result) ? [{ name: evalName, value: result }] : `returned ${result}`;
   }
   const items: unknown[] = Array.isArray(result) ? result : [result];
+  const scores: EvalScore[] = [];
   for (const item of items) {
-    const reason = invalidEvalScore(item);
-    if (reason) return `returned ${reason}`;
+    const read = readEvalScore(item);
+    const score = read ? checkedEvalScore(read) : describeValue(item);
+    if (typeof score === 'string') return `returned ${score}`;
+    scores.push(score);
   }
-  return items.map(item => withoutNulls(item as object) as unknown as EvalScore);
+  return scores;
 }
 
 export interface EvaluateOptions {
