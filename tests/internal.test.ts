@@ -2,7 +2,14 @@
 // Copyright OpenSearch Contributors
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { parseHex, validateMetadataKeys, RESERVED_KEYS, expectedAttributes, resetWarnedKeys } from '../src/internal.js';
+import {
+  parseHex,
+  validateMetadataKeys,
+  RESERVED_KEYS,
+  expectedAttributes,
+  resetWarnedKeys,
+  truncateChars,
+} from '../src/internal.js';
 
 describe('RESERVED_KEYS', () => {
   it('contains expected keys', () => {
@@ -126,5 +133,18 @@ describe('expectedAttributes', () => {
   it('is empty for undefined and null', () => {
     expect(expectedAttributes(undefined)).toEqual({});
     expect(expectedAttributes(null)).toEqual({});
+  });
+});
+
+describe('truncateChars', () => {
+  it('keeps text within the limit', () => {
+    expect(truncateChars('abc', 3)).toEqual({ text: 'abc', truncated: false });
+    // 3 code points in 6 UTF-16 units.
+    expect(truncateChars('😀😀😀', 3)).toEqual({ text: '😀😀😀', truncated: false });
+  });
+
+  it('cuts by code points, never splitting a surrogate pair', () => {
+    expect(truncateChars('abcd', 2)).toEqual({ text: 'ab', truncated: true });
+    expect(truncateChars('😀😀😀', 2)).toEqual({ text: '😀😀', truncated: true });
   });
 });

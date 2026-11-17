@@ -47,6 +47,18 @@ export const RESERVED_KEYS: ReadonlySet<string> = new Set([
   "cicd.pipeline.run.url.full",
 ]);
 
+/**
+ * @internal `text` cut to at most `limit` characters, counted as code points (not UTF-16 units,
+ * so a surrogate pair is never split), and whether it was cut.
+ */
+export function truncateChars(text: string, limit: number): { text: string; truncated: boolean } {
+  // Fast path: at most `limit` UTF-16 units is at most `limit` code points.
+  if (text.length <= limit) return { text, truncated: false };
+  const chars = Array.from(text);
+  if (chars.length <= limit) return { text, truncated: false };
+  return { text: chars.slice(0, limit).join(""), truncated: true };
+}
+
 /** Human-readable name of an offline run. */
 export const TEST_SUITE_RUN_NAME_KEY = "opensearch.test.suite.run.name";
 /** Free-text description of an offline run (truncated to 1024 characters). */
@@ -68,7 +80,7 @@ export function runAttributes(runName?: string, runDescription?: string): Record
   }
   if (runName && runName.trim() !== "") out[TEST_SUITE_RUN_NAME_KEY] = runName;
   if (runDescription && runDescription.trim() !== "") {
-    out[TEST_SUITE_RUN_DESCRIPTION_KEY] = Array.from(runDescription).slice(0, RUN_DESCRIPTION_LIMIT).join("");
+    out[TEST_SUITE_RUN_DESCRIPTION_KEY] = truncateChars(runDescription, RUN_DESCRIPTION_LIMIT).text;
   }
   return out;
 }
@@ -97,13 +109,9 @@ export function expectedAttributes(expected: unknown): Record<string, string | b
       text = String(expected);
     }
   }
-  // Count characters (code points), not UTF-16 units.
-  const chars = Array.from(text);
-  if (chars.length <= EXPECTED_LIMIT) return { [TEST_CASE_EXPECTED_KEY]: text };
-  return {
-    [TEST_CASE_EXPECTED_KEY]: chars.slice(0, EXPECTED_LIMIT).join(""),
-    [TEST_CASE_EXPECTED_TRUNCATED_KEY]: true,
-  };
+  const cut = truncateChars(text, EXPECTED_LIMIT);
+  if (!cut.truncated) return { [TEST_CASE_EXPECTED_KEY]: text };
+  return { [TEST_CASE_EXPECTED_KEY]: cut.text, [TEST_CASE_EXPECTED_TRUNCATED_KEY]: true };
 }
 
 export function parseHex(value: string): number | null {
