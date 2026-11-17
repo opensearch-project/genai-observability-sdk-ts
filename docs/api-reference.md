@@ -23,7 +23,7 @@ await register({
   endpoint: "http://my-collector:4318",  // base URL for traces and logs, or use env vars
   serviceName: "my-app",
   batch: true,            // BatchSpanProcessor (true) or Simple (false)
-  autoInstrument: true,   // turn on installed OpenAI / AWS SDK instrumentations
+  autoInstrument: true,   // turn on the installed OpenAI instrumentation ({ awsSdk: true } adds the AWS SDK)
   agentName: "travel_planner", // optional: the agent this process evaluates
   agentVersion: "v3",          // optional: its version
 });
@@ -55,7 +55,7 @@ An unknown agent is left out, never invented. `evaluate()` also stamps the agent
 | `serviceName` | `string` | `"unknown_service"` | `service.name` resource attribute |
 | `serviceVersion` | `string` | none | `service.version` resource attribute |
 | `batch` | `boolean` | `true` | Use BatchSpanProcessor when true |
-| `autoInstrument` | `boolean` | `true` | Turn on the installed instrumentations listed in [Auto-instrumentation](configuration.md#auto-instrumentation), with this provider |
+| `autoInstrument` | `boolean \| { openai?: boolean; awsSdk?: boolean }` | `true` (OpenAI on, AWS SDK off) | Turn on the installed instrumentations listed in [Auto-instrumentation](configuration.md#auto-instrumentation), with this provider. `{ awsSdk: true }` adds the AWS SDK instrumentation; `false` turns on none |
 | `exporter` | `SpanExporter` | none | Custom span exporter, used as given (traces only). Without a logs destination, no logs pipeline is set up (see [Endpoints](configuration.md#endpoints-traces-and-evaluation-logs)) |
 | `headers` | `Record<string, string>` | none | Headers for every export (traces and logs). Over gRPC they are sent as gRPC metadata with lowercased keys (gRPC rejects uppercase keys) |
 | `logs` | `boolean` | `true` | Set up a LoggerProvider for evaluation events |
@@ -94,7 +94,7 @@ const tracedAgent = withTracing(myAgentFunction);
 | `name` | `string` | Function name | Span name |
 | `op` | `string` | none | `gen_ai.operation.name` value. Use `Op` constants or any custom string |
 | `kind` | `SpanKind` | `INTERNAL` | OTel span kind |
-| `nameFrom` | `string` | none | Resolve span name dynamically from a function parameter |
+| `nameFrom` | `string` | none | Resolve span name dynamically from a function parameter, else from that property of an object first argument (own or inherited, such as a class getter; never an `Object.prototype` key) |
 
 **Span naming:** When `op` is a well-known value, the span name is `"{op} {name}"` (e.g. `"invoke_agent planner"`).
 
@@ -275,7 +275,7 @@ sendScoresAsDouble(exporter); // returns false, and changes nothing, for a JSON 
 | `agentVersion` | `string` | `gen_ai.agent.version` | Its version. Default: the active span's, else `register({ agentVersion })` |
 | `errorType` | `string` | `error.type` | Set when the evaluator failed |
 | `judgeTraceId` | `string` | `opensearch.gen_ai.evaluation.judge.trace_id` | The judge's own trace |
-| `evaluatorDescription` | `string` | `opensearch.gen_ai.evaluation.evaluator.description` | What the evaluator checks (criteria or rubric summary) |
+| `evaluatorDescription` | `string` | `opensearch.gen_ai.evaluation.evaluator.description` | What the evaluator checks (criteria or rubric summary). Truncated to 1024 characters |
 | `judgeModel` | `string` | `gen_ai.request.model` | Model used by the LLM judge |
 | `judgePromptName` | `string` | `gen_ai.prompt.name` | Name of the judge prompt template |
 | `judgePromptVersion` | `string` | `gen_ai.prompt.version` | Version of the judge prompt |
@@ -322,7 +322,7 @@ const result = evaluate({
 console.log(result.summary); // { totalCases: 2, passCount: 2, errorCount: 0, scores: { accuracy: { avg: 1.0 } } }
 ```
 
-**Async agents and judges.** `task` and the scorers may be async. When the task or a scorer is an async function or returns a Promise, `evaluate()` awaits it and returns a `Promise<BenchmarkResult>`; when all are synchronous it returns the result directly, as above. `await evaluate(...)` works either way. Cases still run one at a time, and the scorers of a case run in order after its task.
+**Async agents and judges.** `task` and the scorers may be async. Once a task or scorer call returns a Promise (an async function, an `observe()`-wrapped one, or any function returning a thenable), `evaluate()` awaits it and returns a `Promise<BenchmarkResult>`; when all calls return plain values it returns the result directly, as above. `await evaluate(...)` works either way. Cases still run one at a time, and the scorers of a case run in order after its task.
 
 ```typescript
 const judge = defineScorer(
@@ -341,7 +341,7 @@ const result = await evaluate({
 });
 ```
 
-A task or judge that rejects is handled like one that throws (below). The return type follows the types of `task` and `scores`: a task or scorer typed to return `unknown` / `any` (or the `ScorerFn` type, which allows a Promise) gives `BenchmarkResult | Promise<BenchmarkResult>`; `await` it, or type synchronous scorers as `SyncScorerFn`.
+A task or judge that rejects is handled like one that throws (below). The return type follows the types of `task` and `scores`: `BenchmarkResult` when all are typed synchronous, else `BenchmarkResult | Promise<BenchmarkResult>` (also for an async task, since with no data or a task that throws before it awaits there is nothing to await); `await` it, or type synchronous scorers as `SyncScorerFn`. Invalid options (an empty `runId`) throw synchronously.
 
 Produces:
 ```
@@ -360,7 +360,7 @@ Each `gen_ai.evaluation.result` carries `test.suite.name`, `test.suite.run.id`, 
 
 A case whose task throws (or rejects) is not scored: each declared scorer emits one error result instead, named after the scorer (its `defineScorer()` `name`, else the function name), with `error.type` set to the exception class name, no score value and no label (the exception message is not sent). The run continues. When the task creates no span, the results have no trace context. All events go to the OTLP logs endpoint; Data Prepper routes them to `otel-v1-genai-evaluation-*`, distinguished by `eventName`.
 
-**How root spans are found.** `evaluate()` runs each task in an OTel context that carries the current case, so with a context manager (`register()` installs `AsyncLocalStorageContextManager` on Node) the case follows the task across `await`. A context manager may be missing (for example with `setGlobal: false` and your own setup), so the SDK also keeps a module-level "current case" from the task call until its Promise settles; cases run one at a time, so run one `evaluate()` at a time too. `TestCaseSpanProcessor` reads the case in `onStart` (from the span's context, else the module-level one): every span started during the case without a parent from the same case (no parent, or a remote parent) is stamped with the `test.*` ids, and the first one becomes the trace context for that case's events. Spans started by scorers (LLM judges) are outside the case and are not stamped. `register()` adds the processor to its provider, and `evaluate()` adds it to a global OTel JS 1.x `BasicTracerProvider` if missing. With a provider that only takes processors at construction (OTel JS 2.x), add it yourself:
+**How root spans are found.** `evaluate()` runs each task in an OTel context that carries the current case, so with a context manager (`register()` installs `AsyncLocalStorageContextManager` on Node) the case follows the task across `await`, and overlapping `evaluate()` runs stay apart. A span started in a context without a case (an in-process HTTP handler under `propagation.extract(ROOT_CONTEXT, headers)`, `context.with(ROOT_CONTEXT, ...)`, a stream or queue callback bound before the case) is attached to the case only while exactly one case runs and only when it has no local parent (no parent, or a remote one): then it is stamped and can be the case root. With overlapping runs the SDK does not guess, so start the agent inside the task's context. A background span with no parent that starts while a lone case runs (a timer) is stamped too, but a root started in the task's context wins the case trace, and children of a local span (a poller under its own span) are never stamped. When no context manager is set (for example with `setGlobal: false` and your own setup), `evaluate()` installs `AsyncLocalStorageContextManager` on Node; where none can be installed, every span is parentless, so the same rule stamps a lone run and stamps nothing for overlapping runs. `TestCaseSpanProcessor` reads the case in `onStart`: every span of the case without a parent from the same case (no parent, or a remote parent) is stamped with the `test.*` ids, and the first one becomes the trace context for that case's events. Spans started by scorers (LLM judges) are outside the case and are not stamped. `register()` adds the processor to its provider, and `evaluate()` adds it to a global OTel JS 1.x `BasicTracerProvider` if missing. With a provider that only takes processors at construction (OTel JS 2.x), add it yourself:
 
 ```typescript
 import { TestCaseSpanProcessor } from "@opensearch-project/genai-observability-sdk-ts";
@@ -387,7 +387,7 @@ const provider = new BasicTracerProvider({
 
 Each `TestCaseResult` has `status` (`pass`, or `fail` when the case errored or failed a verdict), `resultStatus` (`pass` | `fail` | `error`), `errorType`, `durationMs`, `verdicts` (evaluation name to verdict), and the `traceId` / `spanId` of the agent root span when the task created one.
 
-**Declaring rules.** Wrap a scorer with `defineScorer(spec, fn)` to declare its evaluation name and pass rule up front. A scorer may also return a `boolean` (a verdict) or an `EvalScore` with `label` (`"pass"` / `"fail"`), `passed`, `threshold`, `direction`, `scoreMin`, `scoreMax`, `judgeTraceId` (the LLM judge's own trace, sent as `opensearch.gen_ai.evaluation.judge.trace_id`); fields set on the `EvalScore` win over the declaration. `defineScorer()` and `EvalScore` also take the judge context of `score()`: `evaluatorDescription`, `judgeModel`, `judgePromptName` and `judgePromptVersion`.
+**Declaring rules.** Wrap a scorer with `defineScorer(spec, fn)` to declare its evaluation name and pass rule up front. A scorer may also return a `boolean` (a verdict) or an `EvalScore` with `label` (`"pass"` / `"fail"`), `passed`, `threshold`, `direction`, `scoreMin`, `scoreMax`, `judgeTraceId` (the LLM judge's own trace, sent as `opensearch.gen_ai.evaluation.judge.trace_id`); fields set on the `EvalScore` win over the declaration, and the declaration is not applied to another evaluator's results (an `EvalScore` whose `evaluator` differs from a declared `evaluator`); a scorer that declares no `evaluator` applies it to every result. `defineScorer()` and `EvalScore` also take the judge context of `score()`: `evaluatorDescription`, `judgeModel`, `judgePromptName` and `judgePromptVersion`.
 
 **Judge prompt.** Results identify the judge prompt by `gen_ai.prompt.name` + `gen_ai.prompt.version` (`name@version`) and link the judge's run by `judgeTraceId`. The full prompt text is never put on a result event: it belongs on the judge's own LLM span as `gen_ai.system_instructions`, recorded by the judge's instrumentation or by `enrich({ systemInstructions })` inside a `withObserve()` / `observe()` judge call. See [Judge prompt](agent-evaluations.md#judge-prompt).
 
@@ -415,7 +415,7 @@ const tools = defineScorer({ name: "tool_selection" }, () => ({
 
 ## `Benchmark`
 
-Upload pre-computed evaluation results from any framework. Each `log()` emits one `gen_ai.evaluation.result` event per score, parented to the evaluated agent span when `traceId` and `spanId` are given. With only `traceId`, scores are trace-level; with neither, the events have no trace context. Each result carries the `test.*` ids, the agent, `cicd.pipeline.*` in CI, and the run `metadata` plus the case `metadata` passed to `log()` (reserved keys are dropped; the score's own `metadata` and the SDK attributes win). `scores` is `{ name: value }` or an `EvalScore[]` (to declare `label` / `threshold` / bounds / `judgeTraceId`, the `evaluator` / `evaluatorType`, and the judge context: `evaluatorDescription`, `judgeModel`, `judgePromptName`, `judgePromptVersion`). `log({ evaluator, evaluatorType })` sets the default evaluator (`opensearch.gen_ai.evaluation.evaluator.name` / `.type`) for every score of the call; an `EvalScore` that sets its own wins. `Benchmark` stamps `test.*` and `cicd.pipeline.*` on the results only, not on agent spans. `expected` is sent on every result of the case as `opensearch.test.case.expected` (see [Expected output](agent-evaluations.md#expected-output)).
+Upload pre-computed evaluation results from any framework. Each `log()` emits one `gen_ai.evaluation.result` event per score, parented to the evaluated agent span when `traceId` and `spanId` are given. With only `traceId`, scores are trace-level; with neither, the events have no trace context. Each result carries the `test.*` ids, the agent, `cicd.pipeline.*` in CI, and the run `metadata` plus the case `metadata` passed to `log()` (reserved keys are dropped; the score's own `metadata` and the SDK attributes win). `scores` is `{ name: value }` or an `EvalScore[]` (to declare `label` / `threshold` / bounds / `judgeTraceId`, the `evaluator` / `evaluatorType`, and the judge context: `evaluatorDescription`, `judgeModel`, `judgePromptName`, `judgePromptVersion`). `log({ evaluator, evaluatorType })` sets the default evaluator (`opensearch.gen_ai.evaluation.evaluator.name` / `.type`) for every score of the call; an `EvalScore` that sets its own wins. Scores are checked like the scores a scorer returns in `evaluate()` (`null` fields count as unset): an invalid score, `evaluator` or `evaluatorType` throws a `TypeError` and nothing of the call is emitted. With `errorType` (an errored case, for example a metric that timed out) the values are not sent, so `value`, `label` and `passed` are not checked: `log({ errorType: "TimeoutError", scores: { faithfulness: NaN } })` logs the error result. `Benchmark` stamps `test.*` and `cicd.pipeline.*` on the results only, not on agent spans. `expected` is sent on every result of the case as `opensearch.test.case.expected` (see [Expected output](agent-evaluations.md#expected-output)).
 
 `error`, `errorType` and `status` set the local result: `error` or `errorType` marks the case `error`; otherwise a `fail` verdict marks it `fail`; `status` sets `pass`, `fail` or `error` explicitly. With `errorType`, every score in `scores` is emitted as an evaluator error result: `error.type` = `errorType`, no score value and no label. `close()` returns the local summary and sends nothing. No spans are created.
 
