@@ -30,6 +30,7 @@ import {
   AGENT_VERSION_KEY,
   RESERVED_KEYS,
   expectedAttributes,
+  firstWarnings,
   normalizeSpanId,
   normalizeTraceId,
   resolveAgent,
@@ -62,10 +63,10 @@ import {
 /**
  * One score from a scorer (or passed to `Benchmark.log({ scores: [...] })`).
  *
- * Verdict fields are optional; unset ones fall back to the scorer's
- * `defineScorer()` declaration. A `"pass"` / `"fail"` `label` (or `passed`) is
- * an explicit verdict and wins; otherwise `threshold` + `direction` is applied
- * to `value`.
+ * Verdict fields are optional; on the scorer's own results (see `defineScorer`)
+ * unset ones fall back to its declaration. A `"pass"` / `"fail"` `label` (or
+ * `passed`) is an explicit verdict and wins; otherwise `threshold` +
+ * `direction` is applied to `value`.
  */
 export interface EvalScore {
   name: string;
@@ -92,12 +93,21 @@ export interface EvalScore {
   judgeTraceId?: string;
   /**
    * `opensearch.gen_ai.evaluation.evaluator.name` of this score (for example
-   * in `Benchmark.log()`). Default: the scorer's `defineScorer()` declaration.
+   * in `Benchmark.log()`). Unset (or `""`): the score is the scorer's own and
+   * gets the declared `evaluator`, if any. A different evaluator marks another
+   * evaluator's result, which gets nothing from the declaration.
    */
   evaluator?: string;
-  /** `opensearch.gen_ai.evaluation.evaluator.type` of this score. Default: the scorer's declaration. */
+  /**
+   * `opensearch.gen_ai.evaluation.evaluator.type` of this score. Default, on
+   * the scorer's own results only: the declared `evaluatorType`.
+   */
   evaluatorType?: EvaluatorType;
-  /** Judge / evaluator context; unset fields fall back to the scorer's `defineScorer()` declaration. */
+  /**
+   * Judge / evaluator context (`evaluatorDescription`, `judgeModel`,
+   * `judgePromptName`, `judgePromptVersion`): on the scorer's own results,
+   * unset fields fall back to its `defineScorer()` declaration.
+   */
   /**
    * `opensearch.gen_ai.evaluation.evaluator.description`: what the evaluator
    * checks (its criteria or rubric summary). Truncated to 1024 characters.
@@ -123,7 +133,12 @@ export interface ScorerSpec {
   threshold?: number;
   scoreMin?: number;
   scoreMax?: number;
-  /** `opensearch.gen_ai.evaluation.evaluator.name` of every result the scorer produces. */
+  /**
+   * `opensearch.gen_ai.evaluation.evaluator.name` of the scorer's own results,
+   * and what makes a result its own: a returned `EvalScore` whose `evaluator`
+   * is unset (or `""`) or equals this. Default for ownership only: the
+   * function name (no evaluator name is sent unless declared).
+   */
   evaluator?: string;
   evaluatorType?: EvaluatorType;
   /**
@@ -175,9 +190,15 @@ const EVALUATOR_TYPES: readonly EvaluatorType[] = ['llm_judge', 'code', 'human',
  * scorer has the same signature as `fn`, so `evaluate()`'s result type
  * follows it (see `EvaluateResult`).
  *
- * Rule fields are defaults for every score the scorer returns; fields set on a
- * returned `EvalScore` win. Throws on an unknown `direction` / `evaluatorType`
- * or a non-finite `threshold` / `scoreMin` / `scoreMax`.
+ * The declaration (rule fields, `evaluatorType`, description and judge
+ * fields) fills unset fields of the scorer's own results only: a returned
+ * `EvalScore` whose `evaluator` is unset (or `""`) or equals the scorer's
+ * evaluator (the declared `evaluator`, else the function name). A result
+ * naming another evaluator (for example `deepeval.faithfulness`) gets none of
+ * it. Fields set on a returned `EvalScore` win. When the scorer declares a
+ * rule and none of a case's results are its own, `evaluate()` warns once.
+ * Throws on an unknown `direction` / `evaluatorType` or a non-finite
+ * `threshold` / `scoreMin` / `scoreMax`.
  */
 /**
  * What is wrong with the rule fields of a `defineScorer()` spec or a returned
@@ -217,6 +238,7 @@ export function defineScorer<F extends ScorerFn>(spec: ScorerSpec, fn: F): Score
     fn(input, output, expected)) as unknown as Scorer<F>;
   Object.defineProperty(scorer, 'name', { value: fn.name || spec.name || 'score' });
   Object.defineProperty(scorer, 'scorerSpec', { value: Object.freeze(resolved), enumerable: true });
+  ownEvaluators.set(scorer, isUnsetEvaluator(spec.evaluator) ? fnEvaluator(fn) : spec.evaluator);
   return scorer;
 }
 
@@ -225,18 +247,47 @@ function specOf(fn: ScorerFn): ScorerSpec | undefined {
 }
 
 /**
- * Fill unset fields of a score from its scorer's declaration, unless the score belongs to
- * another evaluator: both the declaration and the score name an evaluator, and they differ.
- * A scorer that declares `evaluator: 'wrapper'` and returns `{ evaluator: 'deepeval.faithfulness' }`
- * does not stamp its evaluator type, rule, bounds, description or judge on it. A scorer that
- * declares no evaluator applies its declaration (for example its threshold) to every score.
+ * The evaluator that owns a `defineScorer()` scorer's results: the declared `evaluator`, else
+ * the wrapped function's own name (not the wrapper's `name`, which falls back to the spec name
+ * or `"score"`). Used for ownership only; nothing is sent from it.
  */
-function applySpec(s: EvalScore, spec?: ScorerSpec): EvalScore {
+const ownEvaluators = new WeakMap<ScorerFn, string | undefined>();
+
+/** An evaluator that names no evaluator: unset, `""` or whitespace only. */
+function isUnsetEvaluator(evaluator: string | undefined): boolean {
+  return evaluator === undefined || evaluator.trim() === '';
+}
+
+/** A function's own name as an evaluator, when it has a usable one. */
+function fnEvaluator(fn: ScorerFn): string | undefined {
+  return isUnsetEvaluator(fn.name) ? undefined : fn.name;
+}
+
+function ownEvaluatorOf(fn: ScorerFn): string | undefined {
+  return ownEvaluators.get(fn);
+}
+
+/**
+ * Whether a score belongs to `owner` (a scorer's evaluator, or a `Benchmark.log()` default):
+ * its `evaluator` is unset (or `""`) or equals `owner`. A score that names a different
+ * evaluator is another evaluator's result, whatever its `name`.
+ */
+function ownsScore(s: EvalScore, owner: string | undefined): boolean {
+  return isUnsetEvaluator(s.evaluator) || s.evaluator === owner;
+}
+
+/**
+ * Fill unset fields of a score from its scorer's declaration, for the scorer's own scores only
+ * (see `ownsScore`; `owner` is the scorer's evaluator). One check decides the evaluator,
+ * evaluator type, rule, bounds, description and judge fields, so they always describe the
+ * same evaluator: a scorer that returns DeepEval or RAGAS scores stamps none of them on those.
+ */
+function applySpec(s: EvalScore, spec: ScorerSpec | undefined, owner: string | undefined): EvalScore {
   if (!spec) return s;
-  if (spec.evaluator !== undefined && s.evaluator !== undefined && s.evaluator !== spec.evaluator) return s;
+  if (!ownsScore(s, owner)) return s;
   return {
     ...s,
-    evaluator: s.evaluator ?? spec.evaluator,
+    evaluator: isUnsetEvaluator(s.evaluator) ? spec.evaluator : s.evaluator,
     evaluatorType: s.evaluatorType ?? spec.evaluatorType,
     threshold: s.threshold ?? spec.threshold,
     direction: s.direction ?? spec.direction,
@@ -247,6 +298,30 @@ function applySpec(s: EvalScore, spec?: ScorerSpec): EvalScore {
     judgePromptName: s.judgePromptName ?? spec.judgePromptName,
     judgePromptVersion: s.judgePromptVersion ?? spec.judgePromptVersion,
   };
+}
+
+/** Whether a declaration sets a pass rule: `threshold`, `direction` or bounds. */
+function declaresRule(spec: ScorerSpec): boolean {
+  return (
+    spec.threshold !== undefined ||
+    spec.direction !== undefined ||
+    spec.scoreMin !== undefined ||
+    spec.scoreMax !== undefined
+  );
+}
+
+/**
+ * Warn, once per scorer per process, that a scorer's declared rule applies to no result: every
+ * result it returned names another evaluator, so none is its own (see `ownsScore`).
+ */
+function warnRuleAppliesToNoResult(evalName: string): void {
+  if (firstWarnings('scorer-rule-unused', [evalName]).length === 0) return;
+  console.warn(
+    `[opensearch-genai-observability-sdk-ts] evaluate(): scorer "${evalName}" declares a rule ` +
+      `(threshold, direction or bounds), but its declared rule applies to no result, because every ` +
+      `result names another evaluator. Declare the scorer's evaluator to match its results, or set ` +
+      `the rule on the returned EvalScore.`,
+  );
 }
 
 function judgeContextOf(s: EvalScore): JudgeContext {
@@ -457,6 +532,8 @@ function emitCaseScores(
   const testAttrs = { ...identityAttrs, ...(identity.run ?? {}), ...(identity.expected ?? {}) };
   const errored = extra.errorType !== undefined;
   for (const s of scores) {
+    // The log-level evaluator defaults go only on scores of that evaluator (see ownsScore).
+    const own = ownsScore(s, extra.evaluator);
     const scoreMeta = s.metadata ? toAttributes(safeMetadata(s.metadata, `score:${s.name}`)) : {};
     const options = {
       name: s.name,
@@ -467,8 +544,8 @@ function emitCaseScores(
       scoreMin: s.scoreMin,
       scoreMax: s.scoreMax,
       threshold: s.threshold,
-      evaluator: s.evaluator ?? extra.evaluator,
-      evaluatorType: s.evaluatorType ?? extra.evaluatorType,
+      evaluator: own && isUnsetEvaluator(s.evaluator) ? extra.evaluator : s.evaluator,
+      evaluatorType: own ? s.evaluatorType ?? extra.evaluatorType : s.evaluatorType,
       errorType: extra.errorType,
       judgeTraceId: s.judgeTraceId,
       ...judgeContextOf(s),
@@ -684,14 +761,16 @@ export class Benchmark {
     traceId?: string;
     spanId?: string;
     /**
-     * Default `opensearch.gen_ai.evaluation.evaluator.name` for every score of
-     * this call, for example `"deepeval"`. An `EvalScore` that sets its own
-     * `evaluator` wins.
+     * Default `opensearch.gen_ai.evaluation.evaluator.name` for the scores of
+     * this call whose `evaluator` is unset (or `""`), for example `"deepeval"`.
+     * An `EvalScore` that names a different evaluator keeps it and gets no
+     * default `evaluatorType`.
      */
     evaluator?: string;
     /**
-     * Default `opensearch.gen_ai.evaluation.evaluator.type` for every score of
-     * this call. An `EvalScore` that sets its own `evaluatorType` wins.
+     * Default `opensearch.gen_ai.evaluation.evaluator.type` for the scores of
+     * this call whose `evaluator` is unset or equals `evaluator`. An
+     * `EvalScore` that sets its own `evaluatorType` wins.
      */
     evaluatorType?: EvaluatorType;
   }): void {
@@ -1162,11 +1241,12 @@ function* evaluateSteps(options: EvaluateOptions): Generator<PromiseLike<unknown
       // Run scorers (outside the case: judge spans are not the agent run)
       for (const scorer of options.scores) {
         const spec = specOf(scorer);
+        const owner = ownEvaluatorOf(scorer);
         // Evaluation name of number/boolean results and of the error result.
         const evalName = spec?.name || scorer.name || 'score';
         if (error !== undefined) {
           // The task threw: one error result per scorer, without the exception message.
-          scoreGroups.push({ scores: [applySpec({ name: evalName }, spec)], spec, errorType });
+          scoreGroups.push({ scores: [applySpec({ name: evalName }, spec, owner)], spec, errorType });
           continue;
         }
         // Error result (error.type, no value, no explanation) under the evaluation
@@ -1175,7 +1255,7 @@ function* evaluateSteps(options: EvaluateOptions): Generator<PromiseLike<unknown
         const scorerError = (message: string, type: string) => {
           scorerErrors.push(message);
           errorType ??= type;
-          scoreGroups.push({ scores: [applySpec({ name: evalName }, spec)], spec, errorType: type });
+          scoreGroups.push({ scores: [applySpec({ name: evalName }, spec, owner)], spec, errorType: type });
         };
         let result: unknown;
         try {
@@ -1196,7 +1276,10 @@ function* evaluateSteps(options: EvaluateOptions): Generator<PromiseLike<unknown
           scorerError(`scorer "${evalName}" ${produced}`, INVALID_SCORER_RESULT);
           continue;
         }
-        const withSpec = produced.map(s => applySpec(s, spec));
+        if (spec && declaresRule(spec) && produced.length > 0 && !produced.some(s => ownsScore(s, owner))) {
+          warnRuleAppliesToNoResult(evalName);
+        }
+        const withSpec = produced.map(s => applySpec(s, spec, owner));
         for (const es of withSpec) {
           if (es.value !== undefined) caseScores[es.name] = es.value;
         }
