@@ -2,7 +2,7 @@
 
 This guide takes a TypeScript agent from its first instrumented trace to evaluation results in OpenSearch Dashboards, offline and online. It is the short path; [agent-evaluations.md](agent-evaluations.md) is the full reference (every attribute, ingestion pipelines, index templates).
 
-A complete, runnable version of everything below (a Strands agent with real OpenSearch tools, an offline test suite, an online evaluator and a traffic generator) is in the Strands observability example ([#101](https://github.com/opensearch-project/genai-observability-sdk-ts/pull/101)).
+A complete, runnable version of everything below (a Strands agent with real OpenSearch tools, an offline test suite, an online evaluator and a traffic generator) is in [examples/end-to-end/strands-observability-agent](../examples/end-to-end/strands-observability-agent/). For short, step-by-step checks against the travel assistant examples, see the [evals runbook](../examples/runbooks/evals.md).
 
 - [0. Where to start](#0-where-to-start)
 - [1. Define goals](#1-define-goals)
@@ -316,7 +316,7 @@ Offline evals catch regressions before a release; online evals catch what the su
 
 ## Eval cookbook
 
-Copy and adapt. Each scorer returns an `EvalScore` and works with `Benchmark.log({ scores })`. Wrapped with `defineScorer()` (sync or async), it works as an `evaluate()` scorer, where a scorer may also return a number or a boolean. Runnable versions are in the Strands observability example ([#101](https://github.com/opensearch-project/genai-observability-sdk-ts/pull/101)). `AgentRun` is whatever your `ask()` returns, plus the spans of its trace. Build it once per case with `agentRun()` and pass the same object to every scorer: the spans are fetched from OpenSearch once per trace id (cached), not once per scorer.
+Copy and adapt. Each scorer returns an `EvalScore` and works with `Benchmark.log({ scores })`. Wrapped with `defineScorer()` (sync or async), it works as an `evaluate()` scorer, where a scorer may also return a number or a boolean. Runnable versions are in the [end-to-end example's `offlineEval.ts`](../examples/end-to-end/strands-observability-agent/offlineEval.ts). `AgentRun` is whatever your `ask()` returns, plus the spans of its trace. Build it once per case with `agentRun()` and pass the same object to every scorer: the spans are fetched from OpenSearch once per trace id (cached), not once per scorer.
 
 ```typescript
 import {
@@ -637,6 +637,7 @@ console.log(`${base}/app/agentTraces/evaluations#/compare/${e(runA)}/${e(runB)}`
 ## Further reading
 
 - [From day one to healthy production: instrumenting and evaluating AI agents with OpenSearch](https://github.com/anirudha/os-agent-observability-evals/blob/main/blog.md): the same journey end to end, with a sample support agent in several frameworks.
+- [Evals runbook](../examples/runbooks/evals.md) and [tracing runbook](../examples/runbooks/tracing.md): step by step against the example agents, with the checks to run.
 - [Agent evaluations](agent-evaluations.md): the full attribute reference, ingestion pipelines and index templates.
 - [API reference](api-reference.md): every option of `register()`, `score()`, `evaluate()`, `Benchmark` and `OpenSearchTraceRetriever`.
 - [Configuration](configuration.md): endpoints, environment variables and auto-instrumentation.
