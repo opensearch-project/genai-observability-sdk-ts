@@ -640,4 +640,3 @@ console.log(`${base}/app/agentTraces/evaluations#/compare/${e(runA)}/${e(runB)}`
 - [Agent evaluations](agent-evaluations.md): the full attribute reference, ingestion pipelines and index templates.
 - [API reference](api-reference.md): every option of `register()`, `score()`, `evaluate()`, `Benchmark` and `OpenSearchTraceRetriever`.
 - [Configuration](configuration.md): endpoints, environment variables and auto-instrumentation.
-- [Evals runbook](../examples/runbooks/evals.md): the same steps as commands to run against the example agents.
