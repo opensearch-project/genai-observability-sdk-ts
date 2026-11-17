@@ -156,14 +156,18 @@ The auto-instrumentation packages are optional peer dependencies: install the on
 
 ## Auto-instrumentation
 
-With `autoInstrument` (the default), `register()` turns on each of these packages that is installed, with its own provider (also with `setGlobal: false`). It needs nothing else from you: no `registerInstrumentations()` call.
+`register()` turns on each of these packages that is installed and selected, with its own provider (also with `setGlobal: false`). It needs nothing else from you: no `registerInstrumentations()` call. The instrumentations are process-wide, so they send to one provider: the newest `register()` with `setGlobal` (the default). A `setGlobal: false` `register()` (for example a side pipeline with a debug exporter) takes them only when no other live `register()` provider has them, so it does not take the model spans from your main pipeline.
 
 ### Supported libraries
 
-| Package | Instruments | Supported versions (tested) |
-|---|---|---|
-| `@opentelemetry/instrumentation-openai` | `openai` >= 4.19 < 7: Chat Completions, Responses, Embeddings become `chat <model>` / `embeddings <model>` spans | >= 0.14 < 0.22 (0.21) |
-| `@opentelemetry/instrumentation-aws-sdk` | AWS SDK for JavaScript v3; Bedrock Runtime `Converse` / `InvokeModel` become `chat <model>` spans | >= 0.50 < 0.79 (0.78) |
+| Package | Instruments | Turned on | Supported versions (tested) |
+|---|---|---|---|
+| `@opentelemetry/instrumentation-openai` | `openai` >= 4.19 < 7: Chat Completions, Responses, Embeddings become `chat <model>` / `embeddings <model>` spans | by default (`autoInstrument: true`); off with `{ openai: false }` | >= 0.14 < 0.22 (0.21) |
+| `@opentelemetry/instrumentation-aws-sdk` | AWS SDK for JavaScript v3; Bedrock Runtime `Converse` / `InvokeModel` become `chat <model>` spans | only with `autoInstrument: { awsSdk: true }` | >= 0.50 < 0.79 (0.78) |
+
+**The AWS SDK instrumentation is opt-in.** It traces every AWS SDK v3 client call in the process (S3, DynamoDB, SQS, STS, ...), not only Bedrock, so `register()` turns it on only when you ask: `await register({ autoInstrument: { awsSdk: true } })`. To trace only some clients, or to set `preRequestHook` / `responseHook`, register `AwsInstrumentation` yourself (see [Your own setup](#your-own-setup)).
+
+**Failures.** An installed package that fails to load or to enable (for example a patch error on an incompatible library that is already loaded) logs one warning naming the package and is skipped; `register()` still resolves.
 
 ### Versions
 
@@ -188,7 +192,7 @@ export const provider = await register({ serviceName: "my-agent" });
 
 ### Your own setup
 
-To configure an instrumentation (for example `captureMessageContent`, or `preRequestHook` / `responseHook` on `AwsInstrumentation`), pass `autoInstrument: false` and register it yourself, else every call is traced twice:
+To configure an instrumentation (for example `captureMessageContent`, or `preRequestHook` / `responseHook` on `AwsInstrumentation`), turn it off in `autoInstrument` (`false`, or `{ openai: false }`) and register it yourself. If you leave it on, a call is still traced once, not twice: when your instrumentation is enabled before `register()`, `register()` leaves the functions it patched to it (your provider and config) and logs one warning; when it is enabled after, it takes the patch over from the SDK's (OpenTelemetry JS instrumentations unwrap a patched function before patching it):
 
 ```typescript
 import { registerInstrumentations } from "@opentelemetry/instrumentation";
