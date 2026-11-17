@@ -8,6 +8,7 @@ import {
   type Span,
   type Tracer,
 } from "@opentelemetry/api";
+import { spanAttributes } from "./internal.js";
 
 const TRACER_NAME = "opensearch-genai-observability-sdk-ts";
 const MAX_ATTR_LENGTH = 10_000;
@@ -35,10 +36,15 @@ const PREFIXED_OPS = new Set([
   Op.TEXT_COMPLETION,
 ]);
 
+// Name attribute per op. Only agent operations name an agent: a chat, retrieval or embeddings
+// span (for example a traced LLM judge call) must not carry gen_ai.agent.name, or Agent Traces
+// would list it as an agent. Set it explicitly (span.setAttribute("gen_ai.agent.name", ...)) if
+// a span needs it.
 const NAME_ATTR: Record<string, string> = {
+  [Op.INVOKE_AGENT]: "gen_ai.agent.name",
+  [Op.CREATE_AGENT]: "gen_ai.agent.name",
   [Op.EXECUTE_TOOL]: "gen_ai.tool.name",
 };
-const DEFAULT_NAME_ATTR = "gen_ai.agent.name";
 
 export interface ObserveOptions {
   name?: string;
@@ -77,20 +83,162 @@ function resolveSpanName(
   return baseName;
 }
 
-function getArgNames(fn: AnyFunction): string[] {
-  const source = fn.toString();
-  const match = source.match(/\(([^)]*)\)/);
-  if (!match) return [];
-  return match[1]
-    .split(",")
-    .map((p) =>
-      p
-        .trim()
-        .replace(/\s*=.*$/, "")    // default values
-        .replace(/\.{3}/, "")      // rest params
-        .replace(/:\s*.*$/, "")    // TS type annotations
-    )
-    .filter(Boolean);
+// A JavaScript identifier, Unicode letters included (`café`, `ünits`).
+const IDENTIFIER_SOURCE = "[\\p{ID_Start}$_][\\p{ID_Continue}$\\u200c\\u200d]*";
+const IDENTIFIER = new RegExp(`^${IDENTIFIER_SOURCE}`, "u");
+// Arrow function with a single unparenthesized parameter: `x => ...` / `async x => ...`.
+const BARE_ARROW = new RegExp(`^(?:async\\s+)?(${IDENTIFIER_SOURCE})\\s*=>`, "u");
+
+/** One declared parameter: its name (empty when it has none, e.g. destructuring) and rest flag. */
+interface ParamInfo {
+  name: string;
+  rest: boolean;
+}
+
+/** A piece of source code: a whole string or template literal, or one other character. */
+interface SourceToken {
+  text: string;
+  /** True for a string or template literal. */
+  quoted: boolean;
+  /** Bracket depth around the token: an opening bracket is at the depth before it, a closing one after it. */
+  depth: number;
+}
+
+/**
+ * The tokens of `source` from `start`, skipping comments; returns false when a block comment is
+ * not closed. Nested brackets are tracked by depth, and a string or template literal is one
+ * token, so brackets and commas inside it do not count.
+ */
+function* sourceTokens(source: string, start = 0): Generator<SourceToken, boolean> {
+  let depth = 0;
+  for (let i = start; i < source.length; i++) {
+    const c = source[i];
+    if (c === "'" || c === '"' || c === "`") {
+      const from = i;
+      for (i++; i < source.length && source[i] !== c; i++) {
+        if (source[i] === "\\") i++;
+      }
+      yield { text: source.slice(from, i + 1), quoted: true, depth };
+      continue;
+    }
+    if (c === "/" && source[i + 1] === "/") {
+      while (i < source.length && source[i] !== "\n") i++;
+      continue;
+    }
+    if (c === "/" && source[i + 1] === "*") {
+      const end = source.indexOf("*/", i + 2);
+      if (end < 0) return false;
+      i = end + 1;
+      continue;
+    }
+    if (c === "(" || c === "[" || c === "{") {
+      yield { text: c, quoted: false, depth: depth++ };
+    } else if (c === ")" || c === "]" || c === "}") {
+      yield { text: c, quoted: false, depth: --depth };
+    } else {
+      yield { text: c, quoted: false, depth };
+    }
+  }
+  return true;
+}
+
+/**
+ * The text between the parameter list's parentheses, starting at `open` (a "("), with comments
+ * removed, or undefined when the parentheses are unbalanced. Skips nested brackets, strings and
+ * template literals, so default values like `(a = f(1), b = ")")` are kept whole.
+ */
+function balancedParams(source: string, open: number): string | undefined {
+  let out = "";
+  let first = true;
+  for (const token of sourceTokens(source, open)) {
+    if (first) {
+      first = false;
+      continue; // the "(" at `open`
+    }
+    if (!token.quoted && token.depth === 0) return token.text === ")" ? out : undefined;
+    out += token.text;
+  }
+  return undefined;
+}
+
+/** Split a parameter list at top-level commas. */
+function splitTopLevel(params: string): string[] {
+  const parts: string[] = [];
+  let current = "";
+  for (const token of sourceTokens(params)) {
+    if (!token.quoted && token.text === "," && token.depth === 0) {
+      parts.push(current);
+      current = "";
+    } else {
+      current += token.text;
+    }
+  }
+  parts.push(current);
+  return parts.map((p) => p.trim()).filter(Boolean);
+}
+
+/**
+ * The declared parameters of `fn`, read from its source. Handles `function` expressions and
+ * declarations, methods, arrows with and without parentheses (`x => ...`, `async x => ...`, as
+ * tsx/esbuild emit for one-parameter arrows), default values and rest parameters. A
+ * destructured parameter has no name (`name: ""`). Returns undefined when the source cannot be
+ * parsed (for example native or bound functions), so callers fall back to positional names.
+ * Known limit: a regular expression literal containing `)` in a default value
+ * (`(a = /\)/, b) => ...`) ends the list early, so later parameters get positional names.
+ */
+export function parseParams(fn: AnyFunction): ParamInfo[] | undefined {
+  let source: string;
+  try {
+    source = Function.prototype.toString.call(fn).trim();
+  } catch {
+    return undefined;
+  }
+  if (/\{\s*\[native code\]\s*\}\s*$/.test(source)) return undefined;
+
+  const bare = source.match(BARE_ARROW);
+  if (bare) return [{ name: bare[1], rest: false }];
+
+  const open = source.indexOf("(");
+  if (open < 0) return undefined;
+  const params = balancedParams(source, open);
+  if (params === undefined) return undefined;
+  return splitTopLevel(params).map((param) => {
+    const rest = param.startsWith("...");
+    const body = rest ? param.slice(3).trim() : param;
+    const name = body.match(IDENTIFIER)?.[0] ?? "";
+    return { name, rest };
+  });
+}
+
+/**
+ * The input object recorded for a call: declared parameter names as keys, a rest parameter
+ * collects the remaining arguments, and arguments without a usable name (destructured, extra
+ * or unparseable) are keyed by position (`arg0`, `arg1`, ...). A positional key never replaces
+ * a declared name: if `arg1` is taken it becomes `_arg1`. Pass `params` (from `parseParams`) to
+ * skip parsing the source again.
+ */
+export function namedArguments(
+  fn: AnyFunction,
+  args: unknown[],
+  params: ParamInfo[] | undefined = parseParams(fn),
+): Record<string, unknown> {
+  const declared = new Set((params ?? []).map((p) => p.name).filter(Boolean));
+  const obj: Record<string, unknown> = {};
+  const positional = (i: number): string => {
+    let key = `arg${i}`;
+    while (declared.has(key) || Object.hasOwn(obj, key)) key = `_${key}`;
+    return key;
+  };
+  for (let i = 0; i < args.length; i++) {
+    const param = params?.[i];
+    if (param?.rest) {
+      obj[param.name && !Object.hasOwn(obj, param.name) ? param.name : positional(i)] = args.slice(i);
+      break;
+    }
+    const key = param?.name && !Object.hasOwn(obj, param.name) ? param.name : positional(i);
+    obj[key] = args[i];
+  }
+  return obj;
 }
 
 function setInputAttributes(
@@ -98,22 +246,11 @@ function setInputAttributes(
   args: unknown[],
   op: string | undefined,
   fn: AnyFunction,
+  params: ParamInfo[] | undefined,
 ): void {
   if (args.length === 0) return;
   try {
-    const paramNames = getArgNames(fn);
-    let value: unknown;
-    if (paramNames.length > 0) {
-      const obj: Record<string, unknown> = {};
-      for (let i = 0; i < args.length; i++) {
-        const key = i < paramNames.length ? paramNames[i] : `arg${i}`;
-        obj[key] = args[i];
-      }
-      value = obj;
-    } else {
-      value = args.length === 1 ? args[0] : args;
-    }
-    const serialized = truncate(safeStringify(value));
+    const serialized = truncate(safeStringify(namedArguments(fn, args, params ?? [])));
     if (op === Op.EXECUTE_TOOL) {
       span.setAttribute("gen_ai.tool.call.arguments", serialized);
     } else {
@@ -132,6 +269,9 @@ function setOutputAttributes(
     op === Op.EXECUTE_TOOL
       ? "gen_ai.tool.call.result"
       : "gen_ai.output.messages";
+  // Keep a value set inside the function (enrich({ outputMessages }), or setAttribute), as the
+  // Python SDK does: the return value is recorded only when nothing was set.
+  if (spanAttributes(span)?.[attrKey] !== undefined) return;
   const serialized = truncate(safeStringify(result));
   span.setAttribute(attrKey, serialized);
 }
@@ -141,14 +281,13 @@ function setNameAttributes(
   name: string,
   op: string | undefined,
 ): void {
-  const nameAttr = op ? (NAME_ATTR[op] ?? DEFAULT_NAME_ATTR) : DEFAULT_NAME_ATTR;
-  span.setAttribute(nameAttr, name);
+  if (!op) return; // as in the Python SDK: no op, no GenAI attributes
+  const nameAttr = NAME_ATTR[op];
+  if (nameAttr) span.setAttribute(nameAttr, name);
   if (op === Op.EXECUTE_TOOL) {
     span.setAttribute("gen_ai.tool.type", "function");
   }
-  if (op) {
-    span.setAttribute("gen_ai.operation.name", op);
-  }
+  span.setAttribute("gen_ai.operation.name", op);
 }
 
 function isAsyncGeneratorFunction(fn: unknown): boolean {
@@ -165,25 +304,26 @@ function isGeneratorFunction(fn: unknown): boolean {
   );
 }
 
-function resolveNameFromArgs(
+/**
+ * The span name taken from the argument of the parameter called `nameFrom`, or from that key of
+ * an object first argument. Uses the same parameter parsing as the recorded input, so arrows
+ * without parentheses and default values with commas or parentheses resolve correctly.
+ */
+export function resolveNameFromArgs(
   nameFrom: string,
-  fn: AnyFunction,
   args: unknown[],
+  params: ParamInfo[] | undefined,
 ): string | undefined {
-  // Try to get parameter names from function source
-  const source = fn.toString();
-  const match = source.match(/\(([^)]*)\)/);
-  if (match) {
-    const params = match[1].split(",").map((p) => p.trim().replace(/\s*=.*$/, "").replace(/\.{3}/, ""));
-    const index = params.indexOf(nameFrom);
-    if (index >= 0 && index < args.length) {
-      const val = args[index];
-      return typeof val === "string" ? val : undefined;
-    }
+  const index = params?.findIndex((p) => !p.rest && p.name === nameFrom) ?? -1;
+  if (index >= 0 && index < args.length) {
+    const val = args[index];
+    return typeof val === "string" ? val : undefined;
   }
-  // Fallback: check if first arg is an object with the key
+  // Fallback: an object first argument with that key.
   if (args.length > 0 && typeof args[0] === "object" && args[0] !== null) {
-    const val = (args[0] as Record<string, unknown>)[nameFrom];
+    const first = args[0] as Record<string, unknown>;
+    // Own or inherited (a class getter), but never a key from Object.prototype.
+    const val = nameFrom in first && !(nameFrom in Object.prototype) ? first[nameFrom] : undefined;
     return typeof val === "string" ? val : undefined;
   }
   return undefined;
@@ -197,18 +337,20 @@ function wrapFunction<F extends AnyFunction>(
   const op = options.op;
   const kind = options.kind ?? SpanKind.INTERNAL;
   const nameFrom = options.nameFrom;
+  // The parameter list of fn never changes: parse it once, not on every call.
+  const params = parseParams(fn);
 
   if (isAsyncGeneratorFunction(fn)) {
     const wrapped = function (this: unknown, ...args: unknown[]) {
       const resolvedName = nameFrom
-        ? resolveNameFromArgs(nameFrom, fn, args) ?? baseName
+        ? resolveNameFromArgs(nameFrom, args, params) ?? baseName
         : baseName;
       const spanName = resolveSpanName(resolvedName, op);
       const tracer = getTracer();
 
       return tracer.startActiveSpan(spanName, { kind }, (span: Span) => {
         setNameAttributes(span, resolvedName, op);
-        setInputAttributes(span, args, op, fn);
+        setInputAttributes(span, args, op, fn, params);
 
         const gen = fn.apply(this, args) as AsyncGenerator;
         const collected: unknown[] = [];
@@ -257,14 +399,14 @@ function wrapFunction<F extends AnyFunction>(
   if (isGeneratorFunction(fn)) {
     const wrapped = function (this: unknown, ...args: unknown[]) {
       const resolvedName = nameFrom
-        ? resolveNameFromArgs(nameFrom, fn, args) ?? baseName
+        ? resolveNameFromArgs(nameFrom, args, params) ?? baseName
         : baseName;
       const spanName = resolveSpanName(resolvedName, op);
       const tracer = getTracer();
 
       return tracer.startActiveSpan(spanName, { kind }, (span: Span) => {
         setNameAttributes(span, resolvedName, op);
-        setInputAttributes(span, args, op, fn);
+        setInputAttributes(span, args, op, fn, params);
 
         const gen = fn.apply(this, args) as Generator;
         const collected: unknown[] = [];
@@ -312,14 +454,14 @@ function wrapFunction<F extends AnyFunction>(
 
   const wrapped = function (this: unknown, ...args: unknown[]) {
     const resolvedName = nameFrom
-      ? resolveNameFromArgs(nameFrom, fn, args) ?? baseName
+      ? resolveNameFromArgs(nameFrom, args, params) ?? baseName
       : baseName;
     const spanName = resolveSpanName(resolvedName, op);
     const tracer = getTracer();
 
     return tracer.startActiveSpan(spanName, { kind }, (span: Span) => {
       setNameAttributes(span, resolvedName, op);
-      setInputAttributes(span, args, op, fn);
+      setInputAttributes(span, args, op, fn, params);
 
       try {
         const result = fn.apply(this, args);

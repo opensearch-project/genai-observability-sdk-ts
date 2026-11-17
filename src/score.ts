@@ -13,9 +13,11 @@ import { SeverityNumber } from '@opentelemetry/api-logs';
 import {
   AGENT_NAME_KEY,
   AGENT_VERSION_KEY,
+  firstWarnings,
   normalizeSpanId,
   normalizeTraceId,
   resolveAgent,
+  truncateChars,
 } from './internal.js';
 import { getEventLogger, takeTraceOnlyHandled, traceOnlyContext } from './logs.js';
 
@@ -28,13 +30,40 @@ export const EVALUATION_RESULT_EVENT = "gen_ai.evaluation.result";
  */
 export const JUDGE_LABEL_KEY = "opensearch.gen_ai.evaluation.judge_label";
 
-/** Exact attribute keys score() owns; `attributes` cannot set them. */
+/** What the evaluator checks (its criteria or rubric summary), truncated to 1024 characters. */
+export const EVALUATOR_DESCRIPTION_KEY = "opensearch.gen_ai.evaluation.evaluator.description";
+/**
+ * Maximum length of `opensearch.gen_ai.evaluation.evaluator.description`, in characters: it is
+ * repeated on every result, so a long rubric is cut like `opensearch.test.suite.run.description`.
+ */
+export const EVALUATOR_DESCRIPTION_LIMIT = 1024;
+/** Model used by the LLM judge (standard GenAI semconv name). */
+export const JUDGE_MODEL_KEY = "gen_ai.request.model";
+/** Name of the judge prompt template (standard GenAI semconv name). */
+export const JUDGE_PROMPT_NAME_KEY = "gen_ai.prompt.name";
+/** Version of the judge prompt (standard GenAI semconv name). */
+export const JUDGE_PROMPT_VERSION_KEY = "gen_ai.prompt.version";
+/**
+ * The judge's full system prompt. Never set on a result event: it belongs on
+ * the judge's own LLM span (its OTel location), recorded by the judge's
+ * instrumentation or `enrich({ systemInstructions })`. Reserved here so
+ * `attributes` cannot add it to a result either.
+ */
+const JUDGE_SYSTEM_INSTRUCTIONS_KEY = "gen_ai.system_instructions";
+
+/**
+ * Exact attribute keys score() owns; `attributes` cannot set them. The judge context keys
+ * (`gen_ai.request.model`, `gen_ai.prompt.name`, `gen_ai.prompt.version`) are not here: metadata
+ * and `attributes` may set them (for example a Benchmark upload of DeepEval or Ragas results),
+ * and the explicit judge options win when both are set.
+ */
 const SDK_OWNED_KEYS: ReadonlySet<string> = new Set([
   "error.type",
   "gen_ai.response.id",
   "gen_ai.conversation.id",
   AGENT_NAME_KEY,
   AGENT_VERSION_KEY,
+  JUDGE_SYSTEM_INSTRUCTIONS_KEY,
 ]);
 /** Attribute namespaces score() owns: `gen_ai.evaluation.*` and `opensearch.gen_ai.evaluation.*`. */
 const SDK_OWNED_PREFIXES = ["gen_ai.evaluation.", "opensearch.gen_ai.evaluation."];
@@ -57,10 +86,11 @@ export interface ScoreOptions {
   /** `gen_ai.evaluation.name` (required), for example `"relevance"`. */
   name: string;
   /**
-   * `gen_ai.evaluation.score.value` (a double in OTel semconv). The OTLP/HTTP
-   * log exporter register() creates and AWSSigV4OTLPLogExporter send whole
-   * numbers as `doubleValue` too; the gRPC log exporter and your own exporters
-   * send them as `intValue`. See README.
+   * `gen_ai.evaluation.score.value` (a double in OTel semconv). The log
+   * exporters register() uses (OTLP/HTTP, gRPC, AWSSigV4OTLPLogExporter, and an
+   * OTLP `logExporter` you pass) send whole numbers as `doubleValue` too; an
+   * exporter of a LoggerProvider you configured sends them as `intValue` unless
+   * you call `sendScoresAsDouble` on it. See README.
    */
   value?: number;
   /** Trace of the evaluated span. Without `spanId` the score is trace-level. */
@@ -87,6 +117,22 @@ export interface ScoreOptions {
   evaluatorVersion?: string;
   /** `opensearch.gen_ai.evaluation.evaluator.type`. */
   evaluatorType?: EvaluatorType;
+  /**
+   * `opensearch.gen_ai.evaluation.evaluator.description`: what the evaluator
+   * checks (its criteria or rubric summary). Truncated to 1024 characters.
+   */
+  evaluatorDescription?: string;
+  /** `gen_ai.request.model`: the model used by the LLM judge. */
+  judgeModel?: string;
+  /** `gen_ai.prompt.name`: the name of the judge prompt template. */
+  judgePromptName?: string;
+  /**
+   * `gen_ai.prompt.version`: the version of the judge prompt. With
+   * `judgePromptName` it identifies the prompt (`name@version`). The full
+   * prompt text is not put on the result: it goes on the judge's own LLM span
+   * as `gen_ai.system_instructions`.
+   */
+  judgePromptVersion?: string;
   /** `opensearch.gen_ai.evaluation.score.direction`. */
   direction?: ScoreDirection;
   /** `opensearch.gen_ai.evaluation.score.min`. */
@@ -116,8 +162,10 @@ export interface ScoreOptions {
    * Extra attributes (string, number, boolean), for example `test.*` grouping
    * keys. Keys the SDK sets itself (`gen_ai.evaluation.*`,
    * `opensearch.gen_ai.evaluation.*`, `error.type`, `gen_ai.response.id`,
-   * `gen_ai.conversation.id`, `gen_ai.agent.*`) are dropped with a warning:
-   * use the options instead.
+   * `gen_ai.conversation.id`, `gen_ai.agent.*`, `gen_ai.system_instructions`) are dropped, with
+   * one warning per key per process: use the options instead. The judge context keys
+   * `gen_ai.request.model` and `gen_ai.prompt.name` / `.version` pass through; `judgeModel` /
+   * `judgePromptName` / `judgePromptVersion` win over them.
    */
   attributes?: Record<string, unknown>;
 }
@@ -200,10 +248,11 @@ function extraAttributes(attributes: Record<string, unknown> | undefined): Attri
       attrs[k] = v;
     }
   }
-  if (dropped.length > 0) {
+  const fresh = firstWarnings("score-dropped", dropped);
+  if (fresh.length > 0) {
     console.warn(
-      `score(): dropped attributes the SDK sets itself (${dropped.map((k) => `"${k}"`).join(', ')}); ` +
-        `use the score() options instead`,
+      `score(): dropped attributes the SDK sets itself (${fresh.map((k) => `"${k}"`).join(', ')}); ` +
+        `use the score() options instead (each key is logged once)`,
     );
   }
   return attrs;
@@ -270,6 +319,31 @@ function buildAttributes(options: ScoreOptions, target: Target, verdict?: Verdic
     ),
   );
   if (options.judgeTraceId) attrs["opensearch.gen_ai.evaluation.judge.trace_id"] = options.judgeTraceId;
+  Object.assign(attrs, judgeAttributes(options));
+  return attrs;
+}
+
+/** Judge / evaluator context fields of a score, as event attributes (only those set). */
+export interface JudgeContext {
+  evaluatorDescription?: string;
+  judgeModel?: string;
+  judgePromptName?: string;
+  judgePromptVersion?: string;
+}
+
+/**
+ * @internal The judge / evaluator context attributes: evaluator description
+ * (truncated to 1024 characters), judge model, prompt name and version. Never
+ * the judge's system prompt.
+ */
+export function judgeAttributes(ctx: JudgeContext): Attributes {
+  const attrs: Attributes = {};
+  if (ctx.evaluatorDescription) {
+    attrs[EVALUATOR_DESCRIPTION_KEY] = truncateChars(ctx.evaluatorDescription, EVALUATOR_DESCRIPTION_LIMIT).text;
+  }
+  if (ctx.judgeModel) attrs[JUDGE_MODEL_KEY] = ctx.judgeModel;
+  if (ctx.judgePromptName) attrs[JUDGE_PROMPT_NAME_KEY] = ctx.judgePromptName;
+  if (ctx.judgePromptVersion) attrs[JUDGE_PROMPT_VERSION_KEY] = ctx.judgePromptVersion;
   return attrs;
 }
 

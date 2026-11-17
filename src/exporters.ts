@@ -454,28 +454,65 @@ export function forceDoubleAttributes(serialized: Uint8Array): Uint8Array {
   );
 }
 
+/**
+ * Wraps a protobuf logs serializer so whole-number scores go out as `double_value`. Fails open:
+ * if the rewrite throws (an unexpected wire type, a future otlp-transformer change), the
+ * original bytes are sent, so a parse surprise never drops a batch (which can hold app logs
+ * sharing the LoggerProvider).
+ */
 function doubleAttributesSerializer(base: LogsSerializer): LogsSerializer {
   return {
     serializeRequest(logs: ReadableLogRecord[]): Uint8Array | undefined {
       const serialized = base.serializeRequest(logs);
-      return serialized ? forceDoubleAttributes(serialized) : serialized;
+      if (!serialized) return serialized;
+      try {
+        return forceDoubleAttributes(serialized);
+      } catch {
+        return serialized;
+      }
     },
   };
 }
 
+const SCORES_AS_DOUBLE = Symbol.for("opensearch-genai-observability-sdk.scoresAsDouble");
+
 /**
- * Make an `@opentelemetry/exporter-logs-otlp-proto` OTLPLogExporter send
- * double-typed attributes (for example `gen_ai.evaluation.score.value`) as
- * `double_value` even when the value is a whole number. Wraps the exporter's
- * protobuf serializer; returns false (and changes nothing) when the exporter
- * does not have the expected internals.
+ * Whether `serializer` writes binary protobuf, judged by its output rather than its shape: an
+ * empty ExportLogsServiceRequest is zero bytes in protobuf, and `{"resourceLogs":[]}` from the
+ * OTLP/JSON serializer (which has the same `serializeRequest` method).
+ */
+function writesProtobuf(serializer: LogsSerializer): boolean {
+  try {
+    const probe = serializer.serializeRequest([]);
+    return probe instanceof Uint8Array && probe.length === 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Make an OpenTelemetry OTLP log exporter (`@opentelemetry/exporter-logs-otlp-proto`
+ * or `@opentelemetry/exporter-logs-otlp-grpc`) send double-typed attributes (for
+ * example `gen_ai.evaluation.score.value`) as `double_value` even when the value
+ * is a whole number. Wraps the exporter's protobuf serializer; returns false (and
+ * changes nothing) when the exporter does not serialize to protobuf, such as the
+ * OTLP/HTTP JSON exporter (`@opentelemetry/exporter-logs-otlp-http`), or does not
+ * have the expected internals, such as a custom exporter. Calling it twice is harmless.
  */
 export function sendScoresAsDouble(exporter: unknown): boolean {
   const delegate = (exporter as { _delegate?: { _serializer?: LogsSerializer & { deserializeResponse?: unknown } } })
     ?._delegate;
-  const serializer = delegate?._serializer;
+  const serializer = delegate?._serializer as (LogsSerializer & { [SCORES_AS_DOUBLE]?: true }) | undefined;
   if (!delegate || typeof serializer?.serializeRequest !== "function") return false;
-  delegate._serializer = { ...serializer, ...doubleAttributesSerializer(serializer) };
+  // Already wrapped (register() and the caller both applied it): keep one wrapper.
+  if (serializer[SCORES_AS_DOUBLE]) return true;
+  if (!writesProtobuf(serializer)) return false;
+  const wrapped: LogsSerializer & { [SCORES_AS_DOUBLE]?: true } = {
+    ...serializer,
+    ...doubleAttributesSerializer(serializer),
+    [SCORES_AS_DOUBLE]: true,
+  };
+  delegate._serializer = wrapped;
   return true;
 }
 

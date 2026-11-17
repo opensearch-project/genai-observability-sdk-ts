@@ -169,18 +169,18 @@ describe('evaluate', () => {
     logSpy.mockRestore();
   });
 
-  it('rejects async task functions with a clear error', () => {
+  it('awaits async task functions (see evaluate_async.test.ts)', async () => {
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
-    const result = evaluate({
+    const result = await evaluate({
       name: 'async-task-test',
       task: async (input) => `answer: ${input}`,
       data: [{ input: 'q1' }],
       scores: [],
     });
 
-    expect(result.cases[0].status).toBe('fail');
-    expect(result.cases[0].error).toContain('does not support async task functions');
-    expect(result.summary.errorCount).toBe(1);
+    expect(result.cases[0].status).toBe('pass');
+    expect(result.cases[0].output).toBe('answer: q1');
+    expect(result.summary.errorCount).toBe(0);
     logSpy.mockRestore();
   });
 
@@ -1074,13 +1074,13 @@ describe('scorer return values', () => {
     });
   }
 
-  it('an un-awaited Promise warns, emits an error result and is not left unhandled', async () => {
-    const asyncScorer = defineScorer({ name: 'async_judge' }, (async () => { throw new Error('later'); }) as never);
-    const result = evaluate({ name: 'bad-promise', task: x => x, data: [{ input: 'q' }], scores: [asyncScorer] });
-    await new Promise(resolve => setTimeout(resolve, 0));
-    expect(scoreRecords()[0].attributes['error.type']).toBe('TypeError');
+  it('a rejected async scorer emits an error result with its error type, without a warning', async () => {
+    const asyncScorer = defineScorer({ name: 'async_judge' }, async () => { throw new Error('later'); });
+    const result = await evaluate({ name: 'bad-promise', task: x => x, data: [{ input: 'q' }], scores: [asyncScorer] });
+    expect(scoreRecords()[0].attributes['error.type']).toBe('Error');
     expect(result.cases[0].resultStatus).toBe('error');
-    expect(warnSpy).toHaveBeenCalledWith(expect.stringMatching(/returned a Promise/));
+    expect(result.cases[0].scorerErrors).toEqual(['later']);
+    expect(warnSpy).not.toHaveBeenCalled();
   });
 
   it('accepts finite numbers, booleans, EvalScore and EvalScore[]', () => {
@@ -1148,17 +1148,21 @@ describe('expected output on evaluation results', () => {
     spy.mockRestore();
   });
 
-  it('truncates to 4096 characters and flags it', () => {
+  it('truncates to 8192 characters and flags it', () => {
     const spy = silence();
     const bm = new Benchmark('exp');
-    bm.log({ input: 'q', expected: 'x'.repeat(5000), scores: { accuracy: 1 } });
-    bm.log({ input: 'r', expected: 'y'.repeat(4096), scores: { accuracy: 1 } });
+    bm.log({ input: 'q', expected: 'x'.repeat(40000), scores: { accuracy: 1 } });
+    bm.log({ input: 'r', expected: 'y'.repeat(8192), scores: { accuracy: 1 } });
+    bm.log({ input: 's', expected: 'z'.repeat(5000), scores: { accuracy: 1 } });
     bm.close();
-    const [long, exact] = scoreRecords();
-    expect(long.attributes[EXPECTED]).toBe('x'.repeat(4096));
+    const [long, exact, mid] = scoreRecords();
+    expect(long.attributes[EXPECTED]).toBe('x'.repeat(8192));
     expect(long.attributes[TRUNCATED]).toBe(true);
-    expect(exact.attributes[EXPECTED]).toBe('y'.repeat(4096));
+    expect(exact.attributes[EXPECTED]).toBe('y'.repeat(8192));
     expect(exact.attributes[TRUNCATED]).toBeUndefined();
+    // Above the old 4096 cap: kept whole.
+    expect(mid.attributes[EXPECTED]).toBe('z'.repeat(5000));
+    expect(mid.attributes[TRUNCATED]).toBeUndefined();
     spy.mockRestore();
   });
 
@@ -1239,7 +1243,7 @@ describe('expected output on evaluation results', () => {
 
   it('recordExpected: false writes neither attribute, on scores and error results', () => {
     const spy = silence();
-    const long = 'x'.repeat(5000);
+    const long = 'x'.repeat(40000);
     const result = evaluate({
       name: 'exp',
       task: (i) => i,

@@ -6,6 +6,7 @@ import { trace } from '@opentelemetry/api';
 import { SeverityNumber } from '@opentelemetry/api-logs';
 import { score, EVALUATION_RESULT_EVENT, JUDGE_LABEL_KEY } from '../src/score.js';
 import { SDK_SCOPE_NAME, SDK_VERSION } from '../src/version.js';
+import { resetWarnedKeys } from '../src/internal.js';
 import { getFinishedSpans, getFinishedLogRecords, clearSpans } from './setup.js';
 
 const TRACE_ID = 'abcdef1234567890abcdef1234567890';
@@ -15,6 +16,7 @@ let warnSpy: ReturnType<typeof vi.spyOn>;
 
 beforeEach(() => {
   clearSpans();
+  resetWarnedKeys();
   warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
 });
 afterEach(() => {
@@ -341,5 +343,22 @@ describe('score attributes', () => {
     expect(a['test.case.id']).toBe('case-1');
     expect(a.team).toBe('search');
     expect(warnSpy).toHaveBeenCalledWith(expect.stringMatching(/dropped attributes the SDK sets itself \("gen_ai.evaluation.name"/));
+  });
+});
+
+describe('score() evaluatorDescription', () => {
+  it('is capped at 1024 characters (code points), like runDescription', () => {
+    score({ name: 'rubric', value: 1, evaluatorDescription: '😀'.repeat(1500) });
+    const description = onlyRecord().attributes['opensearch.gen_ai.evaluation.evaluator.description'] as string;
+    expect(Array.from(description)).toHaveLength(1024);
+    expect(description).toBe('😀'.repeat(1024));
+    expect(onlyRecord().attributes['opensearch.gen_ai.evaluation.evaluator.description_truncated']).toBeUndefined();
+  });
+
+  it('keeps a description within the cap as is', () => {
+    score({ name: 'rubric', value: 1, evaluatorDescription: 'Checks the answer cites a source.' });
+    expect(onlyRecord().attributes['opensearch.gen_ai.evaluation.evaluator.description']).toBe(
+      'Checks the answer cites a source.',
+    );
   });
 });

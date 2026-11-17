@@ -13,9 +13,10 @@ OTel-native tracing and scoring for LLM applications. Instrument your AI workflo
 - **`withObserve()`** — block-level tracing (TypeScript equivalent of Python's context manager)
 - **`enrich()`** — add model, token usage, and other GenAI attributes to the active span from anywhere in your code
 - **`markAgentRoot()`** — mark the agent's span as the trace's agent root in OpenSearch Agent Traces
-- **Auto-instrumentation** — automatically discovers and activates installed instrumentor packages (OpenAI, etc.)
+- **Auto-instrumentation**: turns on the installed OpenTelemetry instrumentations for the OpenAI SDK and the AWS SDK (Bedrock); see [Auto-instrumentation](#auto-instrumentation)
 - **Scoring**: `score()` emits each evaluation result as an OTel `gen_ai.evaluation.result` log event, parented to the evaluated span
 - **Benchmarks**: `evaluate()` runs your agent against a dataset with scorers; `Benchmark` uploads results from any eval framework. Each case is its own agent trace plus one `gen_ai.evaluation.result` log event per score
+- **Getting started with agent evaluations**: [docs/getting-started-evaluations.md](docs/getting-started-evaluations.md) goes from instrumenting an agent to offline eval runs and online evals (sample traces, judge them, post results back), with an eval cookbook, Dashboards deep links and copyable LLM prompts
 - **Agent evaluations guide**: [docs/agent-evaluations.md](docs/agent-evaluations.md) covers what gets stored, online and offline evaluation, ingestion (Data Prepper and Amazon OpenSearch Ingestion), verification and troubleshooting
 - **AWS SigV4** — built-in SigV4 signing for AWS-hosted OpenSearch and Data Prepper endpoints
 - **Streaming** — full support for sync/async functions, generators, and async generators
@@ -52,7 +53,7 @@ npm install @aws-sdk/credential-providers aws4
 import { register, observe, Op, enrich, score } from "@opensearch-project/genai-observability-sdk-ts";
 
 // 1. Initialize tracing (one line)
-await register(); // OTLP/HTTP to http://localhost:4318 (local OTel Collector)
+await register({ serviceName: "research-app", agentName: "research_agent" }); // OTLP/HTTP to http://localhost:4318
 
 // 2. Trace your functions
 const search = observe(
@@ -136,7 +137,7 @@ await register({
   endpoint: "http://my-collector:4318",  // base URL for traces and logs, or use env vars
   serviceName: "my-app",
   batch: true,            // BatchSpanProcessor (true) or Simple (false)
-  autoInstrument: true,   // discover installed instrumentor packages
+  autoInstrument: true,   // turn on the installed OpenAI instrumentation ({ awsSdk: true } adds the AWS SDK)
   agentName: "travel_planner", // optional: the agent this process evaluates
   agentVersion: "v3",          // optional: its version
 });
@@ -168,13 +169,60 @@ An unknown agent is left out, never invented. `evaluate()` also stamps the agent
 | `serviceName` | `string` | `"unknown_service"` | `service.name` resource attribute |
 | `serviceVersion` | `string` | none | `service.version` resource attribute |
 | `batch` | `boolean` | `true` | Use BatchSpanProcessor when true |
-| `autoInstrument` | `boolean` | `true` | Discover and activate instrumentor packages |
+| `autoInstrument` | `boolean \| { openai?: boolean; awsSdk?: boolean }` | `true` (OpenAI on, AWS SDK off) | Turn on the installed instrumentations listed in [Auto-instrumentation](#auto-instrumentation), with this provider. `{ awsSdk: true }` adds the AWS SDK instrumentation; `false` turns on none |
 | `exporter` | `SpanExporter` | none | Custom span exporter, used as given (traces only). Without a logs destination, no logs pipeline is set up (see [Endpoints](#endpoints-traces-and-evaluation-logs)) |
 | `headers` | `Record<string, string>` | none | Headers for every export (traces and logs). Over gRPC they are sent as gRPC metadata with lowercased keys (gRPC rejects uppercase keys) |
 | `logs` | `boolean` | `true` | Set up a LoggerProvider for evaluation events |
 | `logExporter` | `LogRecordExporter` | none | Custom log exporter, used as given (logs only) |
 
 **Logs pipeline.** `register()` also creates a `LoggerProvider` with a batch processor (simple when `batch: false`) and a log exporter for evaluation events, over the same protocol rules as traces. `provider.forceFlush()` and `provider.shutdown()` flush and shut down both pipelines. If a global `LoggerProvider` is already registered (for example by `NodeSDK`), `register()` leaves it in place and `score()` emits through it.
+
+#### Auto-instrumentation
+
+`register()` turns on each of these packages that is installed and selected, with its own provider (also with `setGlobal: false`). It needs nothing else from you: no `registerInstrumentations()` call. The instrumentations are process-wide, so they send to one provider: the newest `register()` with `setGlobal` (the default). A `setGlobal: false` `register()` (for example a side pipeline with a debug exporter) takes them only when no other live `register()` provider has them, so it does not take the model spans from your main pipeline.
+
+| Package | Instruments | Turned on | Supported versions (tested) |
+|---|---|---|---|
+| `@opentelemetry/instrumentation-openai` | `openai` >= 4.19 < 7: Chat Completions, Responses, Embeddings become `chat <model>` / `embeddings <model>` spans | by default (`autoInstrument: true`); off with `{ openai: false }` | >= 0.14 < 0.22 (0.21) |
+| `@opentelemetry/instrumentation-aws-sdk` | AWS SDK for JavaScript v3; Bedrock Runtime `Converse` / `InvokeModel` become `chat <model>` spans | only with `autoInstrument: { awsSdk: true }` | >= 0.50 < 0.79 (0.78) |
+
+**The AWS SDK instrumentation is opt-in.** It traces every AWS SDK v3 client call in the process (S3, DynamoDB, SQS, STS, ...), not only Bedrock, so `register()` turns it on only when you ask: `await register({ autoInstrument: { awsSdk: true } })`. To trace only some clients, or to set `preRequestHook` / `responseHook`, register `AwsInstrumentation` yourself (see "Your own setup" below).
+
+**Failures.** An installed package that fails to load or to enable (for example a patch error on an incompatible library that is already loaded) logs one warning naming the package and is skipped; `register()` still resolves.
+
+**Versions.** This SDK is on OpenTelemetry JS 1.x (`@opentelemetry/api` 1.9). `@opentelemetry/instrumentation-openai` 0.22+ and `@opentelemetry/instrumentation-aws-sdk` 0.79+ are built on `@opentelemetry/instrumentation` 0.300, which needs `@opentelemetry/api` 1.10, so pin `~0.21.0` / `~0.78.0`. Both packages are optional peer dependencies with these ranges. An installed package that fails to load logs a warning naming the supported versions; one that is not installed is skipped silently.
+
+**Load order.** An instrumentation patches its library when the library is loaded, so `register()` must finish before `openai` or the AWS SDK is imported. Static `import`s run before the code of the module, so in the module that imports the library, calling `register()` is too late. In an ES module app:
+
+```typescript
+// otel.ts: loaded with `node --import ./otel.js app.js` (or `tsx --import ./otel.ts app.ts`)
+import { register as registerHooks } from "node:module";
+import { register } from "@opensearch-project/genai-observability-sdk-ts";
+
+// Let the instrumentations patch `import` statements (ESM only).
+registerHooks("@opentelemetry/instrumentation/hook.mjs", import.meta.url);
+
+export const provider = await register({ serviceName: "my-agent" });
+```
+
+`@opentelemetry/instrumentation` must be resolvable from that file: install it, `~0.223.0`, the same line the instrumentations use. `app.ts` imports `openai` as usual and can import `provider` from `./otel.js` to flush it. In a single file, load the library after `register()` with `await import("openai")` (see [`05_openai_auto_instrument.ts`](examples/05_openai_auto_instrument.ts)). In CommonJS, `require()` the library after `await register()` resolves; no loader hook is needed.
+
+**Your own setup.** To configure an instrumentation (for example `captureMessageContent`, or `preRequestHook` / `responseHook` on `AwsInstrumentation`), turn it off in `autoInstrument` (`false`, or `{ openai: false }`) and register it yourself. If you leave it on, a call is still traced once, not twice: when your instrumentation is enabled before `register()`, `register()` leaves the functions it patched to it (your provider and config) and logs one warning; when it is enabled after, it takes the patch over from the SDK's (OpenTelemetry JS instrumentations unwrap a patched function before patching it):
+
+```typescript
+import { registerInstrumentations } from "@opentelemetry/instrumentation";
+import { OpenAIInstrumentation } from "@opentelemetry/instrumentation-openai";
+
+const provider = await register({ serviceName: "my-agent", autoInstrument: false });
+registerInstrumentations({
+  instrumentations: [new OpenAIInstrumentation({ captureMessageContent: true })],
+  tracerProvider: provider,
+});
+```
+
+The OpenAI instrumentation records prompts and completions as log events (`gen_ai.user.message`, `gen_ai.choice`), not span attributes, and only with `captureMessageContent: true` (or `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=true`). To show messages on the span, add them with `enrich({ inputMessages, outputMessages })` in your own `observe()` span.
+
+**Other libraries.** The Anthropic SDK (1.x) emits OpenTelemetry spans itself through the global tracer provider, so it needs no instrumentation package. LangChain.js / LangGraph.js and the OpenAI Agents SDK have no OpenTelemetry GenAI instrumentation in OpenTelemetry JS: trace their model and tool calls with `observe()` / `withObserve()`. Any other OpenTelemetry JS instrumentation works with `registerInstrumentations({ instrumentations, tracerProvider: provider })` as above, if it supports `@opentelemetry/api` 1.9.
 
 #### Endpoints: traces and evaluation logs
 
@@ -258,9 +306,9 @@ Use gRPC with a local OTel Collector (default `localhost:4317`) or a self-hosted
 
 `exporter` and `logExporter` are escape hatches: each replaces one signal's exporter and nothing is derived from it. Without `exporter`, every signal has an endpoint (the default at worst). With `exporter` and no logs destination (`logExporter`, or any of steps 1 to 4 above for logs: `logsEndpoint`, `endpoint`, `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`, `OTEL_EXPORTER_OTLP_ENDPOINT`), `register()` does not set up a logs pipeline: it warns once, and evaluation events go to the global `LoggerProvider` (a no-op unless you registered one). Pass `logsEndpoint` or `logExporter` to export them.
 
-**Migrating from a traces URL in `endpoint`.** Before this release `endpoint` was the full traces URL and the default was `http://localhost:21890/opentelemetry/v1/traces`. `endpoint` is now always the base URL, and a value ending in `/v1/traces` throws. Pass the base (`http://host:4318`), or `tracesEndpoint` and `logsEndpoint`. To keep sending to a Data Prepper `otlp` source on its old default, pass `endpoint: "http://localhost:21890"` and set `traces_path` / `logs_path` and `unframed_requests: true` on the source (see the [guide](docs/agent-evaluations.md#ingestion)).
+**Migrating from a traces URL in `endpoint`.** Before 0.2.0 (`@opensearch-project/genai-observability-sdk-ts@>=0.2.0`), `endpoint` was the full traces URL and the default was `http://localhost:21890/opentelemetry/v1/traces`. `endpoint` is now always the base URL, and a value ending in `/v1/traces` throws. Pass the base (`http://host:4318`), or `tracesEndpoint` and `logsEndpoint`. To keep sending to a Data Prepper `otlp` source on its old default, pass `endpoint: "http://localhost:21890"` and set `traces_path` / `logs_path` and `unframed_requests: true` on the source (see the [guide](docs/agent-evaluations.md#ingestion)).
 
-**Scores over gRPC.** The OTLP/HTTP log exporters send whole-number scores as `doubleValue` (see [Scores are doubles](#score)); the gRPC log exporter sends them as `intValue`. The evaluation index maps them as `double` either way.
+**Scores over gRPC.** The gRPC log exporter, like the OTLP/HTTP ones, sends whole-number scores as `doubleValue` (see [Scores are doubles](#score)).
 
 ### `observe()`
 
@@ -291,7 +339,7 @@ const tracedAgent = withTracing(myAgentFunction);
 | `name` | `string` | Function name | Span name |
 | `op` | `string` | — | `gen_ai.operation.name` value. Use `Op` constants or any custom string |
 | `kind` | `SpanKind` | `INTERNAL` | OTel span kind |
-| `nameFrom` | `string` | — | Resolve span name dynamically from a function parameter |
+| `nameFrom` | `string` | none | Resolve span name dynamically from a function parameter, else from that property of an object first argument (own or inherited, such as a class getter; never an `Object.prototype` key) |
 
 **Span naming:** When `op` is a well-known value, the span name is `"{op} {name}"` (e.g. `"invoke_agent planner"`).
 
@@ -300,11 +348,15 @@ const tracedAgent = withTracing(myAgentFunction);
 | Attribute | When set |
 |---|---|
 | `gen_ai.operation.name` | When `op` is provided |
-| `gen_ai.agent.name` | All ops except `execute_tool` |
+| `gen_ai.agent.name` | `op` is `invoke_agent` or `create_agent` only (a `chat` span, such as a traced LLM judge call, is not an agent) |
 | `gen_ai.tool.name` | When `op=Op.EXECUTE_TOOL` |
 | `gen_ai.tool.type` | When `op=Op.EXECUTE_TOOL` (set to `"function"`) |
 | `gen_ai.input.messages` / `gen_ai.output.messages` | All ops except `execute_tool` |
 | `gen_ai.tool.call.arguments` / `gen_ai.tool.call.result` | When `op=Op.EXECUTE_TOOL` |
+
+**Changed in 0.2.0.** Without `op`, `observe()` / `withObserve()` set no GenAI attributes (no `gen_ai.operation.name`, no `gen_ai.agent.name`), as in the Python SDK, and only `invoke_agent` / `create_agent` name an agent. So a root span from `observe(fn)` no longer names the agent that `evaluate()` and inline `score()` group results under, and `listRootSpans()` does not list it. Trace the agent's entry point with `op: Op.INVOKE_AGENT`, call `markAgentRoot()` in it, or pass `agentName` to `evaluate()` / `score()` / `register()`.
+
+Inputs are recorded as an object keyed by the function's parameter names (read from its source, so arrows compiled by tsx/esbuild such as `city=>...` work too); destructured or extra arguments are keyed `arg0`, `arg1`, ... (`_arg1` if a parameter is itself named `arg1`). The return value becomes `gen_ai.output.messages` (or `gen_ai.tool.call.result`) only when the function did not set it itself: messages set with `enrich({ outputMessages })` inside the function are kept.
 
 **Dynamic naming with `nameFrom`:**
 
@@ -435,7 +487,15 @@ score({ name: "task_success", value: 1, traceId: "6ebb9835f43af1552f2cebb9f5165e
 
 The instrumentation scope is the library that emitted the event: every SDK event (`gen_ai.evaluation.result`) has scope `opensearch-genai-observability-sdk-ts` with the SDK version, and no scope attributes. The evaluator is data about the result and goes in `opensearch.gen_ai.evaluation.evaluator.*`. The timestamp is the time `score()` is called.
 
-**Scores are doubles.** `gen_ai.evaluation.score.value` is a double in the OTel semantic conventions, but OTel JS encodes any whole JS number (for example `1`) as an OTLP `intValue`, and the logs API has no way to request a double. The SDK's own log exporters (the OTLP/HTTP exporter `register()` creates, and `AWSSigV4OTLPLogExporter`; not the gRPC one) re-encode whole-number `gen_ai.evaluation.score.value`, `opensearch.gen_ai.evaluation.score.min` / `.max` / `.threshold` as `doubleValue`. With your own `logExporter` or a global `LoggerProvider` you configured, whole numbers are sent as `intValue`. The OpenSearch evaluation index maps the field as `double`, so stored values are the same either way.
+**Scores are doubles.** `gen_ai.evaluation.score.value` is a double in the OTel semantic conventions, but OTel JS encodes any whole JS number (for example `1`) as an OTLP `intValue`, and the logs API has no way to request a double. The log exporters `register()` uses re-encode whole-number `gen_ai.evaluation.score.value`, `opensearch.gen_ai.evaluation.score.min` / `.max` / `.threshold` as `doubleValue`: the OTLP/HTTP and gRPC exporters it creates, `AWSSigV4OTLPLogExporter`, and an OpenTelemetry OTLP exporter (protobuf or gRPC) you pass as `logExporter`. An OTLP/HTTP JSON exporter (`@opentelemetry/exporter-logs-otlp-http`) is left as is. With a global `LoggerProvider` you configured yourself, call `sendScoresAsDouble(exporter)` on its OTLP log exporter; otherwise whole numbers are sent as `intValue`, and an index that maps the score dynamically can store it as an integer.
+
+```typescript
+import { OTLPLogExporter } from "@opentelemetry/exporter-logs-otlp-grpc";
+import { sendScoresAsDouble } from "@opensearch-project/genai-observability-sdk-ts";
+
+const exporter = new OTLPLogExporter({ url: "http://localhost:4317" });
+sendScoresAsDouble(exporter); // returns false, and changes nothing, for a JSON or custom exporter
+```
 
 **Parameters:**
 
@@ -460,7 +520,11 @@ The instrumentation scope is the library that emitted the event: every SDK event
 | `agentVersion` | `string` | `gen_ai.agent.version` | Its version. Default: the active span's, else `register({ agentVersion })` |
 | `errorType` | `string` | `error.type` | Set when the evaluator failed |
 | `judgeTraceId` | `string` | `opensearch.gen_ai.evaluation.judge.trace_id` | The judge's own trace |
-| `attributes` | `Record<string, unknown>` | | Extra string, number, or boolean attributes. SDK keys (`gen_ai.evaluation.*`, `opensearch.gen_ai.evaluation.*`, `error.type`, `gen_ai.response.id`, `gen_ai.conversation.id`, `gen_ai.agent.*`) are dropped with a warning; the options win |
+| `evaluatorDescription` | `string` | `opensearch.gen_ai.evaluation.evaluator.description` | What the evaluator checks (criteria or rubric summary). Truncated to 1024 characters |
+| `judgeModel` | `string` | `gen_ai.request.model` | Model used by the LLM judge |
+| `judgePromptName` | `string` | `gen_ai.prompt.name` | Name of the judge prompt template |
+| `judgePromptVersion` | `string` | `gen_ai.prompt.version` | Version of the judge prompt |
+| `attributes` | `Record<string, unknown>` | | Extra string, number, or boolean attributes. SDK keys (`gen_ai.evaluation.*`, `opensearch.gen_ai.evaluation.*`, `error.type`, `gen_ai.response.id`, `gen_ai.conversation.id`, `gen_ai.agent.*`, `gen_ai.system_instructions`) are dropped, with one warning per key per process; the options win. The judge keys `gen_ai.request.model` and `gen_ai.prompt.*` pass through; `judgeModel` / `judgePrompt*` win over them |
 
 `opensearch.gen_ai.evaluation.*` attributes are OpenSearch extensions for fields that are still proposals in the GenAI semantic conventions. They will move to `gen_ai.*` names when those proposals merge.
 
@@ -503,6 +567,27 @@ const result = evaluate({
 console.log(result.summary); // { totalCases: 2, passCount: 2, errorCount: 0, scores: { accuracy: { avg: 1.0 } } }
 ```
 
+**Async agents and judges.** `task` and the scorers may be async. Once a task or scorer call returns a Promise (an async function, an `observe()`-wrapped one, or any function returning a thenable), `evaluate()` awaits it and returns a `Promise<BenchmarkResult>`; when all calls return plain values it returns the result directly, as above. `await evaluate(...)` works either way. Cases still run one at a time, and the scorers of a case run in order after its task.
+
+```typescript
+const judge = defineScorer(
+  { name: "answer_quality", threshold: 4, scoreMin: 1, scoreMax: 5, evaluatorType: "llm_judge" },
+  async (input, output): Promise<EvalScore> => {
+    const { score, reason } = await callJudgeModel(input, output); // its own trace, not stamped
+    return { name: "answer_quality", value: score, explanation: reason };
+  },
+);
+
+const result = await evaluate({
+  name: "rag-agent",
+  task: async (input) => myAsyncAgent(String(input)), // e.g. withObserve(..., { op: Op.INVOKE_AGENT }, async () => ...)
+  data: [{ input: "What is Python?", expected: "programming language" }],
+  scores: [accuracy, judge], // sync and async mixed
+});
+```
+
+A task or judge that rejects is handled like one that throws (below). The return type follows the types of `task` and `scores`: `BenchmarkResult` when all are typed synchronous, else `BenchmarkResult | Promise<BenchmarkResult>` (also for an async task, since with no data or a task that throws before it awaits there is nothing to await); `await` it, or type synchronous scorers as `SyncScorerFn`. Invalid options (an empty `runId`) throw synchronously.
+
 Produces:
 ```
 trace (one per case)                        the agent run, unchanged
@@ -512,15 +597,15 @@ trace (one per case)                        the agent run, unchanged
 
 Each `gen_ai.evaluation.result` carries `test.suite.name`, `test.suite.run.id`, `test.case.id`, `test.case.name`, `gen_ai.agent.name` / `gen_ai.agent.version` when known, `opensearch.test.case.expected` when the case has an `expected`, and the run `metadata` (reserved keys are dropped; the score's own `metadata` and the SDK attributes win). Pass/fail/error counts are not sent: readers derive them from the results of a run. The summary `evaluate()` returns is computed locally.
 
-**Expected output.** When a case has `expected`, every result of the case (including error results) carries it as `opensearch.test.case.expected`: strings as is, other values `JSON.stringify`'d. It is truncated to 4096 characters; a truncated value also sets `opensearch.test.case.expected_truncated = true`. It is not put on the agent spans. Online `score()` never sets it; pass it in `attributes` if you want it there. It is exported by default; if your test sets hold sensitive data, pass `recordExpected: false` to `evaluate()` or `new Benchmark()`, and neither attribute is written.
+**Expected output.** When a case has `expected`, every result of the case (including error results) carries it as `opensearch.test.case.expected`: strings as is, other values `JSON.stringify`'d. It is truncated to 8192 characters (it is copied onto every result, so it grows each OTLP request; see [Expected output](docs/agent-evaluations.md#expected-output) for tuning the log batch size); a truncated value also sets `opensearch.test.case.expected_truncated = true`. It is not put on the agent spans. Online `score()` never sets it; pass it in `attributes` if you want it there. It is exported by default; if your test sets hold sensitive data, pass `recordExpected: false` to `evaluate()` or `new Benchmark()`, and neither attribute is written.
 
 `test.suite.run.id` and `test.case.id` are proposed OTel attributes ([semantic-conventions#1262](https://github.com/open-telemetry/semantic-conventions/issues/1262), [semantic-conventions-genai#79](https://github.com/open-telemetry/semantic-conventions-genai/issues/79)); the other `test.*` names are OTel's.
 
-**CI/CD.** Inside CI, every evaluation result and the agent root spans also carry the OTel `cicd.pipeline.name`, `cicd.pipeline.run.id` and `cicd.pipeline.run.url.full`, read from GitHub Actions (`GITHUB_WORKFLOW`, `GITHUB_RUN_ID`, run URL), GitLab CI (`CI_PIPELINE_NAME`, `CI_PIPELINE_ID`, `CI_PIPELINE_URL`) or Jenkins (`JOB_NAME`, `BUILD_ID`, `BUILD_URL`). Pass `ciPipeline: { "cicd.pipeline.run.id": ... }` to `evaluate()` / `new Benchmark()` to set or override them. Outside CI nothing is added.
+**CI/CD.** Inside CI, every evaluation result (and, with `evaluate()`, the agent root spans it starts; `Benchmark` stamps results only) carries the OTel `cicd.pipeline.name`, `cicd.pipeline.run.id` and `cicd.pipeline.run.url.full`, read from GitHub Actions (`GITHUB_WORKFLOW`, `GITHUB_RUN_ID`, run URL), GitLab CI (`CI_PIPELINE_NAME`, `CI_PIPELINE_ID`, `CI_PIPELINE_URL`) or Jenkins (`JOB_NAME`, `BUILD_ID`, `BUILD_URL`). Pass `ciPipeline: { "cicd.pipeline.run.id": ... }` to `evaluate()` / `new Benchmark()` to set or override them. Outside CI nothing is added.
 
-A case whose task throws is not scored: each declared scorer emits one error result instead, named after the scorer (its `defineScorer()` `name`, else the function name), with `error.type` set to the exception class name, no score value and no label (the exception message is not sent). The run continues. When the task creates no span, the results have no trace context. All events go to the OTLP logs endpoint; Data Prepper routes them to `otel-v1-genai-evaluation-*`, distinguished by `eventName`.
+A case whose task throws (or rejects) is not scored: each declared scorer emits one error result instead, named after the scorer (its `defineScorer()` `name`, else the function name), with `error.type` set to the exception class name, no score value and no label (the exception message is not sent). The run continues. When the task creates no span, the results have no trace context. All events go to the OTLP logs endpoint; Data Prepper routes them to `otel-v1-genai-evaluation-*`, distinguished by `eventName`.
 
-**How root spans are found.** The TypeScript SDK installs no context manager, so `evaluate()` cannot rely on the active OTel context. Cases run one at a time and `task` is synchronous, so the SDK keeps a module-level "current case" while each task runs. `TestCaseSpanProcessor` reads it in `onStart`: every span started during the case without a parent from the same case (no parent, or a remote parent) is stamped with the `test.*` ids, and the first one becomes the trace context for that case's events. Spans started by scorers (LLM judges) are outside the case and are not stamped. `register()` adds the processor to its provider, and `evaluate()` adds it to a global OTel JS 1.x `BasicTracerProvider` if missing. With a provider that only takes processors at construction (OTel JS 2.x), add it yourself:
+**How root spans are found.** `evaluate()` runs each task in an OTel context that carries the current case, so with a context manager (`register()` installs `AsyncLocalStorageContextManager` on Node) the case follows the task across `await`, and overlapping `evaluate()` runs stay apart. A span started in a context without a case (an in-process HTTP handler under `propagation.extract(ROOT_CONTEXT, headers)`, `context.with(ROOT_CONTEXT, ...)`, a stream or queue callback bound before the case) is attached to the case only while exactly one case runs and only when it has no local parent (no parent, or a remote one): then it is stamped and can be the case root. With overlapping runs the SDK does not guess, so start the agent inside the task's context. A background span with no parent that starts while a lone case runs (a timer) is stamped too, but a root started in the task's context wins the case trace, and children of a local span (a poller under its own span) are never stamped. When no context manager is set (for example with `setGlobal: false` and your own setup), `evaluate()` installs `AsyncLocalStorageContextManager` on Node; where none can be installed, every span is parentless, so the same rule stamps a lone run and stamps nothing for overlapping runs. `TestCaseSpanProcessor` reads the case in `onStart`: every span of the case without a parent from the same case (no parent, or a remote parent) is stamped with the `test.*` ids, and the first one becomes the trace context for that case's events. Spans started by scorers (LLM judges) are outside the case and are not stamped. `register()` adds the processor to its provider, and `evaluate()` adds it to a global OTel JS 1.x `BasicTracerProvider` if missing. With a provider that only takes processors at construction (OTel JS 2.x), add it yourself:
 
 ```typescript
 import { TestCaseSpanProcessor } from "@opensearch-project/genai-observability-sdk-ts";
@@ -535,17 +620,23 @@ const provider = new BasicTracerProvider({
 | Parameter | Type | Description |
 |---|---|---|
 | `name` | `string` | Benchmark name (`test.suite.name`). Stable across runs |
-| `task` | `(input: unknown) => unknown` | Synchronous function that takes input and returns output |
+| `task` | `(input: unknown) => unknown` | Function that takes input and returns output, or a Promise of it (then `evaluate()` returns a Promise) |
 | `data` | `Array<{ input, expected?, caseId?, caseName? }>` | Test cases |
-| `scores` | `Array<ScorerFn \| Scorer>` | Scorer functions: `(input, output, expected)` returning, synchronously, `EvalScore`, `EvalScore[]`, a finite `number`, or `boolean`. Anything else logs a warning and emits an error result. Optionally wrapped with `defineScorer()` |
-| `metadata` | `Record<string, unknown>` | Copied to every `gen_ai.evaluation.result` of the run. Reserved keys are filtered |
+| `scores` | `Array<ScorerFn \| Scorer>` | Scorer functions: `(input, output, expected)` returning, or resolving to, `EvalScore`, `EvalScore[]`, a finite `number`, or `boolean`. Anything else logs a warning and emits an error result. Sync and async scorers can be mixed. Optionally wrapped with `defineScorer()` |
+| `metadata` | `Record<string, unknown>` | Copied to every `gen_ai.evaluation.result` of the run. Reserved keys are filtered, with one warning per key per process. The judge keys `gen_ai.request.model` and `gen_ai.prompt.*` are allowed; `defineScorer()` judge fields win over them |
+| `runName` | `string` | `opensearch.test.suite.run.name` on every result: a readable run name, for example `"v5 with shorter prompt"`. Also a `new Benchmark()` option |
+| `runDescription` | `string` | `opensearch.test.suite.run.description` on every result (cut at 1024 characters). Also a `new Benchmark()` option |
 | `runId` | `string` | `test.suite.run.id` (default: generated). Use the same id from every CI shard so they report into one run, or an existing run's id to re-score it (send new results with the same run id). Empty or whitespace-only throws |
 | `ciPipeline` | `Record<string, string>` | Set or override `cicd.pipeline.name` / `.run.id` / `.run.url.full` (read from the CI environment by default; nothing outside CI) |
 | `recordExpected` | `boolean` | Export each case's `expected` as `opensearch.test.case.expected` (default `true`). Pass `false` if test sets hold sensitive data. Also a `new Benchmark()` option |
 
 Each `TestCaseResult` has `status` (`pass`, or `fail` when the case errored or failed a verdict), `resultStatus` (`pass` | `fail` | `error`), `errorType`, `durationMs`, `verdicts` (evaluation name to verdict), and the `traceId` / `spanId` of the agent root span when the task created one.
 
-**Declaring rules.** Wrap a scorer with `defineScorer(spec, fn)` to declare its evaluation name and pass rule up front. A scorer may also return a `boolean` (a verdict) or an `EvalScore` with `label` (`"pass"` / `"fail"`), `passed`, `threshold`, `direction`, `scoreMin`, `scoreMax`, `judgeTraceId` (the LLM judge's own trace, sent as `opensearch.gen_ai.evaluation.judge.trace_id`); fields set on the `EvalScore` win over the declaration.
+**Declaring rules.** Wrap a scorer with `defineScorer(spec, fn)` to declare its evaluation name and pass rule up front. A scorer may also return a `boolean` (a verdict) or an `EvalScore` with `label` (`"pass"` / `"fail"`), `passed`, `threshold`, `direction`, `scoreMin`, `scoreMax`, `judgeTraceId` (the LLM judge's own trace, sent as `opensearch.gen_ai.evaluation.judge.trace_id`); fields set on the `EvalScore` win over the declaration, and the declaration is not applied to another evaluator's results (an `EvalScore` whose `evaluator` differs from a declared `evaluator`); a scorer that declares no `evaluator` applies it to every result. `defineScorer()` and `EvalScore` also take the judge context of `score()`: `evaluatorDescription`, `judgeModel`, `judgePromptName` and `judgePromptVersion`.
+
+**Judge prompt.** Results identify the judge prompt by `gen_ai.prompt.name` + `gen_ai.prompt.version` (`name@version`) and link the judge's run by `judgeTraceId`. The full prompt text is never put on a result event: it belongs on the judge's own LLM span as `gen_ai.system_instructions`, recorded by the judge's instrumentation or by `enrich({ systemInstructions })` inside a `withObserve()` / `observe()` judge call. See [Judge prompt](docs/agent-evaluations.md#judge-prompt).
+
+**Case identity.** Across runs a case is `test.suite.name` + `test.case.id`; within a run, `test.suite.run.id` + `test.case.id`. The default case id is the first 16 hex characters of the SHA-256 of the JSON-encoded input, so editing the input makes a new case: pass `caseId` for a stable identity. The full suite, run, case and evaluator tree is in [Data model](docs/agent-evaluations.md#data-model).
 
 ```typescript
 import { defineScorer } from "@opensearch-project/genai-observability-sdk-ts";
@@ -563,13 +654,13 @@ const tools = defineScorer({ name: "tool_selection" }, () => ({
 }));
 ```
 
-`ScorerSpec` fields: `name` (evaluation name of number/boolean results and of the error grade; default the function name), `threshold`, `direction` (default `maximize` with a threshold), `scoreMin` / `scoreMax`, `evaluator` (`opensearch.gen_ai.evaluation.evaluator.name`), `evaluatorType`. A scorer that throws, or returns something other than a finite number, a boolean, an `EvalScore` or an `EvalScore[]` (for example `undefined`, `NaN` or a Promise, with a warning), emits a grade with `error.type` and no value, label or explanation under the declared `name` (else the function name), so it lands on the same evaluation as its successful results. The exception message stays in the local `scorerErrors`.
+`ScorerSpec` fields: `name` (evaluation name of number/boolean results and of the error grade; default the function name), `threshold`, `direction` (default `maximize` with a threshold), `scoreMin` / `scoreMax`, `evaluator` (`opensearch.gen_ai.evaluation.evaluator.name`), `evaluatorType`. A scorer that throws or rejects, or returns (or resolves to) something other than a finite number, a boolean, an `EvalScore` or an `EvalScore[]` (for example `undefined` or `NaN`, with a warning), emits a grade with `error.type` and no value, label or explanation under the declared `name` (else the function name), so it lands on the same evaluation as its successful results. The exception message stays in the local `scorerErrors`.
 
-**Case status** (local `resultStatus`, not sent): `error` if the task threw or any result errored; else `fail` if any score of the case has a `fail` verdict (a `pass` / `fail` `label`, `passed`, or `threshold` + `direction`); else `pass`. Scores with no declared rule never fail a case. The summary keeps `passCount`, `failCount` and `errorCount`.
+**Case status** (local `resultStatus`, not sent): `error` if the task threw or rejected, or any result errored; else `fail` if any score of the case has a `fail` verdict (a `pass` / `fail` `label`, `passed`, or `threshold` + `direction`); else `pass`. Scores with no declared rule never fail a case. The summary keeps `passCount`, `failCount` and `errorCount`.
 
 ### `Benchmark`
 
-Upload pre-computed evaluation results from any framework. Each `log()` emits one `gen_ai.evaluation.result` event per score, parented to the evaluated agent span when `traceId` and `spanId` are given. With only `traceId`, scores are trace-level; with neither, the events have no trace context. Each result carries the `test.*` ids, the agent, `cicd.pipeline.*` in CI, and the run `metadata` plus the case `metadata` passed to `log()` (reserved keys are dropped; the score's own `metadata` and the SDK attributes win). `scores` is `{ name: value }` or an `EvalScore[]` (to declare `label` / `threshold` / bounds / `judgeTraceId`). `expected` is sent on every result of the case as `opensearch.test.case.expected` (see [Expected output](#evaluate)).
+Upload pre-computed evaluation results from any framework. Each `log()` emits one `gen_ai.evaluation.result` event per score, parented to the evaluated agent span when `traceId` and `spanId` are given. With only `traceId`, scores are trace-level; with neither, the events have no trace context. Each result carries the `test.*` ids, the agent, `cicd.pipeline.*` in CI, and the run `metadata` plus the case `metadata` passed to `log()` (reserved keys are dropped; the score's own `metadata` and the SDK attributes win). `scores` is `{ name: value }` or an `EvalScore[]` (to declare `label` / `threshold` / bounds / `judgeTraceId`, the `evaluator` / `evaluatorType`, and the judge context: `evaluatorDescription`, `judgeModel`, `judgePromptName`, `judgePromptVersion`). `log({ evaluator, evaluatorType })` sets the default evaluator (`opensearch.gen_ai.evaluation.evaluator.name` / `.type`) for every score of the call; an `EvalScore` that sets its own wins. Scores are checked like the scores a scorer returns in `evaluate()` (`null` fields count as unset): an invalid score, `evaluator` or `evaluatorType` throws a `TypeError` and nothing of the call is emitted. With `errorType` (an errored case, for example a metric that timed out) the values are not sent, so `value`, `label` and `passed` are not checked: `log({ errorType: "TimeoutError", scores: { faithfulness: NaN } })` logs the error result. `Benchmark` stamps `test.*` and `cicd.pipeline.*` on the results only, not on agent spans. `expected` is sent on every result of the case as `opensearch.test.case.expected` (see [Expected output](#evaluate)).
 
 `error`, `errorType` and `status` set the local result: `error` or `errorType` marks the case `error`; otherwise a `fail` verdict marks it `fail`; `status` sets `pass`, `fail` or `error` explicitly. With `errorType`, every score in `scores` is emitted as an evaluator error result: `error.type` = `errorType`, no score value and no label. `close()` returns the local summary and sends nothing. No spans are created.
 
@@ -632,7 +723,7 @@ const retriever = new OpenSearchTraceRetriever({
   verifyCerts: false,
 });
 
-// Retrieve all spans for a session or trace
+// Retrieve all spans of a conversation's traces (or of one trace, by trace ID)
 const session = await retriever.getTraces("my-conversation-id");
 for (const trace of session.traces) {
   for (const span of trace.spans) {
@@ -640,17 +731,24 @@ for (const trace of session.traces) {
   }
 }
 
-// List recent root spans
+// List the agent roots of recent traces (for discovering traces to evaluate)
 const roots = await retriever.listRootSpans({
   services: ["my-agent"],
   maxResults: 10,
 });
+for (const root of roots) console.log(root.traceId, root.agentName, root.agentVersion);
 
 // Check which traces already have evaluation results
 const evaluated = await retriever.findEvaluatedTraceIds(["trace-id-1", "trace-id-2"]);
+// ... only results of one evaluator (and/or one evaluation name)
+const mine = await retriever.findEvaluatedTraceIds(["trace-id-1"], { evaluator: "answer_quality_judge" });
 ```
 
-`findEvaluatedTraceIds()` returns the trace ids that already have a `gen_ai.evaluation.result` event in the evaluation index. A missing evaluation index (nothing sent yet) returns an empty set; any other error (auth, connection, mapping) is thrown, so a failed lookup never looks like "nothing evaluated" and never makes you re-run judges and write duplicate results.
+- `getTraces(identifier, maxSpans = 1000, { maxTraces = 1000 })`: by conversation ID, every span of each trace in the conversation (the traces whose spans carry `gen_ai.conversation.id`, earliest first); otherwise by trace ID, every span of that trace. `truncated` is `true` when a limit was reached.
+- `listRootSpans({ services, since, maxResults })`: the agent roots of recent traces, newest first, one per trace (up to `maxResults` traces). A root is the span marked `derived.gen_ai.is_root` (for example the agent span below an HTTP server span), or a trace root (no parent) whose `gen_ai.operation.name` is `invoke_agent` or `create_agent`; a judge's own parentless `chat` span is not listed. A trace with no parentless agent root is listed by its earliest marked span. When nothing matches, the rule is logged once (`console.info`). Indices where the marker is not mapped yet are fine.
+- Each `SpanRecord` carries `agentName` and `agentVersion` (`gen_ai.agent.name`, `gen_ai.agent.version`). Pass both to `score()` when you post a result for a retrieved trace, or the result is grouped under "(no version)" on the agent page.
+
+`findEvaluatedTraceIds()` returns the trace ids that already have a `gen_ai.evaluation.result` event in the evaluation index. Without a filter, a result from any evaluator counts; `{ evaluator }` / `{ evaluationName }` count only that evaluator's (`opensearch.gen_ai.evaluation.evaluator.name`) or that evaluation's (`gen_ai.evaluation.name`) results. A missing evaluation index (nothing sent yet) returns an empty set; any other error (auth, connection, mapping) is thrown, so a failed lookup never looks like "nothing evaluated" and never makes you re-run judges and write duplicate results.
 
 **Constructor:**
 
@@ -712,7 +810,7 @@ See the [`examples/`](examples/) directory:
 | [`02_scoring.ts`](examples/02_scoring.ts) | Span-level, trace-level, and standalone scoring |
 | [`03_aws_sigv4.ts`](examples/03_aws_sigv4.ts) | AWS SigV4 authentication with `AWSSigV4OTLPExporter` |
 | [`04_async_tracing.ts`](examples/04_async_tracing.ts) | Async function and generator tracing |
-| [`05_openai_auto_instrument.ts`](examples/05_openai_auto_instrument.ts) | OpenAI auto-instrumentation via `register()` |
+| [`05_openai_auto_instrument.ts`](examples/05_openai_auto_instrument.ts) | OpenAI auto-instrumentation via `register()`, with the ESM load order |
 | [`06_retrieval_and_eval.ts`](examples/06_retrieval_and_eval.ts) | Retrieve traces from OpenSearch, evaluate, write scores back |
 | [`07_benchmarks.ts`](examples/07_benchmarks.ts) | `evaluate()` with scorers, `Benchmark` with manual logging |
 

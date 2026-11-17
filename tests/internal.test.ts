@@ -1,8 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright OpenSearch Contributors
 
-import { describe, it, expect, vi } from 'vitest';
-import { parseHex, validateMetadataKeys, RESERVED_KEYS, expectedAttributes } from '../src/internal.js';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
+import {
+  parseHex,
+  validateMetadataKeys,
+  RESERVED_KEYS,
+  expectedAttributes,
+  resetWarnedKeys,
+  truncateChars,
+} from '../src/internal.js';
 
 describe('RESERVED_KEYS', () => {
   it('contains expected keys', () => {
@@ -55,6 +62,18 @@ describe('parseHex', () => {
 });
 
 describe('validateMetadataKeys', () => {
+  beforeEach(() => resetWarnedKeys());
+
+  it('warns once per key per process', () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    validateMetadataKeys({ 'test.suite.name': 'a' }, 'case:1');
+    validateMetadataKeys({ 'test.suite.name': 'b' }, 'case:2');
+    validateMetadataKeys({ 'test.case.id': 'c', 'test.suite.name': 'd' }, 'case:3');
+    expect(warnSpy).toHaveBeenCalledTimes(2);
+    expect(warnSpy.mock.calls[1][0]).toContain('test.case.id');
+    warnSpy.mockRestore();
+  });
+
   it('warns for reserved keys', () => {
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     validateMetadataKeys({ 'test.suite.name': 'foo' });
@@ -99,8 +118,8 @@ describe('validateMetadataKeys', () => {
 
 describe('expectedAttributes', () => {
   it('counts characters, not UTF-16 units, when truncating', () => {
-    const out = expectedAttributes('😀'.repeat(4097));
-    expect(Array.from(out['opensearch.test.case.expected'] as string)).toHaveLength(4096);
+    const out = expectedAttributes('😀'.repeat(8193));
+    expect(Array.from(out['opensearch.test.case.expected'] as string)).toHaveLength(8192);
     expect(out['opensearch.test.case.expected_truncated']).toBe(true);
   });
 
@@ -114,5 +133,18 @@ describe('expectedAttributes', () => {
   it('is empty for undefined and null', () => {
     expect(expectedAttributes(undefined)).toEqual({});
     expect(expectedAttributes(null)).toEqual({});
+  });
+});
+
+describe('truncateChars', () => {
+  it('keeps text within the limit', () => {
+    expect(truncateChars('abc', 3)).toEqual({ text: 'abc', truncated: false });
+    // 3 code points in 6 UTF-16 units.
+    expect(truncateChars('😀😀😀', 3)).toEqual({ text: '😀😀😀', truncated: false });
+  });
+
+  it('cuts by code points, never splitting a surrogate pair', () => {
+    expect(truncateChars('abcd', 2)).toEqual({ text: 'ab', truncated: true });
+    expect(truncateChars('😀😀😀', 2)).toEqual({ text: '😀😀', truncated: true });
   });
 });

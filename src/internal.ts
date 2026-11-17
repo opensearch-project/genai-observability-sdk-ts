@@ -1,6 +1,32 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright OpenSearch Contributors
 
+import { context, createContextKey, ROOT_CONTEXT } from "@opentelemetry/api";
+import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks";
+
+const CONTEXT_PROBE = createContextKey("opensearch-genai-observability-sdk.contextProbe");
+
+/** @internal Whether a global context manager is installed: the no-op one never makes a context active. */
+export function hasContextManager(): boolean {
+  const probe = ROOT_CONTEXT.setValue(CONTEXT_PROBE, true);
+  return context.with(probe, () => context.active().getValue(CONTEXT_PROBE) === true);
+}
+
+/**
+ * @internal On Node, install `AsyncLocalStorageContextManager` as the global context manager when
+ * none is set, so the active span and the running test case follow `await`. A context manager you
+ * installed is kept. Elsewhere (no Node `process`), nothing is installed.
+ */
+export function ensureContextManager(): void {
+  if (typeof process === "undefined" || !process.versions?.node) return;
+  if (hasContextManager()) return;
+  try {
+    context.setGlobalContextManager(new AsyncLocalStorageContextManager().enable());
+  } catch {
+    // async_hooks unavailable: spans still export, without async context.
+  }
+}
+
 export const RESERVED_KEYS: ReadonlySet<string> = new Set([
   "test.suite.name",
   "test.suite.run.id",
@@ -12,6 +38,8 @@ export const RESERVED_KEYS: ReadonlySet<string> = new Set([
   "test.case.expected",
   "opensearch.test.case.expected",
   "opensearch.test.case.expected_truncated",
+  "opensearch.test.suite.run.name",
+  "opensearch.test.suite.run.description",
   "error.type",
   "gen_ai.operation.name",
   "cicd.pipeline.name",
@@ -19,12 +47,50 @@ export const RESERVED_KEYS: ReadonlySet<string> = new Set([
   "cicd.pipeline.run.url.full",
 ]);
 
+/**
+ * @internal `text` cut to at most `limit` characters, counted as code points (not UTF-16 units,
+ * so a surrogate pair is never split), and whether it was cut.
+ */
+export function truncateChars(text: string, limit: number): { text: string; truncated: boolean } {
+  // Fast path: at most `limit` UTF-16 units is at most `limit` code points.
+  if (text.length <= limit) return { text, truncated: false };
+  const chars = Array.from(text);
+  if (chars.length <= limit) return { text, truncated: false };
+  return { text: chars.slice(0, limit).join(""), truncated: true };
+}
+
+/** Human-readable name of an offline run. */
+export const TEST_SUITE_RUN_NAME_KEY = "opensearch.test.suite.run.name";
+/** Free-text description of an offline run (truncated to 1024 characters). */
+export const TEST_SUITE_RUN_DESCRIPTION_KEY = "opensearch.test.suite.run.description";
+/** Maximum length of `opensearch.test.suite.run.description`, in characters. */
+export const RUN_DESCRIPTION_LIMIT = 1024;
+
+/**
+ * @internal `opensearch.test.suite.run.name` / `.description` of a run (only
+ * those given; the description is truncated to 1024 characters). Throws when
+ * either is not a string.
+ */
+export function runAttributes(runName?: string, runDescription?: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [key, value] of [["runName", runName], ["runDescription", runDescription]] as const) {
+    if (value !== undefined && typeof value !== "string") {
+      throw new Error(`${key} must be a string; got ${typeof value}`);
+    }
+  }
+  if (runName && runName.trim() !== "") out[TEST_SUITE_RUN_NAME_KEY] = runName;
+  if (runDescription && runDescription.trim() !== "") {
+    out[TEST_SUITE_RUN_DESCRIPTION_KEY] = truncateChars(runDescription, RUN_DESCRIPTION_LIMIT).text;
+  }
+  return out;
+}
+
 /** Expected output of an offline test case, on each of its evaluation results. */
 export const TEST_CASE_EXPECTED_KEY = "opensearch.test.case.expected";
 /** `true` when `opensearch.test.case.expected` was truncated. */
 export const TEST_CASE_EXPECTED_TRUNCATED_KEY = "opensearch.test.case.expected_truncated";
 /** Maximum length of `opensearch.test.case.expected`, in characters. */
-export const EXPECTED_LIMIT = 4096;
+export const EXPECTED_LIMIT = 8192;
 
 /**
  * @internal `opensearch.test.case.expected` (and `_truncated` when cut) for a
@@ -43,13 +109,9 @@ export function expectedAttributes(expected: unknown): Record<string, string | b
       text = String(expected);
     }
   }
-  // Count characters (code points), not UTF-16 units.
-  const chars = Array.from(text);
-  if (chars.length <= EXPECTED_LIMIT) return { [TEST_CASE_EXPECTED_KEY]: text };
-  return {
-    [TEST_CASE_EXPECTED_KEY]: chars.slice(0, EXPECTED_LIMIT).join(""),
-    [TEST_CASE_EXPECTED_TRUNCATED_KEY]: true,
-  };
+  const cut = truncateChars(text, EXPECTED_LIMIT);
+  if (!cut.truncated) return { [TEST_CASE_EXPECTED_KEY]: text };
+  return { [TEST_CASE_EXPECTED_KEY]: cut.text, [TEST_CASE_EXPECTED_TRUNCATED_KEY]: true };
 }
 
 export function parseHex(value: string): number | null {
@@ -63,14 +125,28 @@ export function validateMetadataKeys(
   metadata: Record<string, unknown>,
   context?: string,
 ): void {
-  for (const key of Object.keys(metadata)) {
-    if (RESERVED_KEYS.has(key)) {
-      const prefix = context ? `[${context}] ` : "";
-      console.warn(
-        `${prefix}Key "${key}" is reserved and may be overwritten by the SDK.`,
-      );
-    }
+  const prefix = context ? `[${context}] ` : "";
+  for (const key of firstWarnings("reserved", Object.keys(metadata).filter((k) => RESERVED_KEYS.has(k)))) {
+    console.warn(`${prefix}Key "${key}" is reserved and may be overwritten by the SDK (logged once per key).`);
   }
+}
+
+/** `<warning>:<key>` already logged: each warning is logged once per key per process. */
+const warnedKeys = new Set<string>();
+
+/**
+ * @internal The keys of `keys` not warned about yet with `warning` (for example "reserved"),
+ * now marked as warned. Each warning has its own set, so one does not silence another.
+ */
+export function firstWarnings(warning: string, keys: string[]): string[] {
+  const fresh = keys.filter((k) => !warnedKeys.has(`${warning}:${k}`));
+  for (const k of fresh) warnedKeys.add(`${warning}:${k}`);
+  return fresh;
+}
+
+/** @internal For tests: warn about every key again. */
+export function resetWarnedKeys(): void {
+  warnedKeys.clear();
 }
 
 /** Normalize a hex trace id (optional 0x prefix, left-padded). Returns null if invalid. */
@@ -108,11 +184,20 @@ export function agentDefaults(): [string | undefined, string | undefined] {
 }
 
 /**
+ * @internal The attributes an SDK span exposes (its `attributes` field), or undefined for a span
+ * that does not expose them (for example a non-recording span).
+ */
+export function spanAttributes(span: unknown): Record<string, unknown> | undefined {
+  const attrs = (span as { attributes?: unknown } | null | undefined)?.attributes;
+  return typeof attrs === "object" && attrs !== null ? (attrs as Record<string, unknown>) : undefined;
+}
+
+/**
  * @internal `[gen_ai.agent.name, gen_ai.agent.version]` read from an SDK span (best
  * effort: only spans that expose their attributes are read).
  */
 export function spanAgent(span: unknown): [string | undefined, string | undefined] {
-  const attrs = (span as { attributes?: Record<string, unknown> } | undefined)?.attributes;
+  const attrs = spanAttributes(span);
   if (!attrs) return [undefined, undefined];
   const name = attrs[AGENT_NAME_KEY];
   const version = attrs[AGENT_VERSION_KEY];

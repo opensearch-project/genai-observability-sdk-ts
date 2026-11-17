@@ -1,6 +1,6 @@
 {
   "name": "@opensearch-project/genai-observability-sdk-ts",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "description": "OpenSearch AI Observability SDK — OTEL-native tracing and scoring for LLM applications",
   "type": "module",
   "main": "./dist/index.cjs",
@@ -50,6 +50,7 @@
     "@grpc/grpc-js": "^1.14.4",
     "@opentelemetry/api": "^1.9.0",
     "@opentelemetry/api-logs": "^0.223.0",
+    "@opentelemetry/context-async-hooks": "^2.6.1",
     "@opentelemetry/exporter-logs-otlp-grpc": "^0.223.0",
     "@opentelemetry/exporter-logs-otlp-proto": "^0.223.0",
     "@opentelemetry/exporter-trace-otlp-grpc": "^0.57.0",
@@ -63,12 +64,29 @@
     "@opensearch-project/opensearch": "^2.12.0",
     "aws4": "^1.13.0"
   },
+  "peerDependencies": {
+    "@opentelemetry/instrumentation-aws-sdk": ">=0.50.0 <0.79.0",
+    "@opentelemetry/instrumentation-openai": ">=0.14.0 <0.22.0"
+  },
+  "peerDependenciesMeta": {
+    "@opentelemetry/instrumentation-aws-sdk": {
+      "optional": true
+    },
+    "@opentelemetry/instrumentation-openai": {
+      "optional": true
+    }
+  },
   "devDependencies": {
+    "@aws-sdk/client-bedrock-runtime": "^3.700.0",
     "@eslint/js": "^9.39.4",
-    "@opentelemetry/context-async-hooks": "^2.6.1",
+    "@opentelemetry/exporter-logs-otlp-http": "^0.223.0",
+    "@opentelemetry/instrumentation": "~0.223.0",
+    "@opentelemetry/instrumentation-aws-sdk": "~0.78.0",
+    "@opentelemetry/instrumentation-openai": "~0.21.0",
     "@types/aws4": "^1.11.6",
     "@types/node": "^20.17.0",
     "eslint": "^9.0.0",
+    "openai": "^6.0.0",
     "tsup": "^8.3.0",
     "typescript": "^5.7.0",
     "typescript-eslint": "^8.58.0",

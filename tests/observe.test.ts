@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright OpenSearch Contributors
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { SpanKind, SpanStatusCode } from '@opentelemetry/api';
-import { observe, withObserve, Op } from '../src/observe.js';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { SpanKind, SpanStatusCode, trace } from '@opentelemetry/api';
+import { observe, withObserve, Op, namedArguments, parseParams } from '../src/observe.js';
+import { enrich } from '../src/enrich.js';
 import { getFinishedSpans, clearSpans } from './setup.js';
 
 beforeEach(() => clearSpans());
@@ -276,6 +277,25 @@ describe('observe - nameFrom', () => {
     expect(spans[0].attributes['gen_ai.agent.name']).toBe('myDynamicAgent');
   });
 
+  it('reads a getter of a class instance first argument', () => {
+    class Req { get agentName() { return 'planner'; } }
+    const wrapped = observe({ name: 'fallback', nameFrom: 'agentName', op: Op.INVOKE_AGENT }, (_req: Req) => 1);
+    wrapped(new Req());
+    expect(getFinishedSpans()[0].name).toBe('invoke_agent planner');
+  });
+
+  it('ignores Object.prototype keys of an object first argument', () => {
+    const proto = Object.prototype as Record<string, unknown>;
+    proto.polluted = 'evil';
+    try {
+      const wrapped = observe({ name: 'fallback', nameFrom: 'polluted', op: Op.INVOKE_AGENT }, (_o: object) => 1);
+      wrapped({});
+      expect(getFinishedSpans()[0].name).toBe('invoke_agent fallback');
+    } finally {
+      delete proto.polluted;
+    }
+  });
+
   it('falls back to static name if nameFrom param not found', () => {
     function processAgent(agentName: string) { return agentName; }
     const wrapped = observe({ name: 'fallback', nameFrom: 'missing', op: Op.CHAT }, processAgent);
@@ -424,5 +444,238 @@ describe('withObserve', () => {
     const spans = getFinishedSpans();
     expect(spans).toHaveLength(1);
     expect(spans[0].kind).toBe(SpanKind.SERVER);
+  });
+});
+
+describe('observe - keeps output set inside the function', () => {
+  const text = (role: string, content: string) => [{ role, parts: [{ type: 'text', content }] }];
+
+  it('keeps gen_ai.output.messages set by enrich() (sync)', () => {
+    const agent = observe({ name: 'agent', op: Op.INVOKE_AGENT }, function agent(q: string) {
+      enrich({ outputMessages: text('assistant', `answer to ${q}`) });
+      return 'raw return value';
+    });
+    expect(agent('q1')).toBe('raw return value');
+    const out = String(getFinishedSpans()[0].attributes['gen_ai.output.messages']);
+    expect(JSON.parse(out)).toEqual(text('assistant', 'answer to q1'));
+  });
+
+  it('keeps gen_ai.output.messages set by enrich() (async)', async () => {
+    const agent = observe({ name: 'agent', op: Op.INVOKE_AGENT }, async (q: string) => {
+      await Promise.resolve();
+      enrich({ outputMessages: text('assistant', `async ${q}`) });
+      return 'raw';
+    });
+    await agent('q2');
+    const out = String(getFinishedSpans()[0].attributes['gen_ai.output.messages']);
+    expect(JSON.parse(out)).toEqual(text('assistant', 'async q2'));
+  });
+
+  it('records the return value when nothing was set', () => {
+    observe({ name: 'agent', op: Op.INVOKE_AGENT }, () => 'sunny, 22C')();
+    expect(getFinishedSpans()[0].attributes['gen_ai.output.messages']).toBe('"sunny, 22C"');
+  });
+
+  it('keeps a tool result set inside the tool', () => {
+    const tool = observe({ name: 't', op: Op.EXECUTE_TOOL }, function t(city: string) {
+      trace.getActiveSpan()!.setAttribute('gen_ai.tool.call.result', 'custom');
+      return { city };
+    });
+    tool('Paris');
+    expect(getFinishedSpans()[0].attributes['gen_ai.tool.call.result']).toBe('custom');
+  });
+
+  it('withObserve() keeps enrich() output and does not auto-record', () => {
+    withObserve('agent', { op: Op.INVOKE_AGENT }, () => {
+      enrich({ outputMessages: text('assistant', 'kept') });
+      return 'raw';
+    });
+    const out = String(getFinishedSpans()[0].attributes['gen_ai.output.messages']);
+    expect(JSON.parse(out)).toEqual(text('assistant', 'kept'));
+  });
+});
+
+// Sources exactly as tsx 4.23 (esbuild) compiles these TypeScript functions, captured with
+// `tsx probe.ts` printing String(fn). Rebuilt with `new Function` so the SDK sees that text.
+const TSX_COMPILED = {
+  oneParam: 'city=>({city,temp:22})', // (city: string) => ({ city, temp: 22 })
+  asyncOne: 'async city=>({city})', // async (city: string) => ({ city })
+  defaults: '(city="Paris",units={c:true})=>`${city}${units}`',
+  destructured: '({city,units},[first])=>city+units+first',
+  rest: '(first,...others)=>[first,...others]',
+  twoParams: '(a,b)=>a+b',
+};
+const compiled = (src: string) => new Function(`return (${src});`)() as (...a: unknown[]) => unknown;
+
+describe('argument names', () => {
+  it('one-parameter arrow without parentheses (tsx/esbuild output)', () => {
+    const fn = compiled(TSX_COMPILED.oneParam);
+    expect(String(fn)).toBe('city=>({city,temp:22})');
+    expect(namedArguments(fn, ['Paris'])).toEqual({ city: 'Paris' });
+  });
+
+  it('records {"city":"Paris"} as tool arguments for a tsx-compiled arrow tool', () => {
+    const tool = observe({ name: 'get_weather', op: Op.EXECUTE_TOOL }, compiled(TSX_COMPILED.oneParam));
+    tool('Paris');
+    expect(getFinishedSpans()[0].attributes['gen_ai.tool.call.arguments']).toBe('{"city":"Paris"}');
+  });
+
+  it('async arrow without parentheses', () => {
+    expect(namedArguments(compiled(TSX_COMPILED.asyncOne), ['Rome'])).toEqual({ city: 'Rome' });
+    expect(namedArguments(async (x: number) => x, [1])).toEqual({ x: 1 });
+  });
+
+  it('default parameters, including ones with parentheses and commas', () => {
+    expect(namedArguments(compiled(TSX_COMPILED.defaults), ['Oslo', 'f'])).toEqual({
+      city: 'Oslo',
+      units: 'f',
+    });
+    const fn = compiled('(a = Math.max(1, 2), b = ")", c = [1, 2]) => a');
+    expect(parseParams(fn)).toEqual([
+      { name: 'a', rest: false },
+      { name: 'b', rest: false },
+      { name: 'c', rest: false },
+    ]);
+  });
+
+  it('destructured parameters fall back to positional names', () => {
+    const fn = compiled(TSX_COMPILED.destructured);
+    expect(namedArguments(fn, [{ city: 'Lima', units: 'c' }, ['x']])).toEqual({
+      arg0: { city: 'Lima', units: 'c' },
+      arg1: ['x'],
+    });
+  });
+
+  it('rest parameter collects the remaining arguments', () => {
+    expect(namedArguments(compiled(TSX_COMPILED.rest), [1, 2, 3])).toEqual({ first: 1, others: [2, 3] });
+  });
+
+  it('plain parameter lists, function expressions and methods', () => {
+    expect(namedArguments(compiled(TSX_COMPILED.twoParams), [1, 2])).toEqual({ a: 1, b: 2 });
+    expect(namedArguments(function add(a: number, b: number) { return a + b; }, [1, 2])).toEqual({ a: 1, b: 2 });
+    const obj = { greet(name: string) { return name; } };
+    expect(namedArguments(obj.greet, ['Ann'])).toEqual({ name: 'Ann' });
+    expect(namedArguments(compiled('async function f(x, /* c, d */ y) { return (x); }'), [1, 2])).toEqual({ x: 1, y: 2 });
+  });
+
+  it('extra arguments get positional names', () => {
+    expect(namedArguments(compiled('(a) => a'), [1, 2])).toEqual({ a: 1, arg1: 2 });
+    expect(namedArguments(compiled('() => 1'), ['x'])).toEqual({ arg0: 'x' });
+  });
+
+  it('non-ASCII parameter names', () => {
+    expect(namedArguments(compiled('(café, naïve) => café'), [1, 2])).toEqual({ café: 1, naïve: 2 });
+    // A bare arrow: the parameter, not the call in the body.
+    expect(parseParams(compiled('é => fetch(url, opts)'))).toEqual([{ name: 'é', rest: false }]);
+    expect(namedArguments(compiled('async ünits => ünits'), ['c'])).toEqual({ ünits: 'c' });
+  });
+
+  it('unparseable sources (native, bound) fall back to positional names', () => {
+    expect(parseParams(Math.max)).toBeUndefined();
+    const bound = function f(a: number) { return a; }.bind(null);
+    expect(parseParams(bound)).toBeUndefined();
+    expect(namedArguments(bound, [5, 6])).toEqual({ arg0: 5, arg1: 6 });
+  });
+
+  it('never produces keys with brackets or braces', () => {
+    for (const src of Object.values(TSX_COMPILED)) {
+      const keys = Object.keys(namedArguments(compiled(src), [1, 2, 3]));
+      for (const k of keys) expect(k).toMatch(/^[A-Za-z_$][\w$]*$/);
+    }
+  });
+});
+
+describe('gen_ai.agent.name only for agent operations', () => {
+  for (const op of [Op.INVOKE_AGENT, Op.CREATE_AGENT]) {
+    it(`${op} names the agent`, () => {
+      withObserve('planner', { op }, () => 'ok');
+      expect(getFinishedSpans()[0].attributes['gen_ai.agent.name']).toBe('planner');
+    });
+  }
+
+  for (const op of [Op.CHAT, Op.RETRIEVAL, Op.EMBEDDINGS, Op.GENERATE_CONTENT, Op.TEXT_COMPLETION]) {
+    it(`${op} does not (withObserve and observe)`, () => {
+      withObserve('judge', { op }, () => 'ok');
+      observe({ name: 'judge2', op }, () => 'ok')();
+      for (const span of getFinishedSpans()) {
+        expect(span.attributes['gen_ai.operation.name']).toBe(op);
+        expect(span.attributes['gen_ai.agent.name']).toBeUndefined();
+      }
+    });
+  }
+
+  it('execute_tool names the tool, not an agent', () => {
+    withObserve('lookup', { op: Op.EXECUTE_TOOL }, () => 'ok');
+    const attrs = getFinishedSpans()[0].attributes;
+    expect(attrs['gen_ai.tool.name']).toBe('lookup');
+    expect(attrs['gen_ai.agent.name']).toBeUndefined();
+  });
+
+  it('no op sets no GenAI attributes, as in Python', () => {
+    withObserve('plain', () => 'ok');
+    observe(function plainFn() { return 'ok'; })();
+    for (const span of getFinishedSpans()) {
+      expect(span.attributes['gen_ai.agent.name']).toBeUndefined();
+      expect(span.attributes['gen_ai.operation.name']).toBeUndefined();
+    }
+  });
+
+  it('keeps an agent name set explicitly on a chat span', () => {
+    withObserve('judge', { op: Op.CHAT }, (span) => {
+      span.setAttribute('gen_ai.agent.name', 'judge_agent');
+    });
+    expect(getFinishedSpans()[0].attributes['gen_ai.agent.name']).toBe('judge_agent');
+  });
+});
+
+describe('argument keys (review follow-ups)', () => {
+  it('a parameter named like an Object.prototype member keeps its name', () => {
+    for (const name of ['constructor', 'toString', 'valueOf', 'hasOwnProperty']) {
+      expect(namedArguments(compiled(`function f(${name}) { return 1; }`), [1])).toEqual({ [name]: 1 });
+    }
+  });
+
+  it('a positional key never overwrites a declared parameter', () => {
+    const fn = compiled('function f(arg1, { x }) { return x; }');
+    expect(namedArguments(fn, [1, { x: 2 }])).toEqual({ arg1: 1, _arg1: { x: 2 } });
+  });
+});
+
+describe('observe - nameFrom uses the parsed parameters', () => {
+  it('one-parameter arrow without parentheses', () => {
+    const wrapped = observe({ nameFrom: 'city', op: Op.INVOKE_AGENT }, compiled(TSX_COMPILED.oneParam));
+    wrapped('Paris');
+    const span = getFinishedSpans()[0];
+    expect(span.name).toBe('invoke_agent Paris');
+    expect(span.attributes['gen_ai.agent.name']).toBe('Paris');
+  });
+
+  it('default values with parentheses and commas', () => {
+    const wrapped = observe(
+      { nameFrom: 'name', op: Op.INVOKE_AGENT },
+      compiled('function (a = Math.max(1, 2), name) { return name; }'),
+    );
+    wrapped(1, 'planner');
+    expect(getFinishedSpans()[0].name).toBe('invoke_agent planner');
+  });
+
+  it('parses the source once per wrapped function, not per call', () => {
+    const fn = compiled('(agent, q) => q');
+    const spy = vi.spyOn(Function.prototype, 'toString');
+    try {
+      const wrapped = observe({ nameFrom: 'agent', op: Op.INVOKE_AGENT }, fn);
+      const after = spy.mock.calls.length;
+      wrapped('a', 1);
+      wrapped('b', 2);
+      wrapped('c', 3);
+      expect(spy.mock.calls.length).toBe(after);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(getFinishedSpans().map((s) => s.name)).toEqual([
+      'invoke_agent a',
+      'invoke_agent b',
+      'invoke_agent c',
+    ]);
   });
 });

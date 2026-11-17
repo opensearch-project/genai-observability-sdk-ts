@@ -12,6 +12,8 @@ import {
 } from '@opentelemetry/sdk-logs';
 import { createRequire } from 'module';
 import { OTLPLogExporter } from '@opentelemetry/exporter-logs-otlp-proto';
+import { OTLPLogExporter as GrpcLogExporter } from '@opentelemetry/exporter-logs-otlp-grpc';
+import { OTLPLogExporter as JsonLogExporter } from '@opentelemetry/exporter-logs-otlp-http';
 import { BasicTracerProvider, SimpleSpanProcessor } from '@opentelemetry/sdk-trace-base';
 import aws4 from 'aws4';
 import { createHash } from 'crypto';
@@ -260,7 +262,7 @@ describe('double-typed attributes over OTLP protobuf', () => {
     return provider;
   }
 
-  function serializedOf(exporter: OTLPLogExporter) {
+  function serializedOf(exporter: object) {
     return (exporter as unknown as {
       _delegate: { _serializer: { serializeRequest(l: unknown[]): Uint8Array } };
     })._delegate._serializer;
@@ -318,6 +320,59 @@ describe('double-typed attributes over OTLP protobuf', () => {
     expect(hex(record.spanId)).toBe(SPAN_ID);
     await provider.shutdown();
     await exporter.shutdown();
+  });
+
+  it('the gRPC OTLPLogExporter sends a score of 1 as doubleValue after sendScoresAsDouble', async () => {
+    const exporter = new GrpcLogExporter({ url: 'http://localhost:1' });
+    const memory = new InMemoryLogRecordExporter();
+    const provider = emitTo(memory, 1);
+    const records = memory.getFinishedLogRecords();
+    // Without it, the gRPC exporter sends whole numbers as intValue, like OTLP/HTTP.
+    expect(attrsOf(firstRecord(serializedOf(exporter).serializeRequest(records)))['gen_ai.evaluation.score.value'])
+      .toEqual({ intValue: 1 });
+    expect(sendScoresAsDouble(exporter)).toBe(true);
+    const record = firstRecord(serializedOf(exporter).serializeRequest(records));
+    expect(attrsOf(record)['gen_ai.evaluation.score.value']).toEqual({ doubleValue: 1 });
+    expect(attrsOf(record)['opensearch.gen_ai.evaluation.score.threshold']).toEqual({ doubleValue: 4 });
+    expect(attrsOf(record)['other.count']).toEqual({ intValue: 3 });
+    await provider.shutdown();
+    await exporter.shutdown();
+  });
+
+  it('sendScoresAsDouble wraps once, and leaves exporters without a protobuf serializer alone', async () => {
+    const exporter = new OTLPLogExporter({ url: 'http://localhost:1/v1/logs' });
+    expect(sendScoresAsDouble(exporter)).toBe(true);
+    const wrapped = serializedOf(exporter);
+    expect(sendScoresAsDouble(exporter)).toBe(true);
+    expect(serializedOf(exporter)).toBe(wrapped);
+    const memory = new InMemoryLogRecordExporter();
+    expect(sendScoresAsDouble(memory)).toBe(false);
+    expect(sendScoresAsDouble(undefined)).toBe(false);
+    await exporter.shutdown();
+  });
+
+  it('leaves the OTLP/HTTP JSON exporter untouched, and its output stays JSON', async () => {
+    const exporter = new JsonLogExporter({ url: 'http://localhost:1/v1/logs' });
+    const before = serializedOf(exporter);
+    expect(sendScoresAsDouble(exporter)).toBe(false);
+    expect(serializedOf(exporter)).toBe(before);
+    const memory = new InMemoryLogRecordExporter();
+    const provider = emitTo(memory, 1);
+    const body = serializedOf(exporter).serializeRequest(memory.getFinishedLogRecords());
+    const json = JSON.parse(Buffer.from(body).toString('utf8')) as AnyRecord;
+    const attrs = json.resourceLogs[0].scopeLogs[0].logRecords[0].attributes as AnyRecord[];
+    expect(attrs.find((kv) => kv.key === 'gen_ai.evaluation.score.value')?.value).toEqual({ intValue: 1 });
+    await provider.shutdown();
+    await exporter.shutdown();
+  });
+
+  it('fails open: a batch the rewrite cannot parse is sent as serialized', async () => {
+    // Wire type 3 (a group) is not handled by the rewrite; it must not drop the batch.
+    const odd = new Uint8Array([0x0b, 0x01]);
+    const exporter = { _delegate: { _serializer: { serializeRequest: (logs: unknown[]) => (logs.length ? odd : new Uint8Array(0)) } } };
+    expect(sendScoresAsDouble(exporter)).toBe(true);
+    expect(() => forceDoubleAttributes(odd)).toThrow();
+    expect(exporter._delegate._serializer.serializeRequest([{}])).toEqual(odd);
   });
 
   it('AWSSigV4OTLPLogExporter sends a score of 1 as doubleValue', async () => {

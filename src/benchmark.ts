@@ -33,12 +33,15 @@ import {
   normalizeSpanId,
   normalizeTraceId,
   resolveAgent,
+  runAttributes,
+  TEST_SUITE_RUN_NAME_KEY,
   validateMetadataKeys,
 } from './internal.js';
 import { ciPipelineAttributes } from './cicd.js';
 import {
   emitScore,
   labelVerdict,
+  type JudgeContext,
   thresholdVerdict,
   type Verdict,
   type EvaluatorType,
@@ -46,7 +49,9 @@ import {
 } from './score.js';
 import {
   ensureGlobalTestCaseProcessor,
-  runInTestCase,
+  enterEvaluateRun,
+  enterTestCase,
+  TEST_CASE_KEY,
   type ActiveTestCase,
 } from './testcase.js';
 
@@ -85,6 +90,25 @@ export interface EvalScore {
   scoreMax?: number;
   /** `opensearch.gen_ai.evaluation.judge.trace_id`: the trace of the LLM judge call that produced this score. */
   judgeTraceId?: string;
+  /**
+   * `opensearch.gen_ai.evaluation.evaluator.name` of this score (for example
+   * in `Benchmark.log()`). Default: the scorer's `defineScorer()` declaration.
+   */
+  evaluator?: string;
+  /** `opensearch.gen_ai.evaluation.evaluator.type` of this score. Default: the scorer's declaration. */
+  evaluatorType?: EvaluatorType;
+  /** Judge / evaluator context; unset fields fall back to the scorer's `defineScorer()` declaration. */
+  /**
+   * `opensearch.gen_ai.evaluation.evaluator.description`: what the evaluator
+   * checks (its criteria or rubric summary). Truncated to 1024 characters.
+   */
+  evaluatorDescription?: string;
+  /** `gen_ai.request.model`: the model used by the LLM judge. */
+  judgeModel?: string;
+  /** `gen_ai.prompt.name`: the name of the judge prompt template. */
+  judgePromptName?: string;
+  /** `gen_ai.prompt.version`: the version of the judge prompt. */
+  judgePromptVersion?: string;
 }
 
 /** What a scorer declares about the evaluation it produces (see `defineScorer`). */
@@ -102,16 +126,37 @@ export interface ScorerSpec {
   /** `opensearch.gen_ai.evaluation.evaluator.name` of every result the scorer produces. */
   evaluator?: string;
   evaluatorType?: EvaluatorType;
+  /**
+   * `opensearch.gen_ai.evaluation.evaluator.description`: what the evaluator
+   * checks (its criteria or rubric summary). Truncated to 1024 characters.
+   */
+  evaluatorDescription?: string;
+  /** `gen_ai.request.model`: the model used by the LLM judge. */
+  judgeModel?: string;
+  /** `gen_ai.prompt.name`: the name of the judge prompt template. */
+  judgePromptName?: string;
+  /** `gen_ai.prompt.version`: the version of the judge prompt. */
+  judgePromptVersion?: string;
 }
 
+/** What a scorer returns: a finite number, a boolean (a verdict), an EvalScore or an EvalScore[]. */
+export type ScorerResult = EvalScore | EvalScore[] | number | boolean;
+
+/**
+ * A scorer: `(input, output, expected)` returning a ScorerResult, or a Promise
+ * of one (an async LLM judge).
+ */
 export type ScorerFn = (
   input: unknown,
   output: unknown,
   expected: unknown,
-) => EvalScore | EvalScore[] | number | boolean;
+) => ScorerResult | PromiseLike<ScorerResult>;
+
+/** A synchronous scorer: typing scorers with it keeps `evaluate()`'s result a plain `BenchmarkResult`. */
+export type SyncScorerFn = (input: unknown, output: unknown, expected: unknown) => ScorerResult;
 
 /** A scorer function with its declared name and rule attached. */
-export type Scorer = ScorerFn & { readonly scorerSpec: ScorerSpec };
+export type Scorer<F extends ScorerFn = ScorerFn> = F & { readonly scorerSpec: ScorerSpec };
 
 const DIRECTIONS: readonly ScoreDirection[] = ['maximize', 'minimize'];
 const EVALUATOR_TYPES: readonly EvaluatorType[] = ['llm_judge', 'code', 'human', 'external'];
@@ -126,31 +171,50 @@ const EVALUATOR_TYPES: readonly EvaluatorType[] = ['llm_judge', 'code', 'human',
  * );
  * ```
  *
+ * `fn` may be async (an LLM judge): `evaluate()` awaits it. The returned
+ * scorer has the same signature as `fn`, so `evaluate()`'s result type
+ * follows it (see `EvaluateResult`).
+ *
  * Rule fields are defaults for every score the scorer returns; fields set on a
  * returned `EvalScore` win. Throws on an unknown `direction` / `evaluatorType`
  * or a non-finite `threshold` / `scoreMin` / `scoreMax`.
  */
-export function defineScorer(spec: ScorerSpec, fn: ScorerFn): Scorer {
-  if (spec.direction !== undefined && !DIRECTIONS.includes(spec.direction)) {
-    throw new Error(`direction must be one of ${DIRECTIONS.join(', ')}; got "${spec.direction}"`);
+/**
+ * What is wrong with the rule fields of a `defineScorer()` spec or a returned
+ * `EvalScore`: an unknown `direction` / `evaluatorType`, or a non-finite
+ * `threshold` / `scoreMin` / `scoreMax`. Undefined when they are valid.
+ */
+function ruleError(rule: {
+  direction?: unknown;
+  evaluatorType?: unknown;
+  threshold?: unknown;
+  scoreMin?: unknown;
+  scoreMax?: unknown;
+}): string | undefined {
+  if (rule.direction !== undefined && !DIRECTIONS.includes(rule.direction as ScoreDirection)) {
+    return `direction must be one of ${DIRECTIONS.join(', ')}; got ${JSON.stringify(rule.direction)}`;
   }
-  if (spec.evaluatorType !== undefined && !EVALUATOR_TYPES.includes(spec.evaluatorType)) {
-    throw new Error(
-      `evaluatorType must be one of ${EVALUATOR_TYPES.join(', ')}; got "${spec.evaluatorType}"`,
-    );
+  if (rule.evaluatorType !== undefined && !EVALUATOR_TYPES.includes(rule.evaluatorType as EvaluatorType)) {
+    return `evaluatorType must be one of ${EVALUATOR_TYPES.join(', ')}; got ${JSON.stringify(rule.evaluatorType)}`;
   }
   for (const key of ['threshold', 'scoreMin', 'scoreMax'] as const) {
-    const v = spec[key];
+    const v = rule[key];
     if (v !== undefined && (typeof v !== 'number' || !Number.isFinite(v))) {
-      throw new Error(`${key} must be a finite number; got ${JSON.stringify(v)}`);
+      return `${key} must be a finite number; got ${JSON.stringify(v)}`;
     }
   }
+  return undefined;
+}
+
+export function defineScorer<F extends ScorerFn>(spec: ScorerSpec, fn: F): Scorer<F> {
+  const invalid = ruleError(spec);
+  if (invalid) throw new Error(invalid);
   const resolved: ScorerSpec = {
     ...spec,
     direction: spec.direction ?? (spec.threshold !== undefined ? 'maximize' : undefined),
   };
   const scorer = ((input: unknown, output: unknown, expected: unknown) =>
-    fn(input, output, expected)) as Scorer;
+    fn(input, output, expected)) as unknown as Scorer<F>;
   Object.defineProperty(scorer, 'name', { value: fn.name || spec.name || 'score' });
   Object.defineProperty(scorer, 'scorerSpec', { value: Object.freeze(resolved), enumerable: true });
   return scorer;
@@ -160,15 +224,37 @@ function specOf(fn: ScorerFn): ScorerSpec | undefined {
   return (fn as Partial<Scorer>).scorerSpec;
 }
 
-/** Fill unset rule fields of a score from its scorer's declaration. */
+/**
+ * Fill unset fields of a score from its scorer's declaration, unless the score belongs to
+ * another evaluator: both the declaration and the score name an evaluator, and they differ.
+ * A scorer that declares `evaluator: 'wrapper'` and returns `{ evaluator: 'deepeval.faithfulness' }`
+ * does not stamp its evaluator type, rule, bounds, description or judge on it. A scorer that
+ * declares no evaluator applies its declaration (for example its threshold) to every score.
+ */
 function applySpec(s: EvalScore, spec?: ScorerSpec): EvalScore {
   if (!spec) return s;
+  if (spec.evaluator !== undefined && s.evaluator !== undefined && s.evaluator !== spec.evaluator) return s;
   return {
     ...s,
+    evaluator: s.evaluator ?? spec.evaluator,
+    evaluatorType: s.evaluatorType ?? spec.evaluatorType,
     threshold: s.threshold ?? spec.threshold,
     direction: s.direction ?? spec.direction,
     scoreMin: s.scoreMin ?? spec.scoreMin,
     scoreMax: s.scoreMax ?? spec.scoreMax,
+    evaluatorDescription: s.evaluatorDescription ?? spec.evaluatorDescription,
+    judgeModel: s.judgeModel ?? spec.judgeModel,
+    judgePromptName: s.judgePromptName ?? spec.judgePromptName,
+    judgePromptVersion: s.judgePromptVersion ?? spec.judgePromptVersion,
+  };
+}
+
+function judgeContextOf(s: EvalScore): JudgeContext {
+  return {
+    evaluatorDescription: s.evaluatorDescription,
+    judgeModel: s.judgeModel,
+    judgePromptName: s.judgePromptName,
+    judgePromptVersion: s.judgePromptVersion,
   };
 }
 
@@ -211,6 +297,8 @@ const CASE_STATUSES: readonly TestCaseStatus[] = ["pass", "fail", "error"];
 export interface BenchmarkSummary {
   benchmarkName: string;
   runId: string;
+  /** `opensearch.test.suite.run.name` of the run, when given. */
+  runName?: string;
   totalCases: number;
   /** Cases whose task raised or a result errored (status `error`). */
   errorCount: number;
@@ -333,6 +421,8 @@ interface CaseIdentity {
   ci?: Record<string, string>;
   /** `opensearch.test.case.expected` (+ `_truncated`), when the case has an expected output. */
   expected?: Record<string, string | boolean>;
+  /** `opensearch.test.suite.run.name` / `.description`, when given. */
+  run?: Record<string, string>;
 }
 
 function identityAttributes(identity: CaseIdentity): Record<string, string> {
@@ -364,7 +454,7 @@ function emitCaseScores(
   // agent identity is passed as score() options, not as extra attributes.
   const { [AGENT_NAME_KEY]: _name, [AGENT_VERSION_KEY]: _version, ...identityAttrs } =
     identityAttributes(identity);
-  const testAttrs = { ...identityAttrs, ...(identity.expected ?? {}) };
+  const testAttrs = { ...identityAttrs, ...(identity.run ?? {}), ...(identity.expected ?? {}) };
   const errored = extra.errorType !== undefined;
   for (const s of scores) {
     const scoreMeta = s.metadata ? toAttributes(safeMetadata(s.metadata, `score:${s.name}`)) : {};
@@ -377,10 +467,11 @@ function emitCaseScores(
       scoreMin: s.scoreMin,
       scoreMax: s.scoreMax,
       threshold: s.threshold,
-      evaluator: extra.evaluator,
-      evaluatorType: extra.evaluatorType,
+      evaluator: s.evaluator ?? extra.evaluator,
+      evaluatorType: s.evaluatorType ?? extra.evaluatorType,
       errorType: extra.errorType,
       judgeTraceId: s.judgeTraceId,
+      ...judgeContextOf(s),
       agentName: identity.agent?.[AGENT_NAME_KEY],
       agentVersion: identity.agent?.[AGENT_VERSION_KEY],
       attributes: { ...metadata, ...scoreMeta, ...testAttrs },
@@ -405,6 +496,7 @@ function computeSummary(
   runId: string,
   cases: TestCaseResult[],
   durationMs: number,
+  runName?: string,
 ): BenchmarkSummary {
   const scoreAcc: Record<string, { sum: number; min: number; max: number; count: number }> = {};
   for (const c of cases) {
@@ -435,6 +527,7 @@ function computeSummary(
   return {
     benchmarkName: name,
     runId,
+    ...(runName ? { runName } : {}),
     totalCases: cases.length,
     errorCount: cases.filter(c => c.resultStatus === 'error').length,
     passCount: cases.filter(c => c.resultStatus === 'pass').length,
@@ -448,6 +541,7 @@ function formatSummary(summary: BenchmarkSummary): string {
   const lines: string[] = [];
   lines.push(`Benchmark: ${summary.benchmarkName}`);
   lines.push(`Run ID:    ${summary.runId}`);
+  if (summary.runName) lines.push(`Run name:  ${summary.runName}`);
   lines.push(`Cases:     ${summary.totalCases} (${summary.errorCount} errors)`);
   lines.push(`Duration:  ${Math.round(summary.durationMs)}ms`);
 
@@ -481,6 +575,17 @@ export interface BenchmarkOptions {
    * be empty or whitespace.
    */
   runId?: string;
+  /**
+   * `opensearch.test.suite.run.name`: a human-readable name for the run, for
+   * example `"v5 with shorter prompt"`, on every result of the run. Optional;
+   * readers fall back to the short run id.
+   */
+  runName?: string;
+  /**
+   * `opensearch.test.suite.run.description`: free text about the run, on every
+   * result of the run. Optional; truncated to 1024 characters.
+   */
+  runDescription?: string;
   /** `gen_ai.agent.name` of the agent under test. Default: `register({ agentName })`. */
   agentName?: string;
   /** `gen_ai.agent.version` of the agent under test. Default: `register({ agentVersion })`. */
@@ -503,6 +608,8 @@ export interface BenchmarkOptions {
  * Upload results of cases you ran yourself. Each `log()` emits one
  * `gen_ai.evaluation.result` event per score, parented to the evaluated span
  * when `traceId` + `spanId` are given. `close()` returns the local summary.
+ * `log()` checks scores like evaluate() checks a scorer's result and throws a
+ * TypeError, emitting nothing, for an invalid one.
  */
 export class Benchmark {
   private _name: string;
@@ -514,10 +621,12 @@ export class Benchmark {
   private _agent: Record<string, string>;
   private _ci: Record<string, string>;
   private _recordExpected: boolean;
+  private _run: Record<string, string>;
 
   constructor(name: string, options?: BenchmarkOptions) {
     this._name = name;
     this._runId = makeRunId(options?.runId);
+    this._run = runAttributes(options?.runName, options?.runDescription);
     // Declared agent, else the register() default (never invented).
     this._agent = resolveAgent(options?.agentName, options?.agentVersion);
     this._metadata = safeMetadata(options?.metadata, `benchmark:${name}`);
@@ -534,13 +643,18 @@ export class Benchmark {
     return this._runId;
   }
 
+  /** `opensearch.test.suite.run.name` of the run, when given. */
+  get runName(): string | undefined {
+    return this._run[TEST_SUITE_RUN_NAME_KEY];
+  }
+
   log(options: {
     input?: unknown;
     output?: unknown;
     /**
      * Expected output. Sent on every result of the case as
      * `opensearch.test.case.expected` (strings as is, other values
-     * JSON.stringify'd, truncated to 4096 characters), unless the Benchmark
+     * JSON.stringify'd, truncated to 8192 characters), unless the Benchmark
      * was created with `recordExpected: false`.
      */
     expected?: unknown;
@@ -556,7 +670,8 @@ export class Benchmark {
     /**
      * `error.type` for an errored case (exception class name or similar). Every
      * score in `scores` is then emitted as an evaluator error result: `error.type`
-     * set, no score value and no label.
+     * set, no score value and no label. Its `value`, `label` and `passed` are
+     * then not checked (a timed-out metric may report NaN); its name still is.
      */
     errorType?: string;
     /**
@@ -568,6 +683,17 @@ export class Benchmark {
     caseName?: string;
     traceId?: string;
     spanId?: string;
+    /**
+     * Default `opensearch.gen_ai.evaluation.evaluator.name` for every score of
+     * this call, for example `"deepeval"`. An `EvalScore` that sets its own
+     * `evaluator` wins.
+     */
+    evaluator?: string;
+    /**
+     * Default `opensearch.gen_ai.evaluation.evaluator.type` for every score of
+     * this call. An `EvalScore` that sets its own `evaluatorType` wins.
+     */
+    evaluatorType?: EvaluatorType;
   }): void {
     if (this._closed) {
       throw new Error('Benchmark is already closed');
@@ -586,13 +712,12 @@ export class Benchmark {
       agent: this._agent,
       ci: this._ci,
       expected: this._recordExpected ? expectedAttributes(options.expected) : undefined,
+      run: this._run,
     };
     if (options.status !== undefined && !CASE_STATUSES.includes(options.status)) {
       throw new Error(`status must be one of ${CASE_STATUSES.join(', ')}; got "${options.status}"`);
     }
-    const evalScores: EvalScore[] = Array.isArray(options.scores)
-      ? options.scores
-      : Object.entries(options.scores ?? {}).map(([name, value]) => ({ name, value }));
+    const evalScores = validLogScores(options);
     const errorType = options.errorType;
     const verdicts = errorType ? {} : verdictsOf(evalScores);
     const failed = hasFailVerdict(verdicts);
@@ -610,7 +735,7 @@ export class Benchmark {
         identity,
         { traceId: options.traceId, spanId: options.spanId },
         { ...toAttributes(this._metadata), ...caseMeta },
-        { errorType },
+        { errorType, evaluator: options.evaluator, evaluatorType: options.evaluatorType },
       );
     }
 
@@ -637,10 +762,51 @@ export class Benchmark {
     }
     this._closed = true;
 
-    const summary = computeSummary(this._name, this._runId, this._cases, elapsedMs(this._start));
+    const summary = computeSummary(
+      this._name,
+      this._runId,
+      this._cases,
+      elapsedMs(this._start),
+      this.runName,
+    );
     console.log(formatSummary(summary));
     return summary;
   }
+}
+
+/** The fields an error result does not send (see emitCaseScores): they are not checked either. */
+const ERROR_DROPPED_FIELDS = ['value', 'label', 'passed'] as const;
+
+/**
+ * The scores of a `Benchmark.log()` call, checked like the scores a scorer returns in
+ * evaluate() (null fields count as unset). With `errorType` the case errored and its values
+ * are not sent, so `value`, `label` and `passed` are dropped unchecked (a timed-out metric
+ * may report NaN). Throws a TypeError, before anything is emitted, for an invalid score or an
+ * invalid `evaluator` / `evaluatorType` default.
+ */
+function validLogScores(options: {
+  scores?: Record<string, number> | EvalScore[];
+  evaluator?: unknown;
+  evaluatorType?: unknown;
+  errorType?: string;
+}): EvalScore[] {
+  if (options.evaluator !== undefined && typeof options.evaluator !== 'string') {
+    throw new TypeError(`Benchmark.log(): evaluator must be a string; got ${describeValue(options.evaluator)}`);
+  }
+  const invalidDefault = ruleError({ evaluatorType: options.evaluatorType });
+  if (invalidDefault) throw new TypeError(`Benchmark.log(): ${invalidDefault}`);
+  const items: unknown[] = Array.isArray(options.scores)
+    ? options.scores
+    : Object.entries(options.scores ?? {}).map(([name, value]) => ({ name, value }));
+  return items.map(item => {
+    const read = readEvalScore(item);
+    if (read && options.errorType !== undefined) {
+      for (const key of ERROR_DROPPED_FIELDS) delete read[key];
+    }
+    const score = read ? checkedEvalScore(read) : describeValue(item);
+    if (typeof score === 'string') throw new TypeError(`Benchmark.log(): scores has ${score}`);
+    return score;
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -658,6 +824,37 @@ function isThenable(value: unknown): value is PromiseLike<unknown> {
   );
 }
 
+/**
+ * Run a generator that yields the Promises it waits for: synchronously while
+ * nothing is pending, so a fully synchronous run returns its value directly;
+ * from the first yielded Promise on, asynchronously, returning a Promise.
+ * A rejected Promise is thrown into the generator at its `yield`.
+ */
+function runMaybeAsync<T>(gen: Generator<PromiseLike<unknown>, T, unknown>): T | Promise<T> {
+  const step = gen.next();
+  return step.done ? step.value : continueAsync(gen, step.value);
+}
+
+async function continueAsync<T>(
+  gen: Generator<PromiseLike<unknown>, T, unknown>,
+  pending: PromiseLike<unknown>,
+): Promise<T> {
+  for (;;) {
+    let value: unknown;
+    let rejected = false;
+    let reason: unknown;
+    try {
+      value = await pending;
+    } catch (e) {
+      rejected = true;
+      reason = e;
+    }
+    const step = rejected ? gen.throw(reason) : gen.next(value);
+    if (step.done) return step.value;
+    pending = step.value;
+  }
+}
+
 function describeValue(value: unknown): string {
   if (value === null) return 'null';
   if (Array.isArray(value)) return 'an array';
@@ -665,10 +862,51 @@ function describeValue(value: unknown): string {
   return typeof value === 'object' ? 'an object' : `a ${typeof value}`;
 }
 
-/** Why `value` is not a usable EvalScore, or undefined when it is one. */
-function invalidEvalScore(value: unknown): string | undefined {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) return describeValue(value);
-  const s = value as Record<string, unknown>;
+/** Every EvalScore field: the keys read from a returned score (the Record makes the list complete). */
+const EVAL_SCORE_FIELDS: Record<keyof EvalScore, true> = {
+  name: true,
+  value: true,
+  label: true,
+  explanation: true,
+  metadata: true,
+  passed: true,
+  threshold: true,
+  direction: true,
+  scoreMin: true,
+  scoreMax: true,
+  judgeTraceId: true,
+  evaluator: true,
+  evaluatorType: true,
+  evaluatorDescription: true,
+  judgeModel: true,
+  judgePromptName: true,
+  judgePromptVersion: true,
+};
+const EVAL_SCORE_KEYS = Object.keys(EVAL_SCORE_FIELDS) as (keyof EvalScore)[];
+
+/**
+ * The EvalScore fields of `value`, read by name, so a class instance with prototype getters
+ * works; null and undefined fields are left out (a JSON judge's `"explanation": null` means "not
+ * set", like a missing key). Undefined when `value` is not an object.
+ */
+function readEvalScore(value: unknown): Record<string, unknown> | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined;
+  const out: Record<string, unknown> = {};
+  for (const key of EVAL_SCORE_KEYS) {
+    const v = (value as Record<string, unknown>)[key];
+    if (v !== null && v !== undefined) out[key] = v;
+  }
+  return out;
+}
+
+/** The EvalScore read by readEvalScore(), or why it is not a usable one. */
+function checkedEvalScore(s: Record<string, unknown>): EvalScore | string {
+  const reason = invalidReadScore(s);
+  return reason ?? (s as unknown as EvalScore);
+}
+
+/** Why the fields read by readEvalScore() are not a usable EvalScore, or undefined when they are. */
+function invalidReadScore(s: Record<string, unknown>): string | undefined {
   if (typeof s.name !== 'string' || s.name === '') return 'an object without a string name';
   if (s.value !== undefined && (typeof s.value !== 'number' || !Number.isFinite(s.value))) {
     return `an EvalScore "${s.name}" whose value is ${describeValue(s.value)}`;
@@ -679,38 +917,59 @@ function invalidEvalScore(value: unknown): string | undefined {
   if (s.label !== undefined && typeof s.label !== 'string') {
     return `an EvalScore "${s.name}" whose label is not a string`;
   }
+  // The defineScorer() checks, so a returned EvalScore cannot write values it would reject.
+  const invalidRule = ruleError(s);
+  if (invalidRule) return `an EvalScore "${s.name}" whose ${invalidRule}`;
+  for (const key of [
+    'evaluator',
+    'evaluatorDescription',
+    'judgeModel',
+    'judgePromptName',
+    'judgePromptVersion',
+    'judgeTraceId',
+    'explanation',
+  ] as const) {
+    if (s[key] !== undefined && typeof s[key] !== 'string') {
+      return `an EvalScore "${s.name}" whose ${key} is not a string`;
+    }
+  }
   return undefined;
 }
 
 /**
- * The scores a scorer returned, or why the value cannot be used: a finite
- * number, a boolean (a verdict), an EvalScore or an EvalScore[] is used;
- * anything else (undefined, null, NaN, a bigint, a Promise, a malformed
- * object) is not.
+ * The scores a scorer returned (after awaiting it), or why the value cannot
+ * be used: a finite number, a boolean (a verdict), an EvalScore or an
+ * EvalScore[] is used; anything else (undefined, null, NaN, a bigint, a
+ * malformed object) is not.
  */
 function scorerResultScores(result: unknown, evalName: string): EvalScore[] | string {
   if (typeof result === 'boolean') return [{ name: evalName, value: result ? 1 : 0, passed: result }];
   if (typeof result === 'number') {
     return Number.isFinite(result) ? [{ name: evalName, value: result }] : `returned ${result}`;
   }
-  if (isThenable(result)) {
-    // Do not leave a rejected Promise unhandled.
-    Promise.resolve(result).catch(() => {});
-    return 'returned a Promise (evaluate() scorers must be synchronous)';
-  }
-  const items = Array.isArray(result) ? result : [result];
+  const items: unknown[] = Array.isArray(result) ? result : [result];
+  const scores: EvalScore[] = [];
   for (const item of items) {
-    const reason = invalidEvalScore(item);
-    if (reason) return `returned ${reason}`;
+    const read = readEvalScore(item);
+    const score = read ? checkedEvalScore(read) : describeValue(item);
+    if (typeof score === 'string') return `returned ${score}`;
+    scores.push(score);
   }
-  return items as EvalScore[];
+  return scores;
 }
 
 export interface EvaluateOptions {
   name: string;
+  /**
+   * The agent under test: takes a case's input and returns its output, or a
+   * Promise of it (an async agent; evaluate() then returns a Promise).
+   */
   task: (input: unknown) => unknown;
   data: Array<{ input: unknown; expected?: unknown; caseId?: string; caseName?: string }>;
-  /** Scorer functions, optionally wrapped with `defineScorer()` to declare name and rule. */
+  /**
+   * Scorer functions, sync or async, optionally wrapped with `defineScorer()`
+   * to declare name and rule.
+   */
   scores: Array<ScorerFn | Scorer>;
   /**
    * Run metadata, stamped on every `gen_ai.evaluation.result` event of the run
@@ -725,6 +984,17 @@ export interface EvaluateOptions {
    * be empty or whitespace.
    */
   runId?: string;
+  /**
+   * `opensearch.test.suite.run.name`: a human-readable name for the run, for
+   * example `"v5 with shorter prompt"`, on every result of the run. Optional;
+   * readers fall back to the short run id.
+   */
+  runName?: string;
+  /**
+   * `opensearch.test.suite.run.description`: free text about the run, on every
+   * result of the run. Optional; truncated to 1024 characters.
+   */
+  runDescription?: string;
   /**
    * `gen_ai.agent.name` of the agent under test. Stamped on the agent root spans
    * that name none themselves and on every evaluation result.
@@ -750,30 +1020,89 @@ export interface EvaluateOptions {
 }
 
 /**
+ * The options of an `evaluate()` call with task `T` and scorers `S`. Only the task and scorer
+ * types are inferred, so a misspelled option (`recordExpectd`) or data item field is still a
+ * compile error.
+ */
+export type EvaluateOptionsOf<T extends EvaluateOptions['task'], S extends ScorerFn> = Omit<
+  EvaluateOptions,
+  'task' | 'scores'
+> & { task: T; scores: S[] };
+
+type CallKind<F> = F extends (...args: never[]) => infer R
+  ? unknown extends R
+    ? 'maybe'
+    : [Extract<R, PromiseLike<unknown>>] extends [never]
+      ? 'sync'
+      : [Exclude<R, PromiseLike<unknown>>] extends [never]
+        ? 'async'
+        : 'maybe'
+  : 'maybe';
+
+type CallKinds<O extends EvaluateOptions> = CallKind<O['task']> | CallKind<O['scores'][number]>;
+
+/**
+ * What `evaluate(options)` returns: `BenchmarkResult` when the task and every
+ * scorer are typed synchronous, else `BenchmarkResult | Promise<BenchmarkResult>`
+ * (`await` it). evaluate() returns a Promise only once a task or scorer call
+ * has returned one, so with no data, or when every task throws before it
+ * awaits, even an async task gives the result directly.
+ */
+export type EvaluateResult<O extends EvaluateOptions = EvaluateOptions> =
+  [Exclude<CallKinds<O>, 'sync'>] extends [never] ? BenchmarkResult : BenchmarkResult | Promise<BenchmarkResult>;
+
+/**
  * Run `task` on each data item, score it and record the results.
  *
- * Cases run one at a time and `task` must be synchronous. While a case runs,
- * the SDK's TestCaseSpanProcessor stamps `test.*` ids on the root span(s) the
- * task starts and remembers the first one, so score events are parented to the
- * agent run's own trace. The TypeScript SDK has no default context manager, so
- * this uses a module-level "current case" instead of the active OTel context.
+ * `task` and the scorers may be synchronous or async. When all are
+ * synchronous, evaluate() returns the result directly, as before. Once a task
+ * or scorer call returns a Promise (an async function, an `observe()`-wrapped
+ * one, or any function returning a thenable), evaluate() awaits it and returns
+ * a `Promise<BenchmarkResult>`; `await evaluate(...)` works either way. Invalid
+ * options (an empty `runId`) throw synchronously.
  *
- * A scorer returns a finite number, a boolean (a verdict), an `EvalScore` or
- * an `EvalScore[]`, synchronously. A scorer that throws, or returns anything
- * else (undefined, null, NaN, a Promise, a malformed object; with a warning),
- * emits an evaluator error result (`error.type`, no value, no label, no
- * explanation) named after its declared `name` (else the function name). The
- * exception message is kept only in the local `scorerErrors`. When the task
- * throws, the scorers are not run and every scorer emits such an error result
- * with the task's `error.type`.
+ * Cases run one at a time, in order, and so do the scorers of a case. Each
+ * case's task call is its own trace. While a case runs (until the task's
+ * Promise settles), the SDK's TestCaseSpanProcessor stamps `test.*` ids on the
+ * root span(s) the task starts and remembers the first one, so score events
+ * are parented to the agent run's own trace. The case rides in the OTel context
+ * of the task (across `await` with a context manager, which register()
+ * installs on Node), so overlapping evaluate() runs are kept apart. A span
+ * started in a context without a case (`propagation.extract(ROOT_CONTEXT,
+ * headers)`, `context.with(ROOT_CONTEXT, ...)`) is attached to the case only
+ * while exactly one case runs and when it has no local parent; with
+ * overlapping runs, start the agent inside the task's context. On Node,
+ * evaluate() installs `AsyncLocalStorageContextManager` when no context
+ * manager is set; where none can be installed every span is parentless, so
+ * the same rule stamps a lone run and nothing for overlapping runs. Scorers run after the task, outside
+ * the case and in an empty context: an LLM judge's spans are their own trace
+ * (also when evaluate() runs inside a span) and are not stamped.
+ *
+ * A scorer returns (or resolves to) a finite number, a boolean (a verdict),
+ * an `EvalScore` or an `EvalScore[]`; a `null` field of an EvalScore (as in
+ * parsed judge JSON) counts as unset. A scorer that throws or rejects, or
+ * returns anything else (undefined, null, NaN, a malformed object; with a
+ * warning), emits an evaluator error result (`error.type`, no value, no label,
+ * no explanation) named after its declared `name` (else the function name).
+ * The exception message is kept only in the local `scorerErrors`. When the
+ * task throws or rejects, the scorers are not run and every scorer emits such
+ * an error result with the task's `error.type`.
  *
  * Local case status: `error` if the task threw or a result errored; else
  * `fail` if any score has a `fail` verdict (a `pass` / `fail` `label` /
  * `passed`, or `threshold` + `direction` from the score or its `defineScorer()`
  * declaration); else `pass`. Scores without a declared rule never fail a case.
  */
-export function evaluate(options: EvaluateOptions): BenchmarkResult {
+export function evaluate<T extends EvaluateOptions['task'], S extends ScorerFn>(
+  options: EvaluateOptionsOf<T, S>,
+): EvaluateResult<EvaluateOptionsOf<T, S>> {
+  return runMaybeAsync(evaluateSteps(options)) as EvaluateResult<EvaluateOptionsOf<T, S>>;
+}
+
+/** evaluate()'s run, yielding each Promise it has to wait for (see runMaybeAsync). */
+function* evaluateSteps(options: EvaluateOptions): Generator<PromiseLike<unknown>, BenchmarkResult, unknown> {
   const runId = makeRunId(options.runId);
+  const run = runAttributes(options.runName, options.runDescription);
   const filteredMetadata = toAttributes(safeMetadata(options.metadata, `evaluate:${options.name}`));
   const runStart = performance.now();
   const cases: TestCaseResult[] = [];
@@ -782,136 +1111,146 @@ export function evaluate(options: EvaluateOptions): BenchmarkResult {
   const recordExpected = options.recordExpected ?? true;
 
   ensureGlobalTestCaseProcessor();
+  const leaveRun = enterEvaluateRun();
+  try {
 
-  for (const item of options.data) {
-    const caseStart = performance.now();
-    const identity: CaseIdentity = {
-      suiteName: options.name,
-      runId,
-      caseId: item.caseId ?? makeCaseId(item.input),
-      caseName: item.caseName,
-      ci,
-    };
-    const expected = item.expected;
-    const expectedAttrs = recordExpected ? expectedAttributes(expected) : undefined;
-
-    let output: unknown;
-    let error: string | undefined;
-    let errorType: string | undefined;
-    const caseScores: Record<string, number> = {};
-    const scoreGroups: Array<{ scores: EvalScore[]; spec?: ScorerSpec; errorType?: string }> = [];
-    const scorerErrors: string[] = [];
-
-    // Root spans get the declared agent (where they name none themselves).
-    const active: ActiveTestCase = {
-      attributes: { ...identityAttributes(identity), ...declaredAgent },
-      seen: new Set(),
-    };
-
-    // Run task
-    try {
-      output = runInTestCase(active, () => otelContext.with(ROOT_CONTEXT, () => options.task(item.input)));
-      if (output instanceof Promise) {
-        output.catch(() => {});
-        throw new Error(
-          "evaluate() does not support async task functions. " +
-          "The task returned a Promise: use a synchronous task or await the async call inside a sync wrapper."
-        );
-      }
-    } catch (e) {
-      error = e instanceof Error ? e.message : String(e);
-      errorType = errorTypeOf(e);
-    }
-
-    // The agent that ran: declared, else named on its root span, else the
-    // register() default.
-    identity.agent = resolveAgent(options.agentName, options.agentVersion, active.rootSpan);
-    identity.expected = expectedAttrs;
-
-    // Run scorers (outside the case: judge spans are not the agent run)
-    for (const scorer of options.scores) {
-      const spec = specOf(scorer);
-      // Evaluation name of number/boolean results and of the error result.
-      const evalName = spec?.name || scorer.name || 'score';
-      if (error !== undefined) {
-        // The task threw: one error result per scorer, without the exception message.
-        scoreGroups.push({ scores: [applySpec({ name: evalName }, spec)], spec, errorType });
-        continue;
-      }
-      // Error result (error.type, no value, no explanation) under the evaluation
-      // name the scorer would have produced, so it is not a separate evaluation.
-      // The message stays local (scorerErrors): it can carry URLs, keys or bodies.
-      const scorerError = (message: string, type: string) => {
-        scorerErrors.push(message);
-        errorType ??= type;
-        scoreGroups.push({ scores: [applySpec({ name: evalName }, spec)], spec, errorType: type });
+    for (const item of options.data) {
+      const caseStart = performance.now();
+      const identity: CaseIdentity = {
+        suiteName: options.name,
+        runId,
+        caseId: item.caseId ?? makeCaseId(item.input),
+        caseName: item.caseName,
+        ci,
+        run,
       };
-      let result: unknown;
+      const expected = item.expected;
+      const expectedAttrs = recordExpected ? expectedAttributes(expected) : undefined;
+
+      let output: unknown;
+      let error: string | undefined;
+      let errorType: string | undefined;
+      const caseScores: Record<string, number> = {};
+      const scoreGroups: Array<{ scores: EvalScore[]; spec?: ScorerSpec; errorType?: string }> = [];
+      const scorerErrors: string[] = [];
+
+      // Root spans get the declared agent (where they name none themselves).
+      const active: ActiveTestCase = {
+        attributes: { ...identityAttributes(identity), ...declaredAgent },
+        seen: new Set(),
+      };
+
+      // Run the task as its own trace (ROOT_CONTEXT), carrying the case in its context.
+      const leaveCase = enterTestCase(active);
       try {
-        result = scorer(item.input, output, expected);
+        const caseContext = ROOT_CONTEXT.setValue(TEST_CASE_KEY, active);
+        let out = otelContext.with(caseContext, () => options.task(item.input));
+        if (isThenable(out)) out = yield out;
+        output = out;
       } catch (e) {
-        scorerError(e instanceof Error ? e.message : String(e), errorTypeOf(e));
-        continue;
+        error = e instanceof Error ? e.message : String(e);
+        errorType = errorTypeOf(e);
+      } finally {
+        leaveCase();
       }
-      const produced = scorerResultScores(result, evalName);
-      if (typeof produced === 'string') {
-        console.warn(
-          `[opensearch-genai-observability-sdk-ts] evaluate(): scorer "${evalName}" ${produced}. ` +
-            `A scorer returns a finite number, a boolean, an EvalScore or an EvalScore[]; ` +
-            `recording an error result.`,
-        );
-        scorerError(`scorer "${evalName}" ${produced}`, INVALID_SCORER_RESULT);
-        continue;
-      }
-      const withSpec = produced.map(s => applySpec(s, spec));
-      for (const es of withSpec) {
-        if (es.value !== undefined) caseScores[es.name] = es.value;
-      }
-      scoreGroups.push({ scores: withSpec, spec });
-    }
 
-    const verdicts = verdictsOf(
-      scoreGroups.filter(g => !g.errorType).flatMap(g => g.scores),
-    );
-    const failed = hasFailVerdict(verdicts);
-    const resultStatus: TestCaseStatus = errorType ? 'error' : failed ? 'fail' : 'pass';
-    const status = resultStatus === 'pass' ? 'pass' : 'fail';
-    const root = active.root;
-    for (const group of scoreGroups) {
-      emitCaseScores(
-        group.scores,
-        identity,
-        { traceId: root?.traceId, spanId: root?.spanId },
-        filteredMetadata,
-        {
-          evaluator: group.spec?.evaluator,
-          evaluatorType: group.spec?.evaluatorType,
-          errorType: group.errorType,
-        },
+      // The agent that ran: declared, else named on its root span, else the
+      // register() default.
+      identity.agent = resolveAgent(options.agentName, options.agentVersion, active.rootSpan);
+      identity.expected = expectedAttrs;
+
+      // Run scorers (outside the case: judge spans are not the agent run)
+      for (const scorer of options.scores) {
+        const spec = specOf(scorer);
+        // Evaluation name of number/boolean results and of the error result.
+        const evalName = spec?.name || scorer.name || 'score';
+        if (error !== undefined) {
+          // The task threw: one error result per scorer, without the exception message.
+          scoreGroups.push({ scores: [applySpec({ name: evalName }, spec)], spec, errorType });
+          continue;
+        }
+        // Error result (error.type, no value, no explanation) under the evaluation
+        // name the scorer would have produced, so it is not a separate evaluation.
+        // The message stays local (scorerErrors): it can carry URLs, keys or bodies.
+        const scorerError = (message: string, type: string) => {
+          scorerErrors.push(message);
+          errorType ??= type;
+          scoreGroups.push({ scores: [applySpec({ name: evalName }, spec)], spec, errorType: type });
+        };
+        let result: unknown;
+        try {
+          // Its own trace (ROOT_CONTEXT), not a child of whatever span wraps evaluate().
+          result = otelContext.with(ROOT_CONTEXT, () => scorer(item.input, output, expected));
+          if (isThenable(result)) result = yield result;
+        } catch (e) {
+          scorerError(e instanceof Error ? e.message : String(e), errorTypeOf(e));
+          continue;
+        }
+        const produced = scorerResultScores(result, evalName);
+        if (typeof produced === 'string') {
+          console.warn(
+            `[opensearch-genai-observability-sdk-ts] evaluate(): scorer "${evalName}" ${produced}. ` +
+              `A scorer returns a finite number, a boolean, an EvalScore or an EvalScore[]; ` +
+              `recording an error result.`,
+          );
+          scorerError(`scorer "${evalName}" ${produced}`, INVALID_SCORER_RESULT);
+          continue;
+        }
+        const withSpec = produced.map(s => applySpec(s, spec));
+        for (const es of withSpec) {
+          if (es.value !== undefined) caseScores[es.name] = es.value;
+        }
+        scoreGroups.push({ scores: withSpec, spec });
+      }
+
+      const verdicts = verdictsOf(
+        scoreGroups.filter(g => !g.errorType).flatMap(g => g.scores),
       );
+      const failed = hasFailVerdict(verdicts);
+      const resultStatus: TestCaseStatus = errorType ? 'error' : failed ? 'fail' : 'pass';
+      const status = resultStatus === 'pass' ? 'pass' : 'fail';
+      const root = active.root;
+      for (const group of scoreGroups) {
+        emitCaseScores(
+          group.scores,
+          identity,
+          { traceId: root?.traceId, spanId: root?.spanId },
+          filteredMetadata,
+          // applySpec() filled the declared evaluator (not on another evaluator's scores).
+          { errorType: group.errorType },
+        );
+      }
+
+      cases.push({
+        caseId: identity.caseId,
+        caseName: identity.caseName,
+        input: item.input,
+        output,
+        expected,
+        scores: caseScores,
+        error,
+        status,
+        resultStatus,
+        errorType,
+        durationMs: elapsedMs(caseStart),
+        traceId: root?.traceId,
+        spanId: root?.spanId,
+        scorerErrors: scorerErrors.length > 0 ? scorerErrors : undefined,
+        verdicts: Object.keys(verdicts).length > 0 ? verdicts : undefined,
+      });
     }
 
-    cases.push({
-      caseId: identity.caseId,
-      caseName: identity.caseName,
-      input: item.input,
-      output,
-      expected,
-      scores: caseScores,
-      error,
-      status,
-      resultStatus,
-      errorType,
-      durationMs: elapsedMs(caseStart),
-      traceId: root?.traceId,
-      spanId: root?.spanId,
-      scorerErrors: scorerErrors.length > 0 ? scorerErrors : undefined,
-      verdicts: Object.keys(verdicts).length > 0 ? verdicts : undefined,
-    });
+    const summary = computeSummary(
+      options.name,
+      runId,
+      cases,
+      elapsedMs(runStart),
+      run[TEST_SUITE_RUN_NAME_KEY],
+    );
+    console.log(formatSummary(summary));
+
+    return { summary, cases };
+  } finally {
+    leaveRun();
   }
-
-  const summary = computeSummary(options.name, runId, cases, elapsedMs(runStart));
-  console.log(formatSummary(summary));
-
-  return { summary, cases };
 }
