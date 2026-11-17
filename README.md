@@ -10,7 +10,7 @@ OTel-native tracing and evaluation for LLM applications and agents. Instrument y
 
 - **One-line setup**: `register()` configures the OTel traces and logs pipelines, the exporters and auto-instrumentation.
 - **Tracing**: `observe()` and `withObserve()` create spans with [GenAI semantic convention](https://opentelemetry.io/docs/specs/semconv/gen-ai/) attributes; `enrich()` adds model, token usage and other attributes; `markAgentRoot()` picks the agent root shown in OpenSearch Agent Traces.
-- **Auto-instrumentation** for the OpenAI SDK and the AWS SDK (Bedrock) when their OpenTelemetry instrumentations are installed.
+- **Auto-instrumentation** for the OpenAI SDK when its OpenTelemetry instrumentation is installed, and for the AWS SDK (Bedrock) on request (`autoInstrument: { awsSdk: true }`).
 - **Scoring**: `score()` emits each evaluation result as an OTel `gen_ai.evaluation.result` log event, parented to the evaluated span.
 - **Benchmarks**: `evaluate()` runs your agent over a dataset with scorers; `Benchmark` uploads results from any eval framework.
 - **Trace retrieval**: `OpenSearchTraceRetriever` reads traces back for online evaluation.
