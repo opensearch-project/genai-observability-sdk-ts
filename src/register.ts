@@ -142,8 +142,10 @@ export interface RegisterOptions {
    * before `openai` or the AWS SDK is imported; in an ES module app, call
    * register() in a module loaded with `node --import` after registering the
    * `@opentelemetry/instrumentation/hook.mjs` loader hook (see the README).
-   * Turn one off when you register it yourself, else every call is traced
-   * twice. The instrumentations are process-wide: they send to the newest
+   * Turn one off when you register it yourself. A function another
+   * instrumentation already patched (your own `OpenAIInstrumentation`
+   * enabled before register()) is left to it, with one warning; one you
+   * enable after register() takes the patch over, so a call is traced once. The instrumentations are process-wide: they send to the newest
    * register() with `setGlobal` (the default), and a `setGlobal: false`
    * register() takes them only when no live register() provider has them. A package that fails to load or enable logs one warning and is
    * skipped: register() still resolves.
@@ -685,6 +687,61 @@ function warnInstrumentation(spec: AutoInstrumentationSpec, reason: string): voi
   );
 }
 
+/** The `register({ autoInstrument })` option that turns `spec` off, for warnings. */
+function offOption(spec: AutoInstrumentationSpec): string {
+  if (spec.packageName === OPENAI_INSTRUMENTATION.packageName) return "autoInstrument: { openai: false }";
+  if (spec.packageName === AWS_SDK_INSTRUMENTATION.packageName) return "autoInstrument: { awsSdk: false }";
+  return "autoInstrument: false";
+}
+
+/** A function wrapped by shimmer (what `isWrapped()` of `@opentelemetry/instrumentation` checks). */
+function isShimmerWrapped(value: unknown): value is object {
+  return typeof value === "function" && (value as { __wrapped?: unknown }).__wrapped === true;
+}
+
+type WrapFn = (nodule: Record<PropertyKey, unknown>, name: PropertyKey, wrapper: unknown) => unknown;
+type UnwrapFn = (nodule: Record<PropertyKey, unknown>, name: PropertyKey) => unknown;
+
+/**
+ * Make `instrumentation` leave a function another instrumentation already wrapped (for example
+ * an OpenAIInstrumentation the app registered itself, with its own provider and config) as is,
+ * with one warning, instead of the InstrumentationBase default of unwrapping it and wrapping it
+ * again. It also never unwraps a wrapper that is not its own.
+ */
+function keepForeignWraps(instrumentation: object, spec: AutoInstrumentationSpec): void {
+  const host = instrumentation as { _wrap?: WrapFn; _unwrap?: UnwrapFn };
+  const wrap = host._wrap;
+  const unwrap = host._unwrap;
+  if (typeof wrap !== "function" || typeof unwrap !== "function") return;
+  const own = new WeakSet<object>();
+  let warned = false;
+  const foreign = (nodule: Record<PropertyKey, unknown> | undefined, name: PropertyKey): boolean => {
+    const current = nodule?.[name];
+    return isShimmerWrapped(current) && !own.has(current);
+  };
+  host._wrap = (nodule, name, wrapper) => {
+    if (foreign(nodule, name)) {
+      if (!warned) {
+        warned = true;
+        console.warn(
+          `[opensearch-genai-observability-sdk-ts] register(): ${spec.packageName} found ${String(name)}() ` +
+            `already instrumented (for example by an ${spec.exportName} the app registered itself), so ` +
+            `register() leaves it to that instrumentation, its provider and its config. ` +
+            `Pass ${offOption(spec)} to silence this warning.`,
+        );
+      }
+      return undefined;
+    }
+    const wrapped = wrap.call(instrumentation, nodule, name, wrapper);
+    if (typeof wrapped === "function") own.add(wrapped);
+    return wrapped;
+  };
+  host._unwrap = (nodule, name) => {
+    if (foreign(nodule, name)) return undefined;
+    return unwrap.call(instrumentation, nodule, name);
+  };
+}
+
 async function loadInstrumentation(spec: AutoInstrumentationSpec): Promise<InstrumentationLike | undefined> {
   let mod: Record<string, unknown>;
   try {
@@ -701,7 +758,9 @@ async function loadInstrumentation(spec: AutoInstrumentationSpec): Promise<Instr
     return undefined;
   }
   try {
-    return new (Ctor as new () => InstrumentationLike)();
+    const instrumentation = new (Ctor as new () => InstrumentationLike)();
+    keepForeignWraps(instrumentation, spec);
+    return instrumentation;
   } catch (err) {
     warnInstrumentation(spec, err instanceof Error ? err.message : String(err));
     return undefined;

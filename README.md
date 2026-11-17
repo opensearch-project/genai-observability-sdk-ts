@@ -207,7 +207,7 @@ export const provider = await register({ serviceName: "my-agent" });
 
 `@opentelemetry/instrumentation` must be resolvable from that file: install it, `~0.223.0`, the same line the instrumentations use. `app.ts` imports `openai` as usual and can import `provider` from `./otel.js` to flush it. In a single file, load the library after `register()` with `await import("openai")` (see [`05_openai_auto_instrument.ts`](examples/05_openai_auto_instrument.ts)). In CommonJS, `require()` the library after `await register()` resolves; no loader hook is needed.
 
-**Your own setup.** To configure an instrumentation (for example `captureMessageContent`, or `preRequestHook` / `responseHook` on `AwsInstrumentation`), turn it off in `autoInstrument` (`false`, or `{ openai: false }`) and register it yourself, else every call is traced twice:
+**Your own setup.** To configure an instrumentation (for example `captureMessageContent`, or `preRequestHook` / `responseHook` on `AwsInstrumentation`), turn it off in `autoInstrument` (`false`, or `{ openai: false }`) and register it yourself. If you leave it on, a call is still traced once, not twice: when your instrumentation is enabled before `register()`, `register()` leaves the functions it patched to it (your provider and config) and logs one warning; when it is enabled after, it takes the patch over from the SDK's (OpenTelemetry JS instrumentations unwrap a patched function before patching it):
 
 ```typescript
 import { registerInstrumentations } from "@opentelemetry/instrumentation";
