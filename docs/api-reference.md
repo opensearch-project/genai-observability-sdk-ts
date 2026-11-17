@@ -73,7 +73,7 @@ An unknown agent is left out, never invented. `evaluate()` also stamps the agent
 Function wrapper that creates OTel spans with GenAI semantic convention attributes. Supports three calling styles:
 
 ```typescript
-// 1. Bare — uses function name, no op
+// 1. Bare: uses the function name, no op
 const fn = observe(function myFunc(x: number) { return x * 2; });
 
 // 2. With options and function
@@ -85,7 +85,7 @@ const agent = observe(
   },
 );
 
-// 3. Options only — returns a wrapper (decorator factory pattern)
+// 3. Options only: returns a wrapper (decorator factory pattern)
 const withTracing = observe({ op: Op.INVOKE_AGENT });
 const tracedAgent = withTracing(myAgentFunction);
 ```
