@@ -184,11 +184,20 @@ export function agentDefaults(): [string | undefined, string | undefined] {
 }
 
 /**
+ * @internal The attributes an SDK span exposes (its `attributes` field), or undefined for a span
+ * that does not expose them (for example a non-recording span).
+ */
+export function spanAttributes(span: unknown): Record<string, unknown> | undefined {
+  const attrs = (span as { attributes?: unknown } | null | undefined)?.attributes;
+  return typeof attrs === "object" && attrs !== null ? (attrs as Record<string, unknown>) : undefined;
+}
+
+/**
  * @internal `[gen_ai.agent.name, gen_ai.agent.version]` read from an SDK span (best
  * effort: only spans that expose their attributes are read).
  */
 export function spanAgent(span: unknown): [string | undefined, string | undefined] {
-  const attrs = (span as { attributes?: Record<string, unknown> } | undefined)?.attributes;
+  const attrs = spanAttributes(span);
   if (!attrs) return [undefined, undefined];
   const name = attrs[AGENT_NAME_KEY];
   const version = attrs[AGENT_VERSION_KEY];

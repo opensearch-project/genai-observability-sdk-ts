@@ -3,7 +3,7 @@
 
 import { createContextKey, trace, type Context, type SpanContext } from '@opentelemetry/api';
 import type { ReadableSpan, Span, SpanProcessor } from '@opentelemetry/sdk-trace-base';
-import { AGENT_NAME_KEY, AGENT_VERSION_KEY, ensureContextManager } from './internal.js';
+import { AGENT_NAME_KEY, AGENT_VERSION_KEY, ensureContextManager, spanAttributes } from './internal.js';
 
 /**
  * The test case evaluate() is running right now.
@@ -106,7 +106,7 @@ export class TestCaseSpanProcessor implements SpanProcessor {
     testCase.seen.add(ctx.spanId);
     if (!isRoot) return;
 
-    const existing = (span as unknown as { attributes?: Record<string, unknown> }).attributes ?? {};
+    const existing = spanAttributes(span) ?? {};
     for (const [key, value] of Object.entries(testCase.attributes)) {
       // The agent's own identity on its span wins over the declared one.
       if (AGENT_KEYS.has(key) && existing[key] !== undefined) continue;

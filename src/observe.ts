@@ -8,6 +8,7 @@ import {
   type Span,
   type Tracer,
 } from "@opentelemetry/api";
+import { spanAttributes } from "./internal.js";
 
 const TRACER_NAME = "opensearch-genai-observability-sdk-ts";
 const MAX_ATTR_LENGTH = 10_000;
@@ -258,12 +259,6 @@ function setInputAttributes(
   } catch { /* ignore */ }
 }
 
-/** Whether the span already has the attribute (an SDK span exposes its attributes). */
-function hasAttribute(span: Span, key: string): boolean {
-  const attributes = (span as unknown as { attributes?: Record<string, unknown> }).attributes;
-  return !!attributes && attributes[key] !== undefined;
-}
-
 function setOutputAttributes(
   span: Span,
   result: unknown,
@@ -276,7 +271,7 @@ function setOutputAttributes(
       : "gen_ai.output.messages";
   // Keep a value set inside the function (enrich({ outputMessages }), or setAttribute), as the
   // Python SDK does: the return value is recorded only when nothing was set.
-  if (hasAttribute(span, attrKey)) return;
+  if (spanAttributes(span)?.[attrKey] !== undefined) return;
   const serialized = truncate(safeStringify(result));
   span.setAttribute(attrKey, serialized);
 }
