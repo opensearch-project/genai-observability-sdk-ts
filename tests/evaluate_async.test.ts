@@ -444,6 +444,25 @@ describe('evaluate() links an agent root started in a fresh context to the only 
     expect(result.cases[0].traceId).toBe(root.spanContext().traceId);
   });
 
+  it("does not attach one run's judge spans to another run's case", async () => {
+    const tracer = trace.getTracer('judge');
+    const judge = async () => {
+      tracer.startSpan('chat judge-model').end();
+      return 1;
+    };
+    const slowAgent = async (q: unknown) => {
+      for (let i = 0; i < 20; i++) await tick();
+      return agent(q);
+    };
+    await Promise.all([
+      evaluate({ name: 'A', task: agent, data: [{ input: 'a', caseId: 'a1' }], scores: [judge] }),
+      evaluate({ name: 'B', task: slowAgent, data: [{ input: 'b', caseId: 'b1' }], scores: [] }),
+    ]);
+    const judgeSpan = getFinishedSpans().find(s => s.name === 'chat judge-model')!;
+    expect(judgeSpan.attributes['test.suite.name']).toBeUndefined();
+    expect(judgeSpan.attributes['test.case.id']).toBeUndefined();
+  });
+
   it('does not guess with overlapping cases: a fresh-context root is not stamped', async () => {
     const tracer = trace.getTracer('overlap');
     const fresh = async (q: unknown) => {

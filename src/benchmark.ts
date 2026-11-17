@@ -49,6 +49,7 @@ import {
 } from './score.js';
 import {
   ensureGlobalTestCaseProcessor,
+  enterEvaluateRun,
   enterTestCase,
   TEST_CASE_KEY,
   type ActiveTestCase,
@@ -1110,141 +1111,146 @@ function* evaluateSteps(options: EvaluateOptions): Generator<PromiseLike<unknown
   const recordExpected = options.recordExpected ?? true;
 
   ensureGlobalTestCaseProcessor();
+  const leaveRun = enterEvaluateRun();
+  try {
 
-  for (const item of options.data) {
-    const caseStart = performance.now();
-    const identity: CaseIdentity = {
-      suiteName: options.name,
-      runId,
-      caseId: item.caseId ?? makeCaseId(item.input),
-      caseName: item.caseName,
-      ci,
-      run,
-    };
-    const expected = item.expected;
-    const expectedAttrs = recordExpected ? expectedAttributes(expected) : undefined;
-
-    let output: unknown;
-    let error: string | undefined;
-    let errorType: string | undefined;
-    const caseScores: Record<string, number> = {};
-    const scoreGroups: Array<{ scores: EvalScore[]; spec?: ScorerSpec; errorType?: string }> = [];
-    const scorerErrors: string[] = [];
-
-    // Root spans get the declared agent (where they name none themselves).
-    const active: ActiveTestCase = {
-      attributes: { ...identityAttributes(identity), ...declaredAgent },
-      seen: new Set(),
-    };
-
-    // Run the task as its own trace (ROOT_CONTEXT), carrying the case in its context.
-    const leaveCase = enterTestCase(active);
-    try {
-      const caseContext = ROOT_CONTEXT.setValue(TEST_CASE_KEY, active);
-      let out = otelContext.with(caseContext, () => options.task(item.input));
-      if (isThenable(out)) out = yield out;
-      output = out;
-    } catch (e) {
-      error = e instanceof Error ? e.message : String(e);
-      errorType = errorTypeOf(e);
-    } finally {
-      leaveCase();
-    }
-
-    // The agent that ran: declared, else named on its root span, else the
-    // register() default.
-    identity.agent = resolveAgent(options.agentName, options.agentVersion, active.rootSpan);
-    identity.expected = expectedAttrs;
-
-    // Run scorers (outside the case: judge spans are not the agent run)
-    for (const scorer of options.scores) {
-      const spec = specOf(scorer);
-      // Evaluation name of number/boolean results and of the error result.
-      const evalName = spec?.name || scorer.name || 'score';
-      if (error !== undefined) {
-        // The task threw: one error result per scorer, without the exception message.
-        scoreGroups.push({ scores: [applySpec({ name: evalName }, spec)], spec, errorType });
-        continue;
-      }
-      // Error result (error.type, no value, no explanation) under the evaluation
-      // name the scorer would have produced, so it is not a separate evaluation.
-      // The message stays local (scorerErrors): it can carry URLs, keys or bodies.
-      const scorerError = (message: string, type: string) => {
-        scorerErrors.push(message);
-        errorType ??= type;
-        scoreGroups.push({ scores: [applySpec({ name: evalName }, spec)], spec, errorType: type });
+    for (const item of options.data) {
+      const caseStart = performance.now();
+      const identity: CaseIdentity = {
+        suiteName: options.name,
+        runId,
+        caseId: item.caseId ?? makeCaseId(item.input),
+        caseName: item.caseName,
+        ci,
+        run,
       };
-      let result: unknown;
+      const expected = item.expected;
+      const expectedAttrs = recordExpected ? expectedAttributes(expected) : undefined;
+
+      let output: unknown;
+      let error: string | undefined;
+      let errorType: string | undefined;
+      const caseScores: Record<string, number> = {};
+      const scoreGroups: Array<{ scores: EvalScore[]; spec?: ScorerSpec; errorType?: string }> = [];
+      const scorerErrors: string[] = [];
+
+      // Root spans get the declared agent (where they name none themselves).
+      const active: ActiveTestCase = {
+        attributes: { ...identityAttributes(identity), ...declaredAgent },
+        seen: new Set(),
+      };
+
+      // Run the task as its own trace (ROOT_CONTEXT), carrying the case in its context.
+      const leaveCase = enterTestCase(active);
       try {
-        // Its own trace (ROOT_CONTEXT), not a child of whatever span wraps evaluate().
-        result = otelContext.with(ROOT_CONTEXT, () => scorer(item.input, output, expected));
-        if (isThenable(result)) result = yield result;
+        const caseContext = ROOT_CONTEXT.setValue(TEST_CASE_KEY, active);
+        let out = otelContext.with(caseContext, () => options.task(item.input));
+        if (isThenable(out)) out = yield out;
+        output = out;
       } catch (e) {
-        scorerError(e instanceof Error ? e.message : String(e), errorTypeOf(e));
-        continue;
+        error = e instanceof Error ? e.message : String(e);
+        errorType = errorTypeOf(e);
+      } finally {
+        leaveCase();
       }
-      const produced = scorerResultScores(result, evalName);
-      if (typeof produced === 'string') {
-        console.warn(
-          `[opensearch-genai-observability-sdk-ts] evaluate(): scorer "${evalName}" ${produced}. ` +
-            `A scorer returns a finite number, a boolean, an EvalScore or an EvalScore[]; ` +
-            `recording an error result.`,
-        );
-        scorerError(`scorer "${evalName}" ${produced}`, INVALID_SCORER_RESULT);
-        continue;
-      }
-      const withSpec = produced.map(s => applySpec(s, spec));
-      for (const es of withSpec) {
-        if (es.value !== undefined) caseScores[es.name] = es.value;
-      }
-      scoreGroups.push({ scores: withSpec, spec });
-    }
 
-    const verdicts = verdictsOf(
-      scoreGroups.filter(g => !g.errorType).flatMap(g => g.scores),
-    );
-    const failed = hasFailVerdict(verdicts);
-    const resultStatus: TestCaseStatus = errorType ? 'error' : failed ? 'fail' : 'pass';
-    const status = resultStatus === 'pass' ? 'pass' : 'fail';
-    const root = active.root;
-    for (const group of scoreGroups) {
-      emitCaseScores(
-        group.scores,
-        identity,
-        { traceId: root?.traceId, spanId: root?.spanId },
-        filteredMetadata,
-        // applySpec() filled the declared evaluator (not on another evaluator's scores).
-        { errorType: group.errorType },
+      // The agent that ran: declared, else named on its root span, else the
+      // register() default.
+      identity.agent = resolveAgent(options.agentName, options.agentVersion, active.rootSpan);
+      identity.expected = expectedAttrs;
+
+      // Run scorers (outside the case: judge spans are not the agent run)
+      for (const scorer of options.scores) {
+        const spec = specOf(scorer);
+        // Evaluation name of number/boolean results and of the error result.
+        const evalName = spec?.name || scorer.name || 'score';
+        if (error !== undefined) {
+          // The task threw: one error result per scorer, without the exception message.
+          scoreGroups.push({ scores: [applySpec({ name: evalName }, spec)], spec, errorType });
+          continue;
+        }
+        // Error result (error.type, no value, no explanation) under the evaluation
+        // name the scorer would have produced, so it is not a separate evaluation.
+        // The message stays local (scorerErrors): it can carry URLs, keys or bodies.
+        const scorerError = (message: string, type: string) => {
+          scorerErrors.push(message);
+          errorType ??= type;
+          scoreGroups.push({ scores: [applySpec({ name: evalName }, spec)], spec, errorType: type });
+        };
+        let result: unknown;
+        try {
+          // Its own trace (ROOT_CONTEXT), not a child of whatever span wraps evaluate().
+          result = otelContext.with(ROOT_CONTEXT, () => scorer(item.input, output, expected));
+          if (isThenable(result)) result = yield result;
+        } catch (e) {
+          scorerError(e instanceof Error ? e.message : String(e), errorTypeOf(e));
+          continue;
+        }
+        const produced = scorerResultScores(result, evalName);
+        if (typeof produced === 'string') {
+          console.warn(
+            `[opensearch-genai-observability-sdk-ts] evaluate(): scorer "${evalName}" ${produced}. ` +
+              `A scorer returns a finite number, a boolean, an EvalScore or an EvalScore[]; ` +
+              `recording an error result.`,
+          );
+          scorerError(`scorer "${evalName}" ${produced}`, INVALID_SCORER_RESULT);
+          continue;
+        }
+        const withSpec = produced.map(s => applySpec(s, spec));
+        for (const es of withSpec) {
+          if (es.value !== undefined) caseScores[es.name] = es.value;
+        }
+        scoreGroups.push({ scores: withSpec, spec });
+      }
+
+      const verdicts = verdictsOf(
+        scoreGroups.filter(g => !g.errorType).flatMap(g => g.scores),
       );
+      const failed = hasFailVerdict(verdicts);
+      const resultStatus: TestCaseStatus = errorType ? 'error' : failed ? 'fail' : 'pass';
+      const status = resultStatus === 'pass' ? 'pass' : 'fail';
+      const root = active.root;
+      for (const group of scoreGroups) {
+        emitCaseScores(
+          group.scores,
+          identity,
+          { traceId: root?.traceId, spanId: root?.spanId },
+          filteredMetadata,
+          // applySpec() filled the declared evaluator (not on another evaluator's scores).
+          { errorType: group.errorType },
+        );
+      }
+
+      cases.push({
+        caseId: identity.caseId,
+        caseName: identity.caseName,
+        input: item.input,
+        output,
+        expected,
+        scores: caseScores,
+        error,
+        status,
+        resultStatus,
+        errorType,
+        durationMs: elapsedMs(caseStart),
+        traceId: root?.traceId,
+        spanId: root?.spanId,
+        scorerErrors: scorerErrors.length > 0 ? scorerErrors : undefined,
+        verdicts: Object.keys(verdicts).length > 0 ? verdicts : undefined,
+      });
     }
 
-    cases.push({
-      caseId: identity.caseId,
-      caseName: identity.caseName,
-      input: item.input,
-      output,
-      expected,
-      scores: caseScores,
-      error,
-      status,
-      resultStatus,
-      errorType,
-      durationMs: elapsedMs(caseStart),
-      traceId: root?.traceId,
-      spanId: root?.spanId,
-      scorerErrors: scorerErrors.length > 0 ? scorerErrors : undefined,
-      verdicts: Object.keys(verdicts).length > 0 ? verdicts : undefined,
-    });
+    const summary = computeSummary(
+      options.name,
+      runId,
+      cases,
+      elapsedMs(runStart),
+      run[TEST_SUITE_RUN_NAME_KEY],
+    );
+    console.log(formatSummary(summary));
+
+    return { summary, cases };
+  } finally {
+    leaveRun();
   }
-
-  const summary = computeSummary(
-    options.name,
-    runId,
-    cases,
-    elapsedMs(runStart),
-    run[TEST_SUITE_RUN_NAME_KEY],
-  );
-  console.log(formatSummary(summary));
-
-  return { summary, cases };
 }

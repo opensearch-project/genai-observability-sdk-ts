@@ -56,9 +56,28 @@ export function enterTestCase(testCase: ActiveTestCase): () => void {
   };
 }
 
-/** The only running case, when exactly one runs. */
+/** `evaluate()` runs in progress, including their scorer phase. */
+let activeRuns = 0;
+
+/**
+ * @internal Mark an `evaluate()` run as active, from its first case until its last scorer has
+ * finished. Returns a function that ends it. While more than one run is active, no span is
+ * attached by the only-running-case rule: a run in its scorer phase has no running case, so its
+ * judge spans would otherwise be attached to another run's case.
+ */
+export function enterEvaluateRun(): () => void {
+  activeRuns += 1;
+  let left = false;
+  return () => {
+    if (left) return;
+    left = true;
+    activeRuns -= 1;
+  };
+}
+
+/** The only running case, when exactly one case of exactly one `evaluate()` run is running. */
 function onlyRunningCase(): ActiveTestCase | undefined {
-  if (runningCases.size !== 1) return undefined;
+  if (activeRuns > 1 || runningCases.size !== 1) return undefined;
   return runningCases.values().next().value;
 }
 
