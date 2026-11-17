@@ -187,7 +187,7 @@ console.log(result.summary.runId);
 await provider.forceFlush();
 ```
 
-With an async task or scorer `evaluate()` returns a Promise; with only synchronous ones it returns the result directly. A judge that throws or rejects records an error result for that evaluation and the run continues.
+`evaluate()` returns a Promise once a task or scorer call returns one, so `await` it; its type is plain `BenchmarkResult` only when the task and every scorer are typed synchronous. A judge that throws or rejects records an error result for that evaluation and the run continues.
 
 **Your own loop: `Benchmark`.** When scorers need the trace's spans from OpenSearch (`agentRun()` in the cookbook, which needs the spans flushed and indexed first), or you want to run cases your own way (concurrently, with retries), run each case yourself, await the agent and the judge, and log the case with the trace and span id from section 3:
 
@@ -316,7 +316,7 @@ Offline evals catch regressions before a release; online evals catch what the su
 
 ## Eval cookbook
 
-Copy and adapt. Each scorer returns an `EvalScore` (or a number or boolean) and works with `Benchmark.log({ scores })`, and, wrapped with `defineScorer()` (sync or async), as an `evaluate()` scorer. Runnable versions are in the Strands observability example ([#101](https://github.com/opensearch-project/genai-observability-sdk-ts/pull/101)). `AgentRun` is whatever your `ask()` returns, plus the spans of its trace. Build it once per case with `agentRun()` and pass the same object to every scorer: the spans are fetched from OpenSearch once per trace id (cached), not once per scorer.
+Copy and adapt. Each scorer returns an `EvalScore` and works with `Benchmark.log({ scores })`. Wrapped with `defineScorer()` (sync or async), it works as an `evaluate()` scorer, where a scorer may also return a number or a boolean. Runnable versions are in the Strands observability example ([#101](https://github.com/opensearch-project/genai-observability-sdk-ts/pull/101)). `AgentRun` is whatever your `ask()` returns, plus the spans of its trace. Build it once per case with `agentRun()` and pass the same object to every scorer: the spans are fetched from OpenSearch once per trace id (cached), not once per scorer.
 
 ```typescript
 import {
@@ -453,6 +453,8 @@ const latencyOk = defineScorer(
   (_input, output) => (output as AgentRun).durationMs / 1000,
 );
 ```
+
+In `evaluate()` a scorer receives the task's return value, so `latencyOk` needs a task that returns an `AgentRun` (or any object with `durationMs`). With a task that returns an object without `durationMs` it returns `NaN`, and with one that returns `undefined` or `null` reading `durationMs` throws; either way the scorer records an error result (`error.type` = `TypeError`).
 
 ### cost
 
@@ -636,3 +638,5 @@ console.log(`${base}/app/agentTraces/evaluations#/compare/${e(runA)}/${e(runB)}`
 
 - [From day one to healthy production: instrumenting and evaluating AI agents with OpenSearch](https://github.com/anirudha/os-agent-observability-evals/blob/main/blog.md): the same journey end to end, with a sample support agent in several frameworks.
 - [Agent evaluations](agent-evaluations.md): the full attribute reference, ingestion pipelines and index templates.
+- [API reference](api-reference.md): every option of `register()`, `score()`, `evaluate()`, `Benchmark` and `OpenSearchTraceRetriever`.
+- [Configuration](configuration.md): endpoints, environment variables and auto-instrumentation.

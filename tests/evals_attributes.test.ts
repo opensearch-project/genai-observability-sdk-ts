@@ -795,7 +795,7 @@ describe('local results are keyed by evaluator, so a fail is never hidden', () =
     expect(result.summary.failCount).toBe(1);
   });
 
-  it('the first evaluator of a name keeps the plain key for the run', () => {
+  it("a scorer's own results keep the plain key, whatever the order of results", () => {
     const s = defineScorer({ name: 'faithfulness', threshold: 0.7 }, function faith() {
       return [
         { name: 'faithfulness', value: 0.95, evaluator: 'deepeval', passed: true },
@@ -805,9 +805,71 @@ describe('local results are keyed by evaluator, so a fail is never hidden', () =
     const result = evaluate({ name: 'suite', task: tracedTask, data: [{ input: 'a' }, { input: 'b' }], scores: [s] });
     for (const c of result.cases) {
       expect(c.resultStatus).toBe('fail');
-      expect(c.scores).toEqual({ faithfulness: 0.95, 'faithfulness (faith)': 0.2 });
+      expect(c.scores).toEqual({ faithfulness: 0.2, 'faithfulness (deepeval)': 0.95 });
     }
-    expect(result.summary.scores['faithfulness (faith)'].count).toBe(2);
+    expect(result.summary.scores.faithfulness.count).toBe(2);
+  });
+
+  it("a scorer's own results keep the plain key when it throws in the first case", () => {
+    let call = 0;
+    const own = defineScorer({ name: 'faithfulness', threshold: 0.7 }, function faith() {
+      call += 1;
+      if (call === 1) throw new Error('judge down');
+      return 0.2;
+    });
+    const deepeval = () => ({ name: 'faithfulness', value: 0.95, evaluator: 'deepeval', passed: true });
+    const data = [{ input: 'a' }, { input: 'b' }, { input: 'c' }];
+    const result = evaluate({ name: 'suite', task: tracedTask, data, scores: [own, deepeval] });
+    expect(result.summary.scores.faithfulness.avg).toBeCloseTo(0.2);
+    expect(result.summary.scores['faithfulness (deepeval)'].avg).toBeCloseTo(0.95);
+    expect(result.cases[1].verdicts).toEqual({ faithfulness: 'fail', 'faithfulness (deepeval)': 'pass' });
+  });
+
+  it('a synthetic key never collides with a real evaluation name', () => {
+    const b = new Benchmark('b');
+    b.log({
+      input: 'q',
+      scores: [
+        { name: 'f', value: 0.9, evaluator: 'a' },
+        { name: 'f', value: 0.1, evaluator: 'b', passed: false },
+        { name: 'f (b)', value: 0.95, evaluator: 'c' },
+      ],
+    });
+    const summary = b.close();
+    expect(summary.scores['f (b)'].avg).toBeCloseTo(0.1);
+    expect(summary.scores['f (b) (2)'].avg).toBeCloseTo(0.95);
+  });
+
+  it('a result with no value and no verdict claims no key', () => {
+    const b = new Benchmark('b');
+    b.log({ input: 'q', scores: [{ name: 'f', label: 'good', evaluator: 'x' }, { name: 'f', value: 0.5, evaluator: 'y' }] });
+    expect(b.close().scores.f.avg).toBeCloseTo(0.5);
+  });
+
+  it('keeps the value of a failing result of one evaluator over a later pass', () => {
+    const s = defineScorer({ name: 'judge', threshold: 0.5 }, function judge() {
+      return [{ name: 'judge', value: 0.1 }, { name: 'judge', value: 0.9 }];
+    });
+    const result = evaluate({ name: 'suite', task: tracedTask, data: [{ input: 'a' }], scores: [s] });
+    expect(result.cases[0].scores).toEqual({ judge: 0.1 });
+    expect(result.cases[0].verdicts).toEqual({ judge: 'fail' });
+  });
+
+  it('records an evaluation named __proto__, with its fail verdict', () => {
+    const b = new Benchmark('b');
+    b.log({ input: 'q', scores: [{ name: '__proto__', value: 0.1, passed: false }] });
+    const summary = b.close();
+    expect(summary.failCount).toBe(1);
+    expect(Object.keys(summary.scores)).toEqual(['__proto__']);
+  });
+
+  it('a Benchmark.log() call that throws claims no key', () => {
+    const b = new Benchmark('b');
+    expect(() =>
+      b.log({ input: 'q', traceId: 5 as unknown as string, spanId: SPAN_ID, scores: [{ name: 'f', value: 0.1, evaluator: 'x' }] }),
+    ).toThrow();
+    b.log({ input: 'q', scores: [{ name: 'f', value: 0.5, evaluator: 'y' }] });
+    expect(b.close().scores.f.avg).toBeCloseTo(0.5);
   });
 
   it('two scorers with the same evaluation name', () => {
@@ -883,6 +945,22 @@ describe('evaluator names are trimmed and checked', () => {
     expect(result.cases[0].resultStatus).toBe('fail');
   });
 
+  it('defineScorer() rejects non-string judge fields, like a returned EvalScore', () => {
+    for (const field of ['evaluatorDescription', 'judgeModel', 'judgePromptName', 'judgePromptVersion']) {
+      expect(() => defineScorer({ [field]: 5 } as never, () => 1)).toThrow(`${field} must be a string`);
+    }
+  });
+
+  it('a nested defineScorer() keeps the inner scorer\'s evaluator as owner', () => {
+    const inner = defineScorer({ evaluator: 'deepeval' }, function wrap() {
+      return { name: 'f', value: 0.1, evaluator: 'deepeval' };
+    });
+    const outer = defineScorer({ threshold: 0.5 }, inner);
+    const result = evaluate({ name: 'suite', task: tracedTask, data: [{ input: 'a' }], scores: [outer] });
+    expect(result.cases[0].resultStatus).toBe('fail');
+    expect(warnSpy.mock.calls.map(c => String(c[0])).filter(m => m.includes('applied to no result'))).toEqual([]);
+  });
+
   it('defineScorer() rejects a non-string evaluator with a clear error', () => {
     expect(() => defineScorer({ evaluator: 123 as unknown as string }, () => 1)).toThrow(
       'evaluator must be a string',
@@ -894,11 +972,21 @@ describe('the unused-declaration warning', () => {
   const foreign = (name: string): EvalScore => ({ name, value: 0.2, evaluator: `deepeval.${name}` });
   const unused = () => warnSpy.mock.calls.map(c => String(c[0])).filter(m => m.includes('applied to no result'));
 
-  it('each scorer warns, also when they share an evaluation or function name', () => {
-    const make = (metric: string) => defineScorer({ threshold: 0.7 }, () => [foreign(metric)]);
+  it('warns once per evaluation name and evaluator; other names each warn', () => {
+    const make = (name: string, metric: string) => defineScorer({ name, threshold: 0.7 }, () => [foreign(metric)]);
     const data = [{ input: 'a' }, { input: 'b' }];
-    evaluate({ name: 'suite', task: tracedTask, data, scores: [make('faith'), make('relevancy')] });
+    evaluate({ name: 'suite', task: tracedTask, data, scores: [make('faith', 'faith'), make('relevancy', 'relevancy')] });
     expect(unused()).toHaveLength(2);
+    evaluate({ name: 'suite', task: tracedTask, data, scores: [make('faith', 'faith'), make('faith', 'other')] });
+    expect(unused()).toHaveLength(2);
+  });
+
+  it('a scorer rebuilt per run with the same name and evaluator warns once per process', () => {
+    const make = () => defineScorer({ name: 'faith', evaluator: 'wrap', threshold: 0.7 }, () => [foreign('faith')]);
+    for (let i = 0; i < 3; i++) {
+      evaluate({ name: 'suite', task: tracedTask, data: [{ input: 'a' }], scores: [make()] });
+    }
+    expect(unused()).toHaveLength(1);
   });
 
   it('non-rule declarations warn too, with the evaluators involved', () => {

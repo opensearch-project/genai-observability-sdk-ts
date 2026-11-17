@@ -28,6 +28,7 @@ jobs:
             --no-progress
             --accept 200,204,301,302,403,429
             --exclude-loopback
+            --remap 'https://github.com/opensearch-project/genai-observability-sdk-ts/(blob|tree)/main/([^#]*)(#.*)? file://${{ github.workspace }}/$2'
             --exclude-private
             --exclude 'localhost'
             --exclude '127.0.0.1'

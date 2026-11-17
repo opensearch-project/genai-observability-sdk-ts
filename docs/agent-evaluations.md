@@ -74,9 +74,9 @@ Attributes (each is set only when it has a value):
 | `cicd.pipeline.run.id` | OTel | offline, in CI | CI run id |
 | `cicd.pipeline.run.url.full` | OTel | offline, in CI | Link to the CI run |
 | `opensearch.gen_ai.evaluation.level` | OpenSearch | all | `span`, `trace`, `session` or `tool_call` |
-| `opensearch.gen_ai.evaluation.evaluator.name` | OpenSearch | `score()`, `evaluate()` | Evaluator name |
+| `opensearch.gen_ai.evaluation.evaluator.name` | OpenSearch | all | Evaluator name |
 | `opensearch.gen_ai.evaluation.evaluator.version` | OpenSearch | `score()` | Evaluator version |
-| `opensearch.gen_ai.evaluation.evaluator.type` | OpenSearch | `score()`, `evaluate()` | `llm_judge`, `code`, `human` or `external` |
+| `opensearch.gen_ai.evaluation.evaluator.type` | OpenSearch | all | `llm_judge`, `code`, `human` or `external` |
 | `opensearch.gen_ai.evaluation.score.min` | OpenSearch | all | Lower bound of the scale |
 | `opensearch.gen_ai.evaluation.score.max` | OpenSearch | all | Upper bound of the scale |
 | `opensearch.gen_ai.evaluation.score.threshold` | OpenSearch | all | Pass threshold |
@@ -95,7 +95,7 @@ Attributes (each is set only when it has a value):
 - "OTel" names are in the OTel semantic conventions registry. `test.suite.run.id` and `test.case.id` are proposed in [semantic-conventions#1262](https://github.com/open-telemetry/semantic-conventions/issues/1262) and [semantic-conventions-genai#79](https://github.com/open-telemetry/semantic-conventions-genai/issues/79).
 - `opensearch.gen_ai.evaluation.*` names mirror the OTel `gen_ai.evaluation.*` names for fields OTel does not define yet.
 - "offline" means `evaluate()` and `Benchmark.log()`. `score()` sets the `test.*` and `opensearch.test.case.*` keys only if you pass them in `attributes`.
-- Run, case and score metadata you pass are added to the events too. Metadata cannot set `test.suite.*`, `test.case.*`, `cicd.pipeline.*`, `error.type`, `opensearch.test.case.*` or `opensearch.test.suite.run.*`: those keys are dropped, with one warning per key per process.
+- Run, case and score metadata you pass are added to the events too. Metadata cannot set the keys the SDK sets itself: `test.suite.name`, `test.suite.run.id`, `test.case.id`, `test.case.name`, `test.case.error`, `test.case.input`, `test.case.output`, `test.case.expected`, `opensearch.test.case.expected`, `opensearch.test.case.expected_truncated`, `opensearch.test.suite.run.name`, `opensearch.test.suite.run.description`, `error.type`, `gen_ai.operation.name` and `cicd.pipeline.name` / `.run.id` / `.run.url.full`, nor the keys `score()` owns (`gen_ai.evaluation.*`, `opensearch.gen_ai.evaluation.*`, `gen_ai.agent.name`, `gen_ai.agent.version`, `gen_ai.response.id`, `gen_ai.conversation.id`, `gen_ai.system_instructions`). Those keys are dropped, with one warning per key per process; other keys under the same prefixes (for example `test.suite.owner`) are kept.
 - Metadata (`new Benchmark({ metadata })`, `log({ metadata })`, `EvalScore.metadata`, `evaluate({ metadata })`) and `score({ attributes })` can set the judge context keys `gen_ai.request.model`, `gen_ai.prompt.name` and `gen_ai.prompt.version`, for example `new Benchmark('rag', { metadata: { 'gen_ai.request.model': 'gpt-4o' } })` for DeepEval or Ragas results. The explicit judge fields (`judgeModel`, `judgePromptName`, `judgePromptVersion` on `score()`, `defineScorer()` or an `EvalScore`) win when both are set. On a result event `gen_ai.request.model` is the judge's model, not the agent's.
 
 ## Setup
@@ -122,13 +122,7 @@ const provider = await register({
 await provider.forceFlush();
 ```
 
-Endpoints: each signal (traces, and logs for the evaluation events) is resolved the same way, following the OTel exporter spec. See the [README](../README.md#endpoints-traces-and-evaluation-logs) for details. There are no port options: the port is part of each URL.
-
-- Endpoint (code options always win over env vars): `tracesEndpoint` / `logsEndpoint` (full URL), else `endpoint` (base URL) + `/v1/traces` or `/v1/logs` over HTTP, as-is over gRPC, else `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` / `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` (full URL), else `OTEL_EXPORTER_OTLP_ENDPOINT` (base URL, same rule), else `http://localhost:4318` (`http://localhost:4317` over gRPC). For example `register({ endpoint: "http://collector:4318" })` sends logs to `http://collector:4318/v1/logs` even when `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` is set.
-- `endpoint` is always a base URL: a path ending in `/v1/traces` or `/v1/logs` throws. `tracesEndpoint` and `logsEndpoint` must be passed together (`logExporter` stands in for `logsEndpoint`), else `register()` throws.
-- Protocol: `protocol`, else a `grpc://` / `grpcs://` scheme on a URL passed in code, else `OTEL_EXPORTER_OTLP_<SIGNAL>_PROTOCOL`, else `OTEL_EXPORTER_OTLP_PROTOCOL`, else the URL scheme. Over gRPC, logs go to the same host and port as traces, and `headers` are sent as gRPC metadata with lowercased keys. OTLP/HTTP is always binary protobuf (`application/x-protobuf`): OTLP/JSON hex ids are corrupted by Data Prepper and OSIS, so `protocol: "http/json"` throws. gRPC is for a local OTel Collector (default `localhost:4317`) or a self-hosted Data Prepper, whose OTLP sources accept framed gRPC natively; OSIS does not support it.
-- Compression: `compression: "none" | "gzip"`, else `OTEL_EXPORTER_OTLP_<SIGNAL>_COMPRESSION`, else `OTEL_EXPORTER_OTLP_COMPRESSION`, else none. It must match the pipeline: OSIS accepts only none or gzip and the client must use the pipeline's `compression`.
-- Request size: OSIS `otel_*` sources cap requests at 1 MB to 4 MB (1 MB by default with the persistent buffer). For large GenAI spans, lower `OTEL_BSP_MAX_EXPORT_BATCH_SIZE`.
+Endpoints, protocol, compression, request size and SigV4 are resolved the same way for traces and for the evaluation logs. The rules are in [Endpoints: traces and evaluation logs](configuration.md#endpoints-traces-and-evaluation-logs); this section only shows the three common setups.
 
 Pick the setup that matches your ingestion (see [Ingestion](#ingestion) for the pipelines):
 
@@ -149,7 +143,7 @@ await register({
 });
 ```
 
-(c) Separate `otel_trace_source` and `otel_logs_source` pipelines: pass both full URLs. On Data Prepper the default ports are 21890 (traces) and 21892 (logs); set `path:` on each source and `unframed_requests: true`, and `ssl: false` for `http://` or a CA your process trusts (`NODE_EXTRA_CA_CERTS`) for `https://`. On OSIS, add `sigv4: { service: "osis", region }`.
+(c) Separate `otel_trace_source` and `otel_logs_source` pipelines: pass both full URLs. On OSIS, add `sigv4: { service: "osis", region }`. The Data Prepper source settings (ports, `path:`, `unframed_requests`, TLS) are in [Configuration](configuration.md#three-setups) and [Ingestion pipelines](configuration.md#ingestion-pipelines).
 
 ```typescript
 await register({
@@ -234,7 +228,7 @@ Record how an LLM judge graded, so a reader can tell two judge setups apart:
 | `judgePromptName` | `gen_ai.prompt.name`: the judge prompt template |
 | `judgePromptVersion` | `gen_ai.prompt.version`: its version |
 
-They are `score()` options and `defineScorer()` fields (also `EvalScore` fields, which win over the declaration). A `defineScorer()` declaration (evaluator, `evaluatorType`, `threshold`, `direction`, bounds, description and judge fields) applies only to the scorer's own results: a returned `EvalScore` whose `evaluator` is unset (or `""`) or equals the scorer's evaluator (the declared `evaluator`, else the function name, used for ownership only and not sent). A result naming any other evaluator (for example `{ name: "faithfulness", evaluator: "deepeval.faithfulness" }`) keeps its own type, pass rule and judge and gets none of the declaration, whatever its `name`, so its evaluator name, type and judge fields always describe the same evaluator. When a scorer declares any of these fields (a rule field, `evaluatorType`, the description or a judge field) and returns results in an `evaluate()` run but none of them, in any case, are its own, `evaluate()` warns once per scorer per process at the end of the run, naming its evaluator (declared, or the function name), the fields it declared (a `direction` defaulted from `threshold` is not listed) and the evaluators its results named. A scorer with an own result in any case of the run does not warn. Run and case `metadata` is not part of the declaration: it goes on every result as given, other evaluators' results included, so a judge key set there (`gen_ai.request.model`, `gen_ai.prompt.*`) describes the run; use the `defineScorer()` judge fields to scope it to the scorer's own results. A scorer's error result always names the scorer's own evaluator; a wrapper of another framework's metric should declare that metric's evaluator (`evaluator: 'deepeval.faithfulness'`) so its error results and its successful results name the same evaluator. Evaluator names (`EvalScore.evaluator`, `defineScorer({ evaluator })`, `log({ evaluator })`) are trimmed, and a blank one is unset; `defineScorer()` throws on a non-string `evaluator`. This matches the Python SDK. A returned `EvalScore` is checked like `defineScorer()`: an unknown `evaluatorType` or `direction`, or a non-string judge field, records an error result. There is no option for the judge's full system prompt: see [Judge prompt](#judge-prompt).
+They are `score()` options and `defineScorer()` fields (also `EvalScore` fields, which win over the declaration). A `defineScorer()` declaration (evaluator, `evaluatorType`, `threshold`, `direction`, bounds, description and judge fields) applies only to the scorer's own results: a returned `EvalScore` whose `evaluator` is unset (or `""`) or equals the scorer's evaluator (the declared `evaluator`, else the function name, used for ownership only and not sent). A result naming any other evaluator (for example `{ name: "faithfulness", evaluator: "deepeval.faithfulness" }`) keeps its own type, pass rule and judge and gets none of the declaration, whatever its `name`, so its evaluator name, type and judge fields always describe the same evaluator. When a scorer declares any of these fields (a rule field, `evaluatorType`, the description or a judge field) and returns results in an `evaluate()` run but none of them, in any case, are its own, `evaluate()` warns at the end of the run, once per process per evaluation name and evaluator (scorers rebuilt with the same name and evaluator warn once), naming its evaluator (declared, or the function name), the fields it declared (a `direction` defaulted from `threshold` is not listed) and the evaluators its results named. A scorer with an own result in any case of the run does not warn. Run and case `metadata` is not part of the declaration: it goes on every result as given, other evaluators' results included, so a judge key set there (`gen_ai.request.model`, `gen_ai.prompt.*`) describes the run; use the `defineScorer()` judge fields to scope it to the scorer's own results. A scorer's error result always names the scorer's own evaluator; a wrapper of another framework's metric should declare that metric's evaluator (`evaluator: 'deepeval.faithfulness'`) so its error results and its successful results name the same evaluator. Evaluator names (`EvalScore.evaluator`, `defineScorer({ evaluator })`, `log({ evaluator })`) are trimmed, and a blank one is unset; `defineScorer()` throws on a non-string `evaluator`, `evaluatorDescription`, `judgeModel`, `judgePromptName` or `judgePromptVersion`. A scorer wrapping another `defineScorer()` scorer without declaring an `evaluator` takes the inner scorer's evaluator. This matches the Python SDK. A returned `EvalScore` is checked like `defineScorer()`: an unknown `evaluatorType` or `direction`, or a non-string judge field, records an error result. There is no option for the judge's full system prompt: see [Judge prompt](#judge-prompt).
 
 ```typescript
 import { score } from "@opensearch-project/genai-observability-sdk-ts";
@@ -378,12 +372,7 @@ await provider.forceFlush();
 if (result.summary.failCount || result.summary.errorCount) process.exitCode = 1;
 ```
 
-- The task and the scorers may be synchronous or async, mixed. Once a task or scorer call returns a Promise (an async function, an `observe()`-wrapped one, or any function returning a thenable), `evaluate()` awaits it and returns a `Promise<BenchmarkResult>`; when all calls return plain values it returns the result directly. The declared type is `BenchmarkResult` when the task and scorers are typed synchronous, else `BenchmarkResult | Promise<BenchmarkResult>`, so `await evaluate(...)`. Invalid options (an empty `runId`) throw synchronously.
-- A scorer receives `(input, output, expected)` and returns (or resolves to) a finite number, a boolean (a verdict), an `EvalScore` or an `EvalScore[]`. A `null` field of an `EvalScore` (for example `"explanation": null` in parsed judge JSON) counts as unset. The `EvalScore` fields are read by name, so a class instance with getters (a framework's score object) works too. Anything else (`undefined`, `null`, `NaN`, an object without a `name`) logs a warning and emits an error result with `error.type` = `TypeError`. A scorer that throws or rejects (for example a judge call that fails) emits an error result with `error.type` = the exception class name.
-- `defineScorer(spec, fn)` declares the evaluation name, `threshold`, `direction`, `scoreMin`, `scoreMax`, `evaluator` and `evaluatorType`, for the scorer's own results (see [Judge context](#judge-context)). Fields set on a returned `EvalScore` win.
-- `EvalScore.judgeTraceId` sets `opensearch.gen_ai.evaluation.judge.trace_id`, in `evaluate()` and in `Benchmark.log()`.
-- Scorers run in an empty OTel context, outside the agent trace and outside any span that wraps `evaluate()`, so a traced judge gets its own trace.
-- Cases run one at a time, and a case's scorers run in order after its task settles. The running case rides in the task's OTel context, so with a context manager (`register()` installs one on Node) spans the task starts after an `await` are still stamped, and another `evaluate()` running at the same time stays apart. A span started in a fresh context (an HTTP handler under `propagation.extract(ROOT_CONTEXT, headers)`, `context.with(ROOT_CONTEXT, ...)`) is attached to the case only while exactly one case runs and only when it has no local parent; with overlapping runs, start the agent inside the task's context. `evaluate()` installs `AsyncLocalStorageContextManager` on Node when no context manager is set; where none can be installed, every span is parentless and the same rule applies, so run one `evaluate()` at a time there. See [How root spans are found](../README.md#evaluate).
+Async tasks and judges, what a scorer may return, `defineScorer()`, `judgeTraceId` and how the SDK finds each case's root span are in the [`evaluate()` reference](api-reference.md#evaluate). Scorers run in an empty OTel context, outside the agent trace and outside any span that wraps `evaluate()`, so a traced judge gets its own trace.
 
 ### Benchmark
 
@@ -493,17 +482,25 @@ For another CI system pass `ciPipeline: { "cicd.pipeline.run.id": "...", ... }` 
 ### Errors
 
 - The task throws or rejects (`evaluate()`): the case is not scored. Each scorer emits one error result under its evaluation name with `error.type` = the exception class name, no value, no label and no explanation. The run continues.
-- A scorer throws: one error result with `error.type` = the exception class name, no value, no label and no explanation. The message can carry URLs, keys or request bodies, so it stays in the local `scorerErrors`.
+- A scorer throws or rejects: one error result with `error.type` = the exception class name, no value, no label and no explanation. The message can carry URLs, keys or request bodies, so it stays in the local `scorerErrors`.
+- A scorer returns something other than a finite number, a boolean, an `EvalScore` or an `EvalScore[]` (for example `undefined` or `NaN`): a warning and one error result with `error.type` = `TypeError`.
 - `Benchmark.log({ errorType: "TimeoutError", scores: [...] })`: every listed score is sent as an error result.
 
 ### Local summary
 
-The summary is computed in your process and is not sent. `evaluate()` prints it and returns a `BenchmarkResult`; `Benchmark.close()` prints and returns the `BenchmarkSummary`.
+The summary is computed in your process and is not sent. `evaluate()` prints it and returns a `BenchmarkResult` (a `Promise<BenchmarkResult>` once a task or scorer call returns a Promise); `Benchmark.close()` prints and returns the `BenchmarkSummary`.
 
 - `BenchmarkSummary`: `benchmarkName`, `runId`, `runName` (when given), `totalCases`, `passCount`, `failCount`, `errorCount`, `durationMs`, and `scores` (per name: `avg`, `min`, `max`, `count`).
 - `TestCaseResult` (`result.cases`): `caseId`, `caseName`, `input`, `output`, `expected`, `scores`, `verdicts`, `resultStatus`, `status`, `error`, `errorType`, `scorerErrors`, `durationMs`, and `traceId` / `spanId` of the agent root span.
-- Case `resultStatus`: `error` if the task or a scorer threw; else `fail` if any score has a `fail` verdict; else `pass`.
-- Keys of `TestCaseResult.scores` / `.verdicts` and `BenchmarkSummary.scores`: the evaluation name. When results of different evaluators share a name in a run, the first evaluator to report it keeps the plain name and the others are keyed `"<name> (<evaluator>)"`, such as `"faithfulness (deepeval.faithfulness)"`, or `"<name> (no evaluator)"`. No result overwrites another, so a failing result always fails the case. Results of one evaluator with the same name share a key: the last value is kept and a `fail` verdict is kept over a `pass`.
+- Case `resultStatus`: `error` if the task threw or rejected, or a scorer errored (threw, rejected or returned an unusable value), or for `Benchmark.log()` when `error` or `errorType` is given; else `fail` if any score has a `fail` verdict; else `pass`.
+- Keys of `TestCaseResult.scores` / `.verdicts` and `BenchmarkSummary.scores`: the evaluation name, with these rules so no result overwrites another and a failing result always fails the case:
+  - Each result is keyed by its evaluation name and its evaluator: the `evaluator` it names, else its scorer's evaluator (the declared `evaluator`, else the function name) in `evaluate()`, or the `log()` evaluator in `Benchmark`.
+  - In `evaluate()`, before the first case, each scorer in list order claims its evaluation name (the declared `name`, else the function name) for its own evaluator, so a scorer's own results always get the plain key, whatever the order of results or errors. Any other name goes to the first evaluator that reports it in the run.
+  - Results of another evaluator with the same name are keyed `"<name> (<evaluator>)"`, such as `"faithfulness (deepeval.faithfulness)"`; `"<name> (no evaluator)"` only when no evaluator applies. When that key is already taken by a different name and evaluator (for example a real evaluation named `"f (b)"`), the later one gets `" (2)"`, `" (3)"` and so on appended.
+  - A result with no value and no verdict (for example a label other than `pass` / `fail`) claims no key.
+  - Results of one evaluator with the same name in a case share a key: a `fail` verdict is kept over a `pass`, and the value of a failing result is kept (otherwise the last value).
+  - Any evaluation name is a normal key, `__proto__` included.
+  - A `Benchmark.log()` call that throws records nothing locally.
 
 ## Ingestion
 
@@ -513,7 +510,7 @@ Evaluation events arrive on the OTLP logs path, mixed with your application logs
 
 Results are written to the alias `otel-v1-genai-evaluation`. Create the index template, the ISM policy and the first index once per cluster, for example in Dashboards Dev Tools, before the first result arrives. The automatic option, the experimental Data Prepper [`index_type: genai-evaluation-plain`](#automatic-option-index_type-genai-evaluation-plain), creates all of this itself; the manual steps here are for Data Prepper versions without it and for other pipelines.
 
-1. The index template. A composable template, `"version": 1`, priority 100, for the indices `otel-v1-genai-evaluation-*`. Installs from this guide and from Data Prepper use the same name and version, so they converge: Data Prepper does not overwrite an existing template with the same name and version.
+1. The index template. A composable template, `"version": 1`, priority 100, for the indices `otel-v1-genai-evaluation-*`. Installs from this guide and from Data Prepper use the same name and version, so they converge: Data Prepper does not overwrite an existing template with the same name and version. The `version` stays `1` to match the template Data Prepper installs, so it does not tell an older copy of this template apart from the current one: if you created the template from an earlier version of this guide, run the `PUT` below again (a `PUT` always replaces it). The new mappings apply to indices created after that, so roll over the alias (`POST otel-v1-genai-evaluation/_rollover`) to use them now.
 
 <details>
 <summary>otel-v1-genai-evaluation-index-template</summary>
@@ -708,11 +705,19 @@ PUT _index_template/otel-v1-genai-evaluation-index-template
                       "properties": {
                         "value": {
                           "type": "double"
+                        },
+                        "label": {
+                          "type": "keyword",
+                          "ignore_above": 256
                         }
                       }
                     },
                     "explanation": {
                       "type": "text"
+                    },
+                    "name": {
+                      "type": "keyword",
+                      "ignore_above": 256
                     }
                   }
                 },
@@ -721,12 +726,24 @@ PUT _index_template/otel-v1-genai-evaluation-index-template
                     "version": {
                       "type": "keyword",
                       "ignore_above": 256
+                    },
+                    "name": {
+                      "type": "keyword",
+                      "ignore_above": 256
                     }
                   }
                 },
                 "prompt": {
                   "properties": {
                     "version": {
+                      "type": "keyword",
+                      "ignore_above": 256
+                    }
+                  }
+                },
+                "conversation": {
+                  "properties": {
+                    "id": {
                       "type": "keyword",
                       "ignore_above": 256
                     }
@@ -750,6 +767,10 @@ PUT _index_template/otel-v1-genai-evaluation-index-template
                             },
                             "threshold": {
                               "type": "double"
+                            },
+                            "direction": {
+                              "type": "keyword",
+                              "ignore_above": 256
                             }
                           }
                         },
@@ -760,6 +781,10 @@ PUT _index_template/otel-v1-genai-evaluation-index-template
                               "ignore_above": 256
                             }
                           }
+                        },
+                        "level": {
+                          "type": "keyword",
+                          "ignore_above": 256
                         }
                       }
                     }
@@ -786,8 +811,20 @@ PUT _index_template/otel-v1-genai-evaluation-index-template
                           "ignore_above": 256
                         }
                       }
+                    },
+                    "name": {
+                      "type": "keyword",
+                      "ignore_above": 256
                     }
                   }
+                }
+              }
+            },
+            "error": {
+              "properties": {
+                "type": {
+                  "type": "keyword",
+                  "ignore_above": 256
                 }
               }
             }
@@ -848,9 +885,8 @@ How the template maps the result attributes:
 
 - `double`: `gen_ai.evaluation.score.value`, `opensearch.gen_ai.evaluation.score.min`, `.max` and `.threshold`. Other numbers map dynamically (`long` or `double`).
 - `text`: `gen_ai.evaluation.explanation` (searchable, not aggregatable).
-- `keyword` (`ignore_above` 256), pinned so the first value cannot pick a numeric type: `test.case.id`, `test.suite.run.id`, `gen_ai.agent.version`, `opensearch.gen_ai.evaluation.evaluator.version`, `gen_ai.prompt.version`.
+- `keyword` (`ignore_above` 256), pinned so the first value cannot pick a numeric type: `test.case.id`, `test.suite.run.id`, `test.suite.name`, `gen_ai.evaluation.name`, `gen_ai.evaluation.score.label`, `gen_ai.agent.name`, `gen_ai.agent.version`, `gen_ai.conversation.id`, `gen_ai.prompt.version`, `opensearch.gen_ai.evaluation.evaluator.version`, `opensearch.gen_ai.evaluation.score.direction`, `opensearch.gen_ai.evaluation.level`, `error.type`.
 - Every other string attribute, including `opensearch.test.case.expected`, the evaluator description, the case name and the CI URL, maps to `keyword` with `ignore_above` 256: the full value is stored and shown, never rejected, and only values up to 256 characters are indexed for filters and aggregations.
-- Top-level `eventName` and `serviceName` are pinned to `keyword`, as are `traceId` and `spanId`, so the `eventName` route checks, `findEvaluatedTraceIds()` and service filters use exact term matches and aggregations (a dynamic mapping would make them `text` with a `.keyword` subfield).
 - Top-level `traceId` and `spanId` are `keyword`. `eventName` is `text` with a `.keyword` sub-field, the same as Data Prepper's template: PPL filters and `stats ... by eventName` use the sub-field automatically, and a DSL terms aggregation or sort uses `eventName.keyword`. The service name is in `resource.attributes.service.name` (`keyword`); evaluation events have no top-level `serviceName`.
 - `date_detection` is off, so a date-like string stays a string.
 

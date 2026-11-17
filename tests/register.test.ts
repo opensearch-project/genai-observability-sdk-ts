@@ -27,6 +27,7 @@ import {
   DEFAULT_LOGS_ENDPOINT,
 } from '../src/register.js';
 import { score } from '../src/score.js';
+import { agentDefaults, setAgentDefaults } from '../src/internal.js';
 import { getSdkLoggerProvider, setSdkLoggerProvider } from '../src/logs.js';
 import { AWSSigV4OTLPExporter, AWSSigV4OTLPLogExporter } from '../src/exporters.js';
 import { createRequire } from 'module';
@@ -679,6 +680,23 @@ describe('register - custom span exporter without a logs destination', () => {
     warnSpy.mockRestore();
     await first.shutdown();
     await second.shutdown();
+  });
+
+  it('a setGlobal: false side pipeline keeps the main LoggerProvider and agent defaults', async () => {
+    const memory = new InMemoryLogRecordExporter();
+    const main = await register({ logExporter: memory, batch: false, agentName: 'travel_planner', autoInstrument: false });
+    const mainLogs = getSdkLoggerProvider();
+    expect(mainLogs).toBeDefined();
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const side = await register({ exporter: new InMemorySpanExporter(), setGlobal: false, autoInstrument: false });
+    warnSpy.mockRestore();
+    expect(getSdkLoggerProvider()).toBe(mainLogs);
+    expect(agentDefaults()).toEqual(['travel_planner', undefined]);
+    score({ name: 'x', value: 1 });
+    expect(memory.getFinishedLogRecords()).toHaveLength(1);
+    await side.shutdown();
+    await main.shutdown();
+    setAgentDefaults(undefined, undefined);
   });
 
   it('score() events then go to the global LoggerProvider', async () => {

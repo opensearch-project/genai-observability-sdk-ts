@@ -9,7 +9,7 @@ import { InMemorySpanExporter, type BasicTracerProvider } from '@opentelemetry/s
 import { register, autoInstrument } from '../src/register.js';
 
 // CommonJS require: the instrumentations patch through require-in-the-middle, which
-// hooks require(). (ESM apps need the loader hook; see README "Auto-instrumentation".)
+// hooks require(). (ESM apps need the loader hook; see docs/configuration.md#load-order.)
 const require = createRequire(import.meta.url);
 
 const CHAT_COMPLETION = {
