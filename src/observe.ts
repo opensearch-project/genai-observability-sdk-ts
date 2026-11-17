@@ -94,22 +94,30 @@ interface ParamInfo {
   rest: boolean;
 }
 
+/** A piece of source code: a whole string or template literal, or one other character. */
+interface SourceToken {
+  text: string;
+  /** True for a string or template literal. */
+  quoted: boolean;
+  /** Bracket depth around the token: an opening bracket is at the depth before it, a closing one after it. */
+  depth: number;
+}
+
 /**
- * The text between the parameter list's parentheses, starting at `open` (a "("), with comments
- * removed, or undefined when the parentheses are unbalanced. Skips nested brackets, strings and
- * template literals, so default values like `(a = f(1), b = ")")` are kept whole.
+ * The tokens of `source` from `start`, skipping comments; returns false when a block comment is
+ * not closed. Nested brackets are tracked by depth, and a string or template literal is one
+ * token, so brackets and commas inside it do not count.
  */
-function balancedParams(source: string, open: number): string | undefined {
+function* sourceTokens(source: string, start = 0): Generator<SourceToken, boolean> {
   let depth = 0;
-  let out = "";
-  for (let i = open; i < source.length; i++) {
+  for (let i = start; i < source.length; i++) {
     const c = source[i];
     if (c === "'" || c === '"' || c === "`") {
-      const start = i;
+      const from = i;
       for (i++; i < source.length && source[i] !== c; i++) {
         if (source[i] === "\\") i++;
       }
-      out += source.slice(start, i + 1);
+      yield { text: source.slice(from, i + 1), quoted: true, depth };
       continue;
     }
     if (c === "/" && source[i + 1] === "/") {
@@ -118,17 +126,36 @@ function balancedParams(source: string, open: number): string | undefined {
     }
     if (c === "/" && source[i + 1] === "*") {
       const end = source.indexOf("*/", i + 2);
-      if (end < 0) return undefined;
+      if (end < 0) return false;
       i = end + 1;
       continue;
     }
     if (c === "(" || c === "[" || c === "{") {
-      depth++;
+      yield { text: c, quoted: false, depth: depth++ };
     } else if (c === ")" || c === "]" || c === "}") {
-      depth--;
-      if (depth === 0) return c === ")" ? out.slice(1) : undefined;
+      yield { text: c, quoted: false, depth: --depth };
+    } else {
+      yield { text: c, quoted: false, depth };
     }
-    out += c;
+  }
+  return true;
+}
+
+/**
+ * The text between the parameter list's parentheses, starting at `open` (a "("), with comments
+ * removed, or undefined when the parentheses are unbalanced. Skips nested brackets, strings and
+ * template literals, so default values like `(a = f(1), b = ")")` are kept whole.
+ */
+function balancedParams(source: string, open: number): string | undefined {
+  let out = "";
+  let first = true;
+  for (const token of sourceTokens(source, open)) {
+    if (first) {
+      first = false;
+      continue; // the "(" at `open`
+    }
+    if (!token.quoted && token.depth === 0) return token.text === ")" ? out : undefined;
+    out += token.text;
   }
   return undefined;
 }
@@ -136,24 +163,16 @@ function balancedParams(source: string, open: number): string | undefined {
 /** Split a parameter list at top-level commas. */
 function splitTopLevel(params: string): string[] {
   const parts: string[] = [];
-  let depth = 0;
-  let start = 0;
-  for (let i = 0; i < params.length; i++) {
-    const c = params[i];
-    if (c === "'" || c === '"' || c === "`") {
-      for (i++; i < params.length && params[i] !== c; i++) {
-        if (params[i] === "\\") i++;
-      }
-    } else if (c === "(" || c === "[" || c === "{") {
-      depth++;
-    } else if (c === ")" || c === "]" || c === "}") {
-      depth--;
-    } else if (c === "," && depth === 0) {
-      parts.push(params.slice(start, i));
-      start = i + 1;
+  let current = "";
+  for (const token of sourceTokens(params)) {
+    if (!token.quoted && token.text === "," && token.depth === 0) {
+      parts.push(current);
+      current = "";
+    } else {
+      current += token.text;
     }
   }
-  parts.push(params.slice(start));
+  parts.push(current);
   return parts.map((p) => p.trim()).filter(Boolean);
 }
 
