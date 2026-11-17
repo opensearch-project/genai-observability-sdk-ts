@@ -268,7 +268,7 @@ function ownEvaluatorOf(fn: ScorerFn): string | undefined {
 }
 
 /**
- * Whether a score belongs to `owner`, a scorer's evaluator:
+ * Whether a score belongs to `owner` (a scorer's evaluator, or a `Benchmark.log()` default):
  * its `evaluator` is unset (or `""`) or equals `owner`. A score that names a different
  * evaluator is another evaluator's result, whatever its `name`.
  */
@@ -532,6 +532,8 @@ function emitCaseScores(
   const testAttrs = { ...identityAttrs, ...(identity.run ?? {}), ...(identity.expected ?? {}) };
   const errored = extra.errorType !== undefined;
   for (const s of scores) {
+    // The log-level evaluator defaults go only on scores of that evaluator (see ownsScore).
+    const own = ownsScore(s, extra.evaluator);
     const scoreMeta = s.metadata ? toAttributes(safeMetadata(s.metadata, `score:${s.name}`)) : {};
     const options = {
       name: s.name,
@@ -542,8 +544,8 @@ function emitCaseScores(
       scoreMin: s.scoreMin,
       scoreMax: s.scoreMax,
       threshold: s.threshold,
-      evaluator: s.evaluator ?? extra.evaluator,
-      evaluatorType: s.evaluatorType ?? extra.evaluatorType,
+      evaluator: own && isUnsetEvaluator(s.evaluator) ? extra.evaluator : s.evaluator,
+      evaluatorType: own ? s.evaluatorType ?? extra.evaluatorType : s.evaluatorType,
       errorType: extra.errorType,
       judgeTraceId: s.judgeTraceId,
       ...judgeContextOf(s),
@@ -759,14 +761,16 @@ export class Benchmark {
     traceId?: string;
     spanId?: string;
     /**
-     * Default `opensearch.gen_ai.evaluation.evaluator.name` for every score of
-     * this call, for example `"deepeval"`. An `EvalScore` that sets its own
-     * `evaluator` wins.
+     * Default `opensearch.gen_ai.evaluation.evaluator.name` for the scores of
+     * this call whose `evaluator` is unset (or `""`), for example `"deepeval"`.
+     * An `EvalScore` that names a different evaluator keeps it and gets no
+     * default `evaluatorType`.
      */
     evaluator?: string;
     /**
-     * Default `opensearch.gen_ai.evaluation.evaluator.type` for every score of
-     * this call. An `EvalScore` that sets its own `evaluatorType` wins.
+     * Default `opensearch.gen_ai.evaluation.evaluator.type` for the scores of
+     * this call whose `evaluator` is unset or equals `evaluator`. An
+     * `EvalScore` that sets its own `evaluatorType` wins.
      */
     evaluatorType?: EvaluatorType;
   }): void {

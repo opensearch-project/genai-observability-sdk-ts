@@ -444,7 +444,7 @@ describe('evaluator on EvalScore', () => {
     expect(result.cases[0].resultStatus).toBe('pass');
   });
 
-  it('Benchmark.log() evaluator defaults apply to every score; an EvalScore wins', () => {
+  it('Benchmark.log() evaluator defaults apply to scores of that evaluator; an EvalScore wins', () => {
     const bm = new Benchmark('suite');
     bm.log({
       scores: [
@@ -463,6 +463,28 @@ describe('evaluator on EvalScore', () => {
     expect(own.attributes['opensearch.gen_ai.evaluation.evaluator.type']).toBe('code');
     expect(c.attributes['opensearch.gen_ai.evaluation.evaluator.name']).toBe('ragas');
     expect(c.attributes['opensearch.gen_ai.evaluation.evaluator.type']).toBeUndefined();
+  });
+
+  it('Benchmark.log() gives no default type to a score naming a different evaluator', () => {
+    const bm = new Benchmark('suite');
+    bm.log({
+      evaluator: 'ragas',
+      evaluatorType: 'llm_judge',
+      scores: [
+        { name: 'b', value: 1, evaluator: 'own' },
+        { name: 'c', value: 1, evaluator: 'ragas' },
+        { name: 'd', value: 1, evaluator: '' },
+      ],
+    });
+    bm.log({ input: 'q2', evaluatorType: 'code', scores: [{ name: 'e', value: 1, evaluator: 'own' }] });
+    bm.close();
+    const [b, c, d, e] = getFinishedLogRecords();
+    expect(b.attributes['opensearch.gen_ai.evaluation.evaluator.name']).toBe('own');
+    expect(b.attributes['opensearch.gen_ai.evaluation.evaluator.type']).toBeUndefined();
+    expect(c.attributes['opensearch.gen_ai.evaluation.evaluator.type']).toBe('llm_judge');
+    expect(d.attributes['opensearch.gen_ai.evaluation.evaluator.name']).toBe('ragas');
+    expect(d.attributes['opensearch.gen_ai.evaluation.evaluator.type']).toBe('llm_judge');
+    expect(e.attributes['opensearch.gen_ai.evaluation.evaluator.type']).toBeUndefined();
   });
 
   it('Benchmark.log() error results keep the evaluator', () => {
