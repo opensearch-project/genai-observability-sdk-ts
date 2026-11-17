@@ -60,8 +60,11 @@ An unknown agent is left out, never invented. `evaluate()` also stamps the agent
 | `headers` | `Record<string, string>` | none | Headers for every export (traces and logs). Over gRPC they are sent as gRPC metadata with lowercased keys (gRPC rejects uppercase keys) |
 | `logs` | `boolean` | `true` | Set up a LoggerProvider for evaluation events |
 | `logExporter` | `LogRecordExporter` | none | Custom log exporter, used as given (logs only) |
+| `setGlobal` | `boolean` | `true` | Register the tracer provider and LoggerProvider as the OTel globals and, on Node, install `AsyncLocalStorageContextManager` when no context manager is set. With `false`, `score()` still emits through this `register()`'s LoggerProvider |
+| `agentName` | `string` | none | Default `gen_ai.agent.name` of evaluation results (see [Agent identity](#agent-identity)) |
+| `agentVersion` | `string` | none | Default `gen_ai.agent.version` of evaluation results |
 
-**Logs pipeline.** `register()` also creates a `LoggerProvider` with a batch processor (simple when `batch: false`) and a log exporter for evaluation events, over the same protocol rules as traces. `provider.forceFlush()` and `provider.shutdown()` flush and shut down both pipelines. If a global `LoggerProvider` is already registered (for example by `NodeSDK`), `register()` leaves it in place and `score()` emits through it.
+**Logs pipeline.** `register()` also creates a `LoggerProvider` with a batch processor (simple when `batch: false`) and a log exporter for evaluation events, over the same protocol rules as traces. `provider.forceFlush()` and `provider.shutdown()` flush and shut down both pipelines. If a global `LoggerProvider` is already registered (for example by `NodeSDK`), `register()` (with `setGlobal`, the default) leaves it in place, creates none, and `score()` emits through it.
 
 **Endpoints and auto-instrumentation.** Where traces and evaluation logs go (endpoint and protocol resolution, errors, compression, SigV4) is in [Endpoints: traces and evaluation logs](configuration.md#endpoints-traces-and-evaluation-logs). Which libraries `autoInstrument` turns on, their supported versions and the ESM load order are in [Auto-instrumentation](configuration.md#auto-instrumentation).
 
@@ -215,7 +218,7 @@ Records one evaluation result as an OTel log event with event name `gen_ai.evalu
 
 ```typescript
 // Inline: the evaluated span is the active span. Needs an OTel context
-// manager (register() installs none); otherwise pass traceId and spanId.
+// manager (register() installs one on Node); otherwise pass traceId and spanId.
 withObserve("answer", { op: Op.CHAT }, () => {
   score({ name: "relevance", value: 0.92, label: "relevant", evaluator: "relevance_judge" });
 });
@@ -384,10 +387,11 @@ const provider = new BasicTracerProvider({
 | `runId` | `string` | `test.suite.run.id` (default: generated). Use the same id from every CI shard so they report into one run, or an existing run's id to re-score it (send new results with the same run id). Empty or whitespace-only throws |
 | `ciPipeline` | `Record<string, string>` | Set or override `cicd.pipeline.name` / `.run.id` / `.run.url.full` (read from the CI environment by default; nothing outside CI) |
 | `recordExpected` | `boolean` | Export each case's `expected` as `opensearch.test.case.expected` (default `true`). Pass `false` if test sets hold sensitive data. Also a `new Benchmark()` option |
+| `agentName` / `agentVersion` | `string` | The agent under test (`gen_ai.agent.name` / `.version`), on every result and on the agent root spans that name none. When omitted: the agent each case's root span names, else `register({ agentName, agentVersion })`. Also `new Benchmark()` options (without root spans: the `register()` default) |
 
 Each `TestCaseResult` has `status` (`pass`, or `fail` when the case errored or failed a verdict), `resultStatus` (`pass` | `fail` | `error`), `errorType`, `durationMs`, `verdicts` (evaluation name to verdict), and the `traceId` / `spanId` of the agent root span when the task created one.
 
-**Declaring rules.** Wrap a scorer with `defineScorer(spec, fn)` to declare its evaluation name and pass rule up front. A scorer may also return a `boolean` (a verdict) or an `EvalScore` with `label` (`"pass"` / `"fail"`), `passed`, `threshold`, `direction`, `scoreMin`, `scoreMax`, `judgeTraceId` (the LLM judge's own trace, sent as `opensearch.gen_ai.evaluation.judge.trace_id`); fields set on the `EvalScore` win over the declaration, and the declaration is not applied to another evaluator's results (an `EvalScore` whose `evaluator` differs from a declared `evaluator`); a scorer that declares no `evaluator` applies it to every result. `defineScorer()` and `EvalScore` also take the judge context of `score()`: `evaluatorDescription`, `judgeModel`, `judgePromptName` and `judgePromptVersion`.
+**Declaring rules.** Wrap a scorer with `defineScorer(spec, fn)` to declare its evaluation name and pass rule up front. A scorer may also return a `boolean` (a verdict) or an `EvalScore` with `label` (`"pass"` / `"fail"`), `passed`, `threshold`, `direction`, `scoreMin`, `scoreMax`, `judgeTraceId` (the LLM judge's own trace, sent as `opensearch.gen_ai.evaluation.judge.trace_id`); fields set on the `EvalScore` win over the declaration. The declaration applies only to the scorer's own results: an `EvalScore` whose `evaluator` is unset or equals the declared `evaluator`, or whose `name` is the scorer's evaluation name (`name`, else the function name). Results of other evaluators (for example `{ name: "faith", evaluator: "deepeval.faithfulness" }`) keep their own type, pass rule and judge, whether or not the scorer declares an `evaluator` (see [Judge context](agent-evaluations.md#judge-context)). `defineScorer()` and `EvalScore` also take the judge context of `score()`: `evaluatorDescription`, `judgeModel`, `judgePromptName` and `judgePromptVersion`.
 
 **Judge prompt.** Results identify the judge prompt by `gen_ai.prompt.name` + `gen_ai.prompt.version` (`name@version`) and link the judge's run by `judgeTraceId`. The full prompt text is never put on a result event: it belongs on the judge's own LLM span as `gen_ai.system_instructions`, recorded by the judge's instrumentation or by `enrich({ systemInstructions })` inside a `withObserve()` / `observe()` judge call. See [Judge prompt](agent-evaluations.md#judge-prompt).
 
