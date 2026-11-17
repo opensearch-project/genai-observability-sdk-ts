@@ -44,12 +44,26 @@ examples/
   end-to-end/strands-observability-agent/   full lifecycle example
 ```
 
+## Prerequisites
+
+- Node.js 18.19+ or 20.6+.
+- A place to send telemetry. Locally, the [OpenSearch observability stack](https://github.com/opensearch-project/observability-stack) (`docker compose up -d`): OTel Collector on `localhost:4318` (HTTP) and `4317` (gRPC), Data Prepper, OpenSearch on `https://localhost:9200` (user `admin`, password `OPENSEARCH_PASSWORD` from its `.env`) and OpenSearch Dashboards on `http://localhost:5601`. Spans land in `otel-v1-apm-span-*`, evaluation results in the `otel-v1-genai-evaluation` alias. See [`runbooks/tracing.md`](runbooks/tracing.md#1-stand-up-the-stack).
+- Model access for the framework examples. They default to Amazon Bedrock (`AWS_PROFILE`, `AWS_REGION`, model `us.anthropic.claude-haiku-4-5-20251001-v1:0`, override with `MODEL_ID`). The OpenAI and Anthropic examples also show their own API key setup. Each README lists its env vars.
+
 ## How to run
 
-1. Start a local stack (OTel Collector, Data Prepper, OpenSearch, OpenSearch Dashboards): see [`runbooks/tracing.md`](runbooks/tracing.md#1-stand-up-the-stack).
-2. Pick an example folder, then `npm install` and `npx tsx agent.ts`. Each folder is standalone (its own `package.json`, depending on `@opensearch-project/genai-observability-sdk-ts`) and its README lists its env vars. The examples depend on `^0.2.0`; until that version is on npm, build and pack the SDK from a clone (`pnpm install && pnpm build && npm pack` in the repository root) and run `npm install --no-save <path to the .tgz>` in the example folder (it installs the other dependencies too). The Strands folders ship an `.npmrc` with `legacy-peer-deps=true`: Strands declares optional OpenTelemetry JS 2.x peers and the SDK is on 1.x, so a plain `npm install` fails with `ERESOLVE` without it.
-3. Open Agent Traces at `http://localhost:5601/app/agentTraces`, and evaluations at `http://localhost:5601/app/agentTraces/evaluations`.
+Each folder is self-contained: it has a `README.md`, its code and a `package.json` that depends on `@opensearch-project/genai-observability-sdk-ts@^0.2.0`.
 
-The basics are the exception: they import the SDK from `../../src`, so run them from a clone of this repository (`pnpm install`, then `npx tsx examples/basics/01_tracing_basics.ts`).
+```bash
+cd examples/tracing/strands          # or any other example folder
+npm install
+npx tsx agent.ts                     # the folder's README has the exact command
+```
 
-Model access: the examples call Amazon Bedrock by default (`AWS_PROFILE`, `AWS_REGION`, and `MODEL_ID` to override the model). The OpenAI and Anthropic examples show their own API key setup in their READMEs.
+The Strands folders ship an `.npmrc` with `legacy-peer-deps=true`: Strands declares optional OpenTelemetry JS 2.x peers and the SDK is on 1.x, so a plain `npm install` fails with `ERESOLVE` without it.
+
+To run against the SDK in this checkout instead of the npm release, build and pack it (`pnpm install && pnpm build && npm pack` in the repository root) and run `npm install --no-save <path to the .tgz>` in the example folder (it installs the other dependencies too).
+
+The basics import the SDK from `../../src`, so run them from a clone of this repository: `pnpm install`, then `npx tsx examples/basics/01_tracing_basics.ts`.
+
+Then open Agent Traces at `http://localhost:5601/app/agentTraces`, and evaluations at `http://localhost:5601/app/agentTraces/evaluations`. The runbooks show the OpenSearch queries that check the data arrived.
