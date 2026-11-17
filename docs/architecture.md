@@ -18,11 +18,11 @@ How spans and evaluation events flow from your application through the SDK and a
 │  │  ├── TestCaseSpanProcessor (evaluate())       │    │
 │  │  ├── BatchSpanProcessor                       │    │
 │  │  │   └── OTLPSpanExporter (HTTP or gRPC)      │    │
-│  │  │       └── SigV4 signing (AWS endpoints)    │    │
+│  │  │       └── SigV4 signing (sigv4 option)    │    │
 │  │  └── Auto-instrumentation                     │    │
-│  │  LoggerProvider (evaluation and test events)  │    │
+│  │  LoggerProvider (evaluation result events)    │    │
 │  │  └── BatchLogRecordProcessor                  │    │
-│  │      └── OTLPLogExporter (HTTP, /v1/logs)     │    │
+│  │      └── OTLPLogExporter (HTTP or gRPC)       │    │
 │  └──────────────────────────────────────────────┘    │
 └───────────────────────┬──────────────────────────────┘
                         │ OTLP (HTTP/gRPC)
@@ -42,7 +42,7 @@ How spans and evaluation events flow from your application through the SDK and a
 
 ## Spans
 
-`register()` sets up a `TracerProvider` with a `BatchSpanProcessor` (simple with `batch: false`) and an OTLP span exporter (HTTP or gRPC, optionally SigV4-signed), and turns on the installed auto-instrumentations. `observe()`, `withObserve()` and the instrumentations create standard OTel spans with GenAI semantic convention attributes, and `enrich()` adds attributes to the active span. Spans are exported to `/v1/traces`, and Data Prepper writes them to `otel-v1-apm-span-*`.
+`register()` sets up a `TracerProvider` with a `BatchSpanProcessor` (simple with `batch: false`) and an OTLP span exporter (HTTP or gRPC, optionally SigV4-signed), and turns on `@opentelemetry/instrumentation-openai` when it is installed (the AWS SDK instrumentation only with `autoInstrument: { awsSdk: true }`; see [Auto-instrumentation](configuration.md#auto-instrumentation)). `observe()`, `withObserve()` and the instrumentations create standard OTel spans with GenAI semantic convention attributes, and `enrich()` adds attributes to the active span. Spans are exported to `/v1/traces`, and Data Prepper writes them to `otel-v1-apm-span-*`.
 
 For example, this code:
 
@@ -87,7 +87,7 @@ Data Prepper marks the outermost GenAI span of each trace with `derived.gen_ai.i
 
 ## Evaluation events
 
-`score()`, `evaluate()` and `Benchmark` emit each result as an OTel log event named `gen_ai.evaluation.result`. `register()` sets up a `LoggerProvider` with a `BatchLogRecordProcessor` and an OTLP log exporter for them. The event carries the trace context of the evaluated span, so it joins that trace without adding a span. It is exported to `/v1/logs`, and Data Prepper routes it (`eventName == "gen_ai.evaluation.result"`) to the `otel-v1-genai-evaluation` alias.
+`score()`, `evaluate()` and `Benchmark` emit each result as an OTel log event named `gen_ai.evaluation.result`. `register()` sets up a `LoggerProvider` with a `BatchLogRecordProcessor` (simple with `batch: false`) and an OTLP log exporter for them, unless a global `LoggerProvider` is already registered: then `score()` emits through that one. The event carries the trace context of the evaluated span, so it joins that trace without adding a span. It is exported to `/v1/logs`, and Data Prepper routes it (`eventName == "gen_ai.evaluation.result"`) to the `otel-v1-genai-evaluation` alias.
 
 `evaluate()` creates no spans of its own: each case's agent run is its own trace, and `TestCaseSpanProcessor` stamps the `test.*` ids on its root span. What each event holds is in [What gets stored](agent-evaluations.md#what-gets-stored); the pipelines are in [Ingestion](agent-evaluations.md#ingestion).
 
