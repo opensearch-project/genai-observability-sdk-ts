@@ -74,9 +74,9 @@ Attributes (each is set only when it has a value):
 | `cicd.pipeline.run.id` | OTel | offline, in CI | CI run id |
 | `cicd.pipeline.run.url.full` | OTel | offline, in CI | Link to the CI run |
 | `opensearch.gen_ai.evaluation.level` | OpenSearch | all | `span`, `trace`, `session` or `tool_call` |
-| `opensearch.gen_ai.evaluation.evaluator.name` | OpenSearch | `score()`, `evaluate()` | Evaluator name |
+| `opensearch.gen_ai.evaluation.evaluator.name` | OpenSearch | all | Evaluator name |
 | `opensearch.gen_ai.evaluation.evaluator.version` | OpenSearch | `score()` | Evaluator version |
-| `opensearch.gen_ai.evaluation.evaluator.type` | OpenSearch | `score()`, `evaluate()` | `llm_judge`, `code`, `human` or `external` |
+| `opensearch.gen_ai.evaluation.evaluator.type` | OpenSearch | all | `llm_judge`, `code`, `human` or `external` |
 | `opensearch.gen_ai.evaluation.score.min` | OpenSearch | all | Lower bound of the scale |
 | `opensearch.gen_ai.evaluation.score.max` | OpenSearch | all | Upper bound of the scale |
 | `opensearch.gen_ai.evaluation.score.threshold` | OpenSearch | all | Pass threshold |
@@ -95,7 +95,7 @@ Attributes (each is set only when it has a value):
 - "OTel" names are in the OTel semantic conventions registry. `test.suite.run.id` and `test.case.id` are proposed in [semantic-conventions#1262](https://github.com/open-telemetry/semantic-conventions/issues/1262) and [semantic-conventions-genai#79](https://github.com/open-telemetry/semantic-conventions-genai/issues/79).
 - `opensearch.gen_ai.evaluation.*` names mirror the OTel `gen_ai.evaluation.*` names for fields OTel does not define yet.
 - "offline" means `evaluate()` and `Benchmark.log()`. `score()` sets the `test.*` and `opensearch.test.case.*` keys only if you pass them in `attributes`.
-- Run, case and score metadata you pass are added to the events too. Metadata cannot set `test.suite.*`, `test.case.*`, `cicd.pipeline.*`, `error.type`, `opensearch.test.case.*` or `opensearch.test.suite.run.*`: those keys are dropped, with one warning per key per process.
+- Run, case and score metadata you pass are added to the events too. Metadata cannot set the keys the SDK sets itself: `test.suite.name`, `test.suite.run.id`, `test.case.id`, `test.case.name`, `test.case.error`, `test.case.input`, `test.case.output`, `test.case.expected`, `opensearch.test.case.expected`, `opensearch.test.case.expected_truncated`, `opensearch.test.suite.run.name`, `opensearch.test.suite.run.description`, `error.type`, `gen_ai.operation.name` and `cicd.pipeline.name` / `.run.id` / `.run.url.full`, nor the keys `score()` owns (`gen_ai.evaluation.*`, `opensearch.gen_ai.evaluation.*`, `gen_ai.agent.name`, `gen_ai.agent.version`, `gen_ai.response.id`, `gen_ai.conversation.id`, `gen_ai.system_instructions`). Those keys are dropped, with one warning per key per process; other keys under the same prefixes (for example `test.suite.owner`) are kept.
 - Metadata (`new Benchmark({ metadata })`, `log({ metadata })`, `EvalScore.metadata`, `evaluate({ metadata })`) and `score({ attributes })` can set the judge context keys `gen_ai.request.model`, `gen_ai.prompt.name` and `gen_ai.prompt.version`, for example `new Benchmark('rag', { metadata: { 'gen_ai.request.model': 'gpt-4o' } })` for DeepEval or Ragas results. The explicit judge fields (`judgeModel`, `judgePromptName`, `judgePromptVersion` on `score()`, `defineScorer()` or an `EvalScore`) win when both are set. On a result event `gen_ai.request.model` is the judge's model, not the agent's.
 
 ## Setup
@@ -482,16 +482,17 @@ For another CI system pass `ciPipeline: { "cicd.pipeline.run.id": "...", ... }` 
 ### Errors
 
 - The task throws or rejects (`evaluate()`): the case is not scored. Each scorer emits one error result under its evaluation name with `error.type` = the exception class name, no value, no label and no explanation. The run continues.
-- A scorer throws: one error result with `error.type` = the exception class name, no value, no label and no explanation. The message can carry URLs, keys or request bodies, so it stays in the local `scorerErrors`.
+- A scorer throws or rejects: one error result with `error.type` = the exception class name, no value, no label and no explanation. The message can carry URLs, keys or request bodies, so it stays in the local `scorerErrors`.
+- A scorer returns something other than a finite number, a boolean, an `EvalScore` or an `EvalScore[]` (for example `undefined` or `NaN`): a warning and one error result with `error.type` = `TypeError`.
 - `Benchmark.log({ errorType: "TimeoutError", scores: [...] })`: every listed score is sent as an error result.
 
 ### Local summary
 
-The summary is computed in your process and is not sent. `evaluate()` prints it and returns a `BenchmarkResult`; `Benchmark.close()` prints and returns the `BenchmarkSummary`.
+The summary is computed in your process and is not sent. `evaluate()` prints it and returns a `BenchmarkResult` (a `Promise<BenchmarkResult>` once a task or scorer call returns a Promise); `Benchmark.close()` prints and returns the `BenchmarkSummary`.
 
 - `BenchmarkSummary`: `benchmarkName`, `runId`, `runName` (when given), `totalCases`, `passCount`, `failCount`, `errorCount`, `durationMs`, and `scores` (per name: `avg`, `min`, `max`, `count`).
 - `TestCaseResult` (`result.cases`): `caseId`, `caseName`, `input`, `output`, `expected`, `scores`, `verdicts`, `resultStatus`, `status`, `error`, `errorType`, `scorerErrors`, `durationMs`, and `traceId` / `spanId` of the agent root span.
-- Case `resultStatus`: `error` if the task or a scorer threw; else `fail` if any score has a `fail` verdict; else `pass`.
+- Case `resultStatus`: `error` if the task threw or rejected, or a scorer errored (threw, rejected or returned an unusable value), or for `Benchmark.log()` when `error` or `errorType` is given; else `fail` if any score has a `fail` verdict; else `pass`.
 - Keys of `TestCaseResult.scores` / `.verdicts` and `BenchmarkSummary.scores`: the evaluation name. When results of different evaluators share a name in a run, the first evaluator to report it keeps the plain name and the others are keyed `"<name> (<evaluator>)"`, such as `"faithfulness (deepeval.faithfulness)"`, or `"<name> (no evaluator)"`. No result overwrites another, so a failing result always fails the case. Results of one evaluator with the same name share a key: the last value is kept and a `fail` verdict is kept over a `pass`.
 
 ## Ingestion
@@ -697,11 +698,19 @@ PUT _index_template/otel-v1-genai-evaluation-index-template
                       "properties": {
                         "value": {
                           "type": "double"
+                        },
+                        "label": {
+                          "type": "keyword",
+                          "ignore_above": 256
                         }
                       }
                     },
                     "explanation": {
                       "type": "text"
+                    },
+                    "name": {
+                      "type": "keyword",
+                      "ignore_above": 256
                     }
                   }
                 },
@@ -710,12 +719,24 @@ PUT _index_template/otel-v1-genai-evaluation-index-template
                     "version": {
                       "type": "keyword",
                       "ignore_above": 256
+                    },
+                    "name": {
+                      "type": "keyword",
+                      "ignore_above": 256
                     }
                   }
                 },
                 "prompt": {
                   "properties": {
                     "version": {
+                      "type": "keyword",
+                      "ignore_above": 256
+                    }
+                  }
+                },
+                "conversation": {
+                  "properties": {
+                    "id": {
                       "type": "keyword",
                       "ignore_above": 256
                     }
@@ -739,6 +760,10 @@ PUT _index_template/otel-v1-genai-evaluation-index-template
                             },
                             "threshold": {
                               "type": "double"
+                            },
+                            "direction": {
+                              "type": "keyword",
+                              "ignore_above": 256
                             }
                           }
                         },
@@ -749,6 +774,10 @@ PUT _index_template/otel-v1-genai-evaluation-index-template
                               "ignore_above": 256
                             }
                           }
+                        },
+                        "level": {
+                          "type": "keyword",
+                          "ignore_above": 256
                         }
                       }
                     }
@@ -775,8 +804,20 @@ PUT _index_template/otel-v1-genai-evaluation-index-template
                           "ignore_above": 256
                         }
                       }
+                    },
+                    "name": {
+                      "type": "keyword",
+                      "ignore_above": 256
                     }
                   }
+                }
+              }
+            },
+            "error": {
+              "properties": {
+                "type": {
+                  "type": "keyword",
+                  "ignore_above": 256
                 }
               }
             }
@@ -837,9 +878,8 @@ How the template maps the result attributes:
 
 - `double`: `gen_ai.evaluation.score.value`, `opensearch.gen_ai.evaluation.score.min`, `.max` and `.threshold`. Other numbers map dynamically (`long` or `double`).
 - `text`: `gen_ai.evaluation.explanation` (searchable, not aggregatable).
-- `keyword` (`ignore_above` 256), pinned so the first value cannot pick a numeric type: `test.case.id`, `test.suite.run.id`, `gen_ai.agent.version`, `opensearch.gen_ai.evaluation.evaluator.version`, `gen_ai.prompt.version`.
+- `keyword` (`ignore_above` 256), pinned so the first value cannot pick a numeric type: `test.case.id`, `test.suite.run.id`, `test.suite.name`, `gen_ai.evaluation.name`, `gen_ai.evaluation.score.label`, `gen_ai.agent.name`, `gen_ai.agent.version`, `gen_ai.conversation.id`, `gen_ai.prompt.version`, `opensearch.gen_ai.evaluation.evaluator.version`, `opensearch.gen_ai.evaluation.score.direction`, `opensearch.gen_ai.evaluation.level`, `error.type`.
 - Every other string attribute, including `opensearch.test.case.expected`, the evaluator description, the case name and the CI URL, maps to `keyword` with `ignore_above` 256: the full value is stored and shown, never rejected, and only values up to 256 characters are indexed for filters and aggregations.
-- Top-level `eventName` and `serviceName` are pinned to `keyword`, as are `traceId` and `spanId`, so the `eventName` route checks, `findEvaluatedTraceIds()` and service filters use exact term matches and aggregations (a dynamic mapping would make them `text` with a `.keyword` subfield).
 - Top-level `traceId` and `spanId` are `keyword`. `eventName` is `text` with a `.keyword` sub-field, the same as Data Prepper's template: PPL filters and `stats ... by eventName` use the sub-field automatically, and a DSL terms aggregation or sort uses `eventName.keyword`. The service name is in `resource.attributes.service.name` (`keyword`); evaluation events have no top-level `serviceName`.
 - `date_detection` is off, so a date-like string stays a string.
 
