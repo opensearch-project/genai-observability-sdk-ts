@@ -280,33 +280,126 @@ describe('evaluator on EvalScore', () => {
     expect(c.attributes['opensearch.gen_ai.evaluation.evaluator.name']).toBeUndefined();
   });
 
-  it('a returned EvalScore evaluator wins over the declaration, without its type', () => {
+  it('a returned EvalScore evaluator wins over the declaration, without its type or judge', () => {
+    // Named like the scorer's evaluation: the name does not make another evaluator's result its own.
     const s = defineScorer(
-      { name: 'q', evaluator: 'declared', evaluatorType: 'code' },
-      function q() { return { name: 'other', value: 1, evaluator: 'actual' }; },
+      {
+        name: 'q',
+        evaluator: 'declared',
+        evaluatorType: 'code',
+        judgeModel: 'gpt-x',
+        evaluatorDescription: 'desc',
+        threshold: 2,
+      },
+      function q() { return { name: 'q', value: 1, evaluator: 'actual' }; },
     );
-    evaluate({ name: 'suite', task: tracedTask, data: [{ input: 'a' }], scores: [s] });
+    const result = evaluate({ name: 'suite', task: tracedTask, data: [{ input: 'a' }], scores: [s] });
     const [r] = getFinishedLogRecords();
     expect(r.attributes['opensearch.gen_ai.evaluation.evaluator.name']).toBe('actual');
-    // Another evaluator's result: the declared type describes "declared", not "actual".
+    // Another evaluator's result: the declaration describes "declared", not "actual".
     expect(r.attributes['opensearch.gen_ai.evaluation.evaluator.type']).toBeUndefined();
+    expect(r.attributes['gen_ai.request.model']).toBeUndefined();
+    expect(r.attributes['opensearch.gen_ai.evaluation.evaluator.description']).toBeUndefined();
+    expect(r.attributes['opensearch.gen_ai.evaluation.score.threshold']).toBeUndefined();
+    expect(result.cases[0].resultStatus).toBe('pass');
   });
 
-  it("a score named like the scorer's evaluation is its own, whatever evaluator it names", () => {
+  it("a scorer named like another evaluator's metric does not claim its result", () => {
+    const s = defineScorer({ evaluator: 'wrapper', threshold: 4, scoreMax: 5 }, function faithfulness() {
+      return [
+        { name: 'quality', value: 4.5, evaluator: 'wrapper' },
+        { name: 'faithfulness', value: 0.9, evaluator: 'deepeval.faithfulness' },
+      ];
+    });
+    const result = evaluate({ name: 'suite', task: tracedTask, data: [{ input: 'a' }], scores: [s] });
+    const byName = Object.fromEntries(
+      getFinishedLogRecords().map(r => [r.attributes['gen_ai.evaluation.name'], r.attributes]),
+    );
+    expect(byName.faithfulness['opensearch.gen_ai.evaluation.score.threshold']).toBeUndefined();
+    expect(byName.faithfulness['opensearch.gen_ai.evaluation.score.max']).toBeUndefined();
+    expect(byName.faithfulness['gen_ai.evaluation.score.label']).toBeUndefined();
+    expect(byName.quality['gen_ai.evaluation.score.label']).toBe('pass');
+    expect(result.cases[0].resultStatus).toBe('pass');
+  });
+
+  it("a scorer with no evaluator named like another evaluator's metric does not claim it", () => {
+    const s = defineScorer({ threshold: 0.7 }, function faithfulness() {
+      return [{ name: 'faithfulness', value: 0.2, evaluator: 'deepeval.faithfulness' }];
+    });
+    const result = evaluate({ name: 'suite', task: tracedTask, data: [{ input: 'a' }], scores: [s] });
+    const [r] = getFinishedLogRecords();
+    expect(r.attributes['opensearch.gen_ai.evaluation.score.threshold']).toBeUndefined();
+    expect(result.cases[0].resultStatus).toBe('pass');
+  });
+
+  it('an anonymous scorer does not claim a RAGAS result through the "score" fallback name', () => {
+    const s = defineScorer({ threshold: 0.7 }, () => [{ name: 'score', value: 0.2, evaluator: 'ragas' }]);
+    const result = evaluate({ name: 'suite', task: tracedTask, data: [{ input: 'a' }], scores: [s] });
+    const [r] = getFinishedLogRecords();
+    expect(r.attributes['opensearch.gen_ai.evaluation.evaluator.name']).toBe('ragas');
+    expect(r.attributes['opensearch.gen_ai.evaluation.score.threshold']).toBeUndefined();
+    expect(result.cases[0].resultStatus).toBe('pass');
+  });
+
+  it('a score with evaluator "" is the scorer\'s own', () => {
     const s = defineScorer(
-      { name: 'rel', evaluator: 'rel', threshold: 0.7 },
-      function rel() { return { name: 'rel', value: 0.1, evaluator: 'my-judge' }; },
+      { name: 'rel', evaluator: 'my-judge', threshold: 0.7 },
+      function rel() { return { name: 'relevance', value: 0.1, evaluator: '' }; },
     );
     const result = evaluate({ name: 'suite', task: tracedTask, data: [{ input: 'a' }], scores: [s] });
     const [r] = getFinishedLogRecords();
     expect(r.attributes['opensearch.gen_ai.evaluation.evaluator.name']).toBe('my-judge');
+    expect(r.attributes['opensearch.gen_ai.evaluation.score.threshold']).toBe(0.7);
     expect(r.attributes['gen_ai.evaluation.score.label']).toBe('fail');
     expect(result.cases[0].resultStatus).toBe('fail');
   });
 
-  it("a scorer with no evaluator keeps its rule off other evaluators' scores", () => {
+  it("with no declared evaluator, a score naming the function's name is the scorer's own", () => {
+    const s = defineScorer({ name: 'quality', threshold: 0.7 }, function judge() {
+      return [
+        { name: 'q2', value: 0.1, evaluator: 'judge' },
+        { name: 'q3', value: 0.9 },
+      ];
+    });
+    const result = evaluate({ name: 'suite', task: tracedTask, data: [{ input: 'a' }], scores: [s] });
+    const byName = Object.fromEntries(
+      getFinishedLogRecords().map(r => [r.attributes['gen_ai.evaluation.name'], r.attributes]),
+    );
+    expect(byName.q2['gen_ai.evaluation.score.label']).toBe('fail');
+    // The function name decides ownership only: it is not sent as an evaluator name.
+    expect(byName.q3['opensearch.gen_ai.evaluation.evaluator.name']).toBeUndefined();
+    expect(byName.q3['gen_ai.evaluation.score.label']).toBe('pass');
+    expect(result.cases[0].resultStatus).toBe('fail');
+  });
+
+  it('warns once per scorer when its declared rule applies to no result', () => {
+    const s = defineScorer({ threshold: 0.7 }, function deepevalWrap() {
+      return [{ name: 'faithfulness', value: 0.2, evaluator: 'deepeval.faithfulness' }];
+    });
+    const own = defineScorer({ name: 'mine', threshold: 0.7 }, function mine() { return 0.9; });
+    const data = [{ input: 'a' }, { input: 'b' }];
+    const result = evaluate({ name: 'suite', task: tracedTask, data, scores: [s, own] });
+    evaluate({ name: 'suite', task: tracedTask, data, scores: [s, own] });
+    const warnings = warnSpy.mock.calls.map(c => String(c[0])).filter(m => m.includes('applies to no result'));
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain('"deepevalWrap"');
+    expect(warnings[0]).toContain('every result names another evaluator');
+    expect(result.cases[0].resultStatus).toBe('pass');
+  });
+
+  it("a scorer with no evaluator keeps its declaration off other evaluators' scores", () => {
     const s = defineScorer(
-      { name: 'quality', threshold: 4, scoreMin: 1, scoreMax: 5, evaluatorType: 'llm_judge' },
+      {
+        name: 'quality',
+        threshold: 4,
+        scoreMin: 1,
+        scoreMax: 5,
+        evaluatorType: 'llm_judge',
+        evaluatorDescription: 'rubric',
+        judgeModel: 'gpt-x',
+        judgePromptName: 'quality-prompt',
+        judgePromptVersion: '3',
+      },
       function quality() {
         return [
           { name: 'quality', value: 4.5 },
@@ -321,7 +414,16 @@ describe('evaluator on EvalScore', () => {
     for (const key of ['threshold', 'min', 'max', 'direction']) {
       expect(byName.faith[`opensearch.gen_ai.evaluation.score.${key}`]).toBeUndefined();
     }
-    expect(byName.faith['opensearch.gen_ai.evaluation.evaluator.type']).toBeUndefined();
+    for (const key of [
+      'opensearch.gen_ai.evaluation.evaluator.type',
+      'opensearch.gen_ai.evaluation.evaluator.description',
+      'gen_ai.request.model',
+      'gen_ai.prompt.name',
+      'gen_ai.prompt.version',
+    ]) {
+      expect(byName.faith[key]).toBeUndefined();
+      expect(byName.quality[key]).toBeDefined();
+    }
     expect(byName.quality['gen_ai.evaluation.score.label']).toBe('pass');
     expect(result.cases[0].resultStatus).toBe('pass');
   });
@@ -482,15 +584,25 @@ describe('a scorer declaration applies only to its own evaluator', () => {
 });
 
 describe('a scorer that declares no evaluator', () => {
-  it('applies its threshold to a score that names an evaluator, so a low score fails the case', () => {
-    const rel = defineScorer({ name: 'rel', threshold: 0.7 }, () => ({ name: 'rel', value: 0.1, evaluator: 'my-judge' }));
+  it('applies its threshold to a score with no evaluator, so a low score fails the case', () => {
+    const rel = defineScorer({ name: 'rel', threshold: 0.7 }, () => ({ name: 'rel', value: 0.1 }));
     const result = evaluate({ name: 'suite', task: tracedTask, data: [{ input: 'a' }], scores: [rel] });
     expect(result.cases[0].resultStatus).toBe('fail');
     expect(result.cases[0].verdicts).toEqual({ rel: 'fail' });
     const [record] = getFinishedLogRecords();
-    expect(record.attributes['opensearch.gen_ai.evaluation.evaluator.name']).toBe('my-judge');
+    expect(record.attributes['opensearch.gen_ai.evaluation.evaluator.name']).toBeUndefined();
     expect(record.attributes['opensearch.gen_ai.evaluation.score.threshold']).toBe(0.7);
     expect(record.attributes['gen_ai.evaluation.score.label']).toBe('fail');
+  });
+
+  it('does not apply it to a score that names an evaluator, whatever its name', () => {
+    const rel = defineScorer({ name: 'rel', threshold: 0.7 }, () => ({ name: 'rel', value: 0.1, evaluator: 'my-judge' }));
+    const result = evaluate({ name: 'suite', task: tracedTask, data: [{ input: 'a' }], scores: [rel] });
+    expect(result.cases[0].resultStatus).toBe('pass');
+    const [record] = getFinishedLogRecords();
+    expect(record.attributes['opensearch.gen_ai.evaluation.evaluator.name']).toBe('my-judge');
+    expect(record.attributes['opensearch.gen_ai.evaluation.score.threshold']).toBeUndefined();
+    expect(warnSpy.mock.calls.some(c => String(c[0]).includes('applies to no result'))).toBe(true);
   });
 });
 
