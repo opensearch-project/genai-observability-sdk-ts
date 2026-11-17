@@ -15,6 +15,8 @@ A scorer is `(input, output, expected) => ...` returning a `boolean` (a verdict)
 - Deterministic checks first (`evaluatorType: "code"`): tool called, data used, latency, tokens. Compute the truth when you score, not by hand: [end-to-end/.../offlineEval.ts](../end-to-end/strands-observability-agent/offlineEval.ts).
 - One LLM judge (`evaluatorType: "llm_judge"`) with `judgeModel`, `judgePromptName`, `judgePromptVersion` and `evaluatorDescription`, the judge's reason in `explanation`. The judge prompt is not stored on the result: trace the judge call in its own trace as a `chat` span (so it is not listed as an agent), record the prompt there with `enrich({ systemInstructions })`, and link it with `judgeTraceId`: [end-to-end/.../judge.ts](../end-to-end/strands-observability-agent/judge.ts), [evals/native](../evals/native/).
 
+- A declaration fills only the scorer's own results: those with no `evaluator`, or the scorer's own (the declared `evaluator`, else the function name). A scorer that returns a library's result, such as `{ name: "faithfulness", evaluator: "deepeval.faithfulness" }`, must declare that `evaluator` to get the rule. When a declaration reaches none of a scorer's results in a run, `evaluate()` warns at the end of the run.
+
 ## 3. Run an offline eval: `evaluate()`
 
 ```typescript
@@ -47,7 +49,7 @@ await provider.shutdown();
 
 Each case's agent run is its own trace with `test.suite.*` and `test.case.*` on the root span; each score is one result parented to it. Trace the task (as above): an untraced task records results with no trace to link to. Change one thing (prompt, model, tool) and run again with a new `runName` to have two runs to compare.
 
-The task and the scorers may be sync or async. With an async one, `evaluate()` returns a Promise: `await` it. A scorer that throws records an evaluator error result for that case (no value, no label); the other scorers still run.
+The task and the scorers may be sync or async. With an async one, `evaluate()` returns a Promise: `await` it. A scorer that throws records an evaluator error result for that case (no value, no label); the other scorers still run. `result.cases[i].scores` / `.verdicts` and `result.summary.scores` are keyed by evaluation name; when two evaluators report the same name, the other evaluator's results are keyed `"<name> (<evaluator>)"`, so no result hides another and a failing result always fails the case. Run `metadata` is copied to every result; besides your own keys it may carry the judge context `gen_ai.request.model` and `gen_ai.prompt.*`.
 
 Results computed somewhere else (a run that already happened, another tool) go up with `Benchmark`, passing the agent span's ids:
 
@@ -65,9 +67,11 @@ for (const r of pastRuns) {
     scores: r.scores, // EvalScore[] (or { name: value })
   });
 }
-bench.close(); // prints the summary
+bench.close(); // prints and returns the local summary
 await provider.forceFlush();
 ```
+
+`log({ evaluator, evaluatorType })` sets the default evaluator for the call's scores that name no evaluator (or the same one); if that `evaluatorType` reaches no score of the run, `close()` warns.
 
 Shown in: [evals/native](../evals/native/) (runs over the shared suite), [end-to-end/strands-observability-agent](../end-to-end/strands-observability-agent/) (`offlineEval.ts --run-name ...`), [basics/06_retrieval_and_eval.ts](../basics/06_retrieval_and_eval.ts), [basics/07_benchmarks.ts](../basics/07_benchmarks.ts).
 
@@ -115,7 +119,7 @@ Shown in: [evals/native](../evals/native/), [end-to-end/strands-observability-ag
 
 ## 5. Bring results from an eval library
 
-Keep your tool and send its numbers: return them from an `evaluate()` scorer (results get the suite, case and run ids), log them with `new Benchmark(...).log(...)` when the run already happened, or `score()` them onto a trace:
+Keep your tool and send its numbers: return them from an `evaluate()` scorer (results get the suite, case and run ids; declare the library's `evaluator` in `defineScorer()` so its results get the rule), log them with `new Benchmark(...).log(...)` when the run already happened, or `score()` them onto a trace:
 
 ```typescript
 score({
