@@ -3,28 +3,28 @@
 How spans and evaluation events flow from your application through the SDK and an OTLP pipeline into OpenSearch.
 
 ```
-┌──────────────────────────────────────────────────────┐
+┌───────────────────────────────────────────────────────┐
 │                   Your Application                    │
 │                                                       │
 │  observe(opts, fn)   withObserve()   enrich()         │
 │  score()   evaluate()   Benchmark                     │
 │                     │                                 │
 │      opensearch-genai-observability-sdk-ts            │
-├──────────────────────────────────────────────────────┤
+├───────────────────────────────────────────────────────┤
 │  register()                                           │
-│  ┌──────────────────────────────────────────────┐    │
+│  ┌───────────────────────────────────────────────┐    │
 │  │  TracerProvider                               │    │
 │  │  ├── Resource (service.name)                  │    │
 │  │  ├── TestCaseSpanProcessor (evaluate())       │    │
 │  │  ├── BatchSpanProcessor                       │    │
 │  │  │   └── OTLPSpanExporter (HTTP or gRPC)      │    │
-│  │  │       └── SigV4 signing (sigv4 option)    │    │
+│  │  │       └── SigV4 signing (sigv4 option)     │    │
 │  │  └── Auto-instrumentation                     │    │
 │  │  LoggerProvider (evaluation result events)    │    │
 │  │  └── BatchLogRecordProcessor                  │    │
 │  │      └── OTLPLogExporter (HTTP or gRPC)       │    │
-│  └──────────────────────────────────────────────┘    │
-└───────────────────────┬──────────────────────────────┘
+│  └───────────────────────────────────────────────┘    │
+└───────────────────────┬───────────────────────────────┘
                         │ OTLP (HTTP/gRPC)
                         ▼
                ┌─────────────────┐
@@ -50,7 +50,7 @@ For example, this code:
 import { register, observe, Op, enrich, score } from "@opensearch-project/genai-observability-sdk-ts";
 
 // 1. Initialize tracing (one line)
-await register({ serviceName: "research-app", agentName: "research_agent" }); // OTLP/HTTP to http://localhost:4318
+const provider = await register({ serviceName: "research-app", agentName: "research_agent" }); // OTLP/HTTP to http://localhost:4318
 
 // 2. Trace your functions
 const search = observe(
@@ -74,6 +74,9 @@ const result = research("What is OpenSearch?");
 
 // 4. Submit scores (after workflow completes): pass the evaluated span's ids
 score({ name: "relevance", value: 0.95, traceId: "...", spanId: "..." });
+
+// 5. Flush spans and results before the process exits (both are batched by default)
+await provider.shutdown();
 ```
 
 This produces the following span tree:

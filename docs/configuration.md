@@ -126,7 +126,7 @@ OSIS `otel_*` sources cap each request at 1 MB to 4 MB (1 MB by default with the
 
 ### Upgrading to 0.2.0
 
-Before 0.2.0 (`@opensearch-project/genai-observability-sdk-ts@>=0.2.0`), `endpoint` was the full traces URL and the default was `http://localhost:21890/opentelemetry/v1/traces`. `endpoint` is now always the base URL, and a value ending in `/v1/traces` throws. Pass the base (`http://host:4318`), or `tracesEndpoint` and `logsEndpoint`. To keep sending to a Data Prepper `otlp` source on its old default, pass `endpoint: "http://localhost:21890"` and set `traces_path` / `logs_path` and `unframed_requests: true` on the source (see the [guide](agent-evaluations.md#ingestion)).
+Before 0.2.0 (`@opensearch-project/genai-observability-sdk-ts@<0.2.0`), `endpoint` was the full traces URL and the default was `http://localhost:21890/opentelemetry/v1/traces`. `endpoint` is now always the base URL, and a value ending in `/v1/traces` throws. Pass the base (`http://host:4318`), or `tracesEndpoint` and `logsEndpoint`. To keep sending to a Data Prepper `otlp` source on its old default, pass `endpoint: "http://localhost:21890"` and set `traces_path` / `logs_path` and `unframed_requests: true` on the source (see the [guide](agent-evaluations.md#ingestion)).
 
 ## AWS SigV4
 
@@ -156,7 +156,7 @@ The auto-instrumentation packages are optional peer dependencies: install the on
 
 ## Auto-instrumentation
 
-`register()` turns on each of these packages that is installed and selected, with its own provider (also with `setGlobal: false`). It needs nothing else from you: no `registerInstrumentations()` call. The instrumentations are process-wide, so they send to one provider: the newest `register()` with `setGlobal` (the default). A `setGlobal: false` `register()` (for example a side pipeline with a debug exporter) takes them only when no other live `register()` provider has them, so it does not take the model spans from your main pipeline.
+`register()` turns on each of these packages that is installed and selected, with its own provider (also with `setGlobal: false`). It needs nothing else from you: no `registerInstrumentations()` call. The instrumentations are process-wide, so they send to one provider: the newest `register()` with `setGlobal` (the default). A `setGlobal: false` `register()` (for example a side pipeline with a debug exporter) takes them only when no other live `register()` provider has them, so it does not take the model spans from your main pipeline. A `setGlobal: false` `register()` also leaves the global evaluation pipeline alone: it does not replace or shut down the LoggerProvider of an earlier global `register()` (so `score()` and `evaluate()` results keep flowing there) and does not change the `register()` agent defaults (see [Agent identity](api-reference.md#agent-identity)).
 
 ### Supported libraries
 

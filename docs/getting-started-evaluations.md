@@ -454,7 +454,7 @@ const latencyOk = defineScorer(
 );
 ```
 
-In `evaluate()` a scorer receives the task's return value, so `latencyOk` needs a task that returns an `AgentRun` (or any object with `durationMs`). With a task that returns no `durationMs` it returns `NaN`, which records an error result (`error.type` = `TypeError`).
+In `evaluate()` a scorer receives the task's return value, so `latencyOk` needs a task that returns an `AgentRun` (or any object with `durationMs`). With a task that returns an object without `durationMs` it returns `NaN`, and with one that returns `undefined` or `null` reading `durationMs` throws; either way the scorer records an error result (`error.type` = `TypeError`).
 
 ### cost
 

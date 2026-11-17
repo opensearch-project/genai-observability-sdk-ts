@@ -46,7 +46,7 @@ Auto-instrumentation uses optional peer dependencies: `npm install @opentelemetr
 ```typescript
 import { register, observe, enrich, Op } from "@opensearch-project/genai-observability-sdk-ts";
 
-await register({ serviceName: "research-app" }); // OTLP/HTTP to http://localhost:4318
+const provider = await register({ serviceName: "research-app" }); // OTLP/HTTP to http://localhost:4318
 
 const research = observe({ name: "research_agent", op: Op.INVOKE_AGENT }, (query: string) => {
   enrich({ model: "gpt-4.1", provider: "openai", inputTokens: 150, outputTokens: 50 });
@@ -54,9 +54,10 @@ const research = observe({ name: "research_agent", op: Op.INVOKE_AGENT }, (query
 });
 
 research("What is OpenSearch?");
+await provider.shutdown(); // flush the batched spans before the script exits
 ```
 
-This produces the span `invoke_agent research_agent`. A longer example and the span tree are in [Architecture](https://github.com/opensearch-project/genai-observability-sdk-ts/blob/main/docs/architecture.md#spans).
+This produces the span `invoke_agent research_agent`. Spans are batched by default, so a short script must call `provider.shutdown()` (or `forceFlush()`) before it exits, or pass `batch: false`. A longer example and the span tree are in [Architecture](https://github.com/opensearch-project/genai-observability-sdk-ts/blob/main/docs/architecture.md#spans).
 
 ### Evaluations
 
