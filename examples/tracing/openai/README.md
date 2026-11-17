@@ -44,8 +44,9 @@ The instrumentation patches the OpenAI SDK when it is loaded, so `register()` mu
 before `openai` is imported. `--import ./otel.ts` runs `otel.ts` first: it registers the
 `@opentelemetry/instrumentation/hook.mjs` loader hook (ES modules only) and calls
 `register()`. `agent.ts` then imports `openai` as usual, and `provider` from `./otel.js` to
-flush it. Without `--import ./otel.ts` the `chat` spans are missing. This is the load order
-in the SDK README, section "Auto-instrumentation".
+flush it. Without `--import ./otel.ts` the `chat` spans are missing. This is the
+[load order](https://github.com/opensearch-project/genai-observability-sdk-ts/blob/main/docs/configuration.md#load-order)
+in the SDK docs.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
@@ -83,7 +84,8 @@ curl -sk -u admin:<password> "https://localhost:9200/otel-v1-apm-span-*/_search"
 - Prompts and completions are not recorded by default. Set
   `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=true` to have the instrumentation send
   them (as log events). To configure the instrumentation in code, pass
-  `register({ autoInstrument: false })` and register it yourself (see
-  [tracing/bedrock](../bedrock/otel.ts)), else every call is traced twice.
+  `register({ autoInstrument: { openai: false } })` and register `OpenAIInstrumentation`
+  yourself with `tracerProvider: provider` (as [tracing/bedrock](../bedrock/otel.ts) does
+  for the AWS SDK), else every call is traced twice.
 - `@opentelemetry/instrumentation-openai` is pinned to `~0.21.0`: later releases need
   `@opentelemetry/api` 1.10, and the SDK is on OpenTelemetry JS 1.x (`@opentelemetry/api` 1.9).

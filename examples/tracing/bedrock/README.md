@@ -58,11 +58,12 @@ curl -sk -u admin:<password> "https://localhost:9200/otel-v1-apm-span-*/_search"
 
 ## Notes
 
-- `register()` turns on `@opentelemetry/instrumentation-aws-sdk` by itself when it is
-  installed (`autoInstrument`), but with no hooks. `otel.ts` needs the hooks, so it passes
-  `autoInstrument: false` and registers `AwsInstrumentation` with `tracerProvider: provider`.
-  With both, every Converse call would be traced twice. Without the hooks, drop the
-  `registerInstrumentations()` call and the `autoInstrument: false`.
+- `register()` turns on `@opentelemetry/instrumentation-aws-sdk` only when asked
+  (`autoInstrument: { awsSdk: true }`), and then with no hooks. `otel.ts` needs the hooks, so
+  it keeps the default (AWS SDK off) and registers `AwsInstrumentation` with
+  `tracerProvider: provider`. Do not also pass `awsSdk: true`, or every Converse call is
+  traced twice. Without the hooks, drop the `registerInstrumentations()` call and pass
+  `autoInstrument: { awsSdk: true }` instead.
 - The AWS SDK instrumentation records no messages. The `preRequestHook` / `responseHook`
   in `otel.ts` add `gen_ai.input.messages`, `gen_ai.output.messages` and
   `gen_ai.system_instructions` to the chat spans, which is where Agent Traces reads them.
