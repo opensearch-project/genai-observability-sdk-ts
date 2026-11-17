@@ -196,8 +196,11 @@ const EVALUATOR_TYPES: readonly EvaluatorType[] = ['llm_judge', 'code', 'human',
  * evaluator (the declared `evaluator`, else the function name). A result
  * naming another evaluator (for example `deepeval.faithfulness`) gets none of
  * it. Fields set on a returned `EvalScore` win. When the scorer declares any
- * of those fields and none of a case's results are its own, `evaluate()` warns
- * once per scorer. Run and case `metadata` is not part of the declaration and
+ * of those fields and returns results in an `evaluate()` run but none of them,
+ * in any case, are its own, `evaluate()` warns once per scorer per process at
+ * the end of the run, listing the fields declared (a `direction` defaulted
+ * from `threshold` is not listed). A scorer with an own result in any case of
+ * the run does not warn. Run and case `metadata` is not part of the declaration and
  * goes on every result. The `evaluator` is trimmed (blank is unset); a
  * non-string `evaluator` throws.
  * Throws on an unknown `direction` / `evaluatorType` or a non-finite
@@ -248,6 +251,8 @@ export function defineScorer<F extends ScorerFn>(spec: ScorerSpec, fn: F): Score
   Object.defineProperty(scorer, 'scorerSpec', { value: Object.freeze(resolved), enumerable: true });
   ownEvaluators.set(scorer, resolved.evaluator ?? fnEvaluator(fn));
   scorerIds.set(scorer, nextScorerId++);
+  // As given, before defaults: a direction implied by threshold is not the user's.
+  explicitFields.set(scorer, declaredFields(spec));
   return scorer;
 }
 
@@ -265,6 +270,13 @@ const ownEvaluators = new WeakMap<ScorerFn, string | undefined>();
 /** One id per `defineScorer()` call: the once-per-scorer warning is keyed by it. */
 const scorerIds = new WeakMap<ScorerFn, number>();
 let nextScorerId = 0;
+
+/**
+ * The declared fields of a `defineScorer()` scorer as the user gave them (see
+ * `declaredFields`), without the `direction` that defaults to `maximize` with a
+ * `threshold`: the unused-declaration warning lists only these.
+ */
+const explicitFields = new WeakMap<ScorerFn, string[]>();
 
 /**
  * An evaluator name, trimmed. Unset (undefined) when it is not a string, or is `""` or
@@ -350,33 +362,64 @@ function declaredFields(spec: ScorerSpec): string[] {
   return DECLARED_FIELDS.filter(f => spec[f] !== undefined);
 }
 
+/** The fields the user declared for a scorer (see `explicitFields`). */
+function userDeclaredFields(scorer: ScorerFn, spec: ScorerSpec): string[] {
+  return explicitFields.get(scorer) ?? declaredFields(spec);
+}
+
+/** Whether a scorer's declaration reached any result it returned in one `evaluate()` run. */
+interface DeclarationUse {
+  scorer: ScorerFn;
+  spec: ScorerSpec;
+  evalName: string;
+  owner: string | undefined;
+  /** Some returned result of the run was the scorer's own. */
+  reached: boolean;
+  /** Evaluators named by the results it returned (none of them its own so far). */
+  named: Set<string>;
+}
+
+/** Per `Benchmark.log()` evaluator and type default: whether it reached any score of the run. */
+interface TypeDefaultUse {
+  evaluator: string | undefined;
+  evaluatorType: EvaluatorType;
+  reached: boolean;
+  named: Set<string>;
+}
+
+/** Add the evaluator names a set of scores names to `into`. */
+function addEvaluatorsNamed(into: Set<string>, scores: EvalScore[]): void {
+  for (const e of evaluatorsNamed(scores)) into.add(e);
+}
+
 /** The distinct evaluator names a set of scores names, sorted. */
 function evaluatorsNamed(scores: EvalScore[]): string[] {
   return [...new Set(scores.map(s => evaluatorName(s.evaluator)).filter((e): e is string => !!e))].sort();
 }
 
+/** The once-per-scorer key of a scorer: its `defineScorer()` call, else its evaluation name. */
+function scorerKey(scorer: ScorerFn, evalName: string): string {
+  return String(scorerIds.get(scorer) ?? evalName);
+}
+
 /**
- * Warn, once per scorer per process, that a scorer's declaration applies to no result: every
- * result it returned names another evaluator, so none is its own (see `ownsScore`). Keyed by
- * the `defineScorer()` call, so scorers from one factory, or sharing a name, each warn.
+ * Warn, once per scorer per process, that a scorer's declaration applied to no result of an
+ * `evaluate()` run: it returned results, and every one names another evaluator, so none is
+ * its own (see `ownsScore`). Called at the end of the run. Keyed by the `defineScorer()`
+ * call, so scorers from one factory, or sharing a name, each warn.
  */
-function warnDeclarationAppliesToNoResult(
-  scorer: ScorerFn,
-  spec: ScorerSpec,
-  evalName: string,
-  owner: string | undefined,
-  produced: EvalScore[],
-): void {
-  const id = scorerIds.get(scorer);
-  if (firstWarnings('scorer-declaration-unused', [String(id ?? evalName)]).length === 0) return;
+function warnDeclarationAppliesToNoResult(use: DeclarationUse): void {
+  const { scorer, spec, evalName, owner } = use;
+  if (firstWarnings('scorer-declaration-unused', [scorerKey(scorer, evalName)]).length === 0) return;
   const ownerText =
     owner === undefined
       ? 'none'
       : `"${owner}" (${spec.evaluator !== undefined ? 'declared' : 'the function name'})`;
   console.warn(
     `[opensearch-genai-observability-sdk-ts] evaluate(): scorer "${evalName}" (evaluator ${ownerText}) ` +
-      `declares ${declaredFields(spec).join(', ')}, which apply to no result, because every result ` +
-      `names another evaluator: ${JSON.stringify(evaluatorsNamed(produced))}. A result is the ` +
+      `declares ${userDeclaredFields(scorer, spec).join(', ')}, which applied to no result of the ` +
+      `run, because every result it returned names another evaluator: ` +
+      `${JSON.stringify([...use.named].sort())}. A result is the ` +
       `scorer's own when its evaluator is unset or equals the scorer's evaluator. Declare the ` +
       `scorer's evaluator to match its results, or set these fields on the returned EvalScore.`,
   );
@@ -384,21 +427,24 @@ function warnDeclarationAppliesToNoResult(
 
 /**
  * Warn, once per evaluator and type per process, that a `Benchmark.log()` `evaluatorType`
- * default reached no score of the call: every score names another evaluator.
+ * default reached no score of the run: every score logged with it names another evaluator.
+ * Called from `close()`.
  */
-function warnLogTypeAppliesToNoScore(
-  evaluator: string | undefined,
-  evaluatorType: EvaluatorType,
-  scores: EvalScore[],
-): void {
-  if (firstWarnings('log-type-unused', [`${evaluator ?? ''}\u0000${evaluatorType}`]).length === 0) return;
+function warnLogTypeAppliesToNoScore(use: TypeDefaultUse): void {
+  const { evaluator, evaluatorType } = use;
+  if (firstWarnings('log-type-unused', [typeDefaultKey(evaluator, evaluatorType)]).length === 0) return;
   console.warn(
     `[opensearch-genai-observability-sdk-ts] Benchmark.log(): evaluatorType "${evaluatorType}" ` +
-      `(evaluator ${evaluator === undefined ? 'unset' : `"${evaluator}"`}) applies to no score of ` +
-      `the call, because every score names another evaluator: ` +
-      `${JSON.stringify(evaluatorsNamed(scores))}. The defaults go only on scores whose evaluator ` +
+      `(evaluator ${evaluator === undefined ? 'unset' : `"${evaluator}"`}) applied to no score of ` +
+      `the run, because every score logged with it names another evaluator: ` +
+      `${JSON.stringify([...use.named].sort())}. The defaults go only on scores whose evaluator ` +
       `is unset or equals the log-level evaluator. Set evaluatorType on the EvalScore.`,
   );
+}
+
+/** The key of a `Benchmark.log()` evaluator and type default. */
+function typeDefaultKey(evaluator: string | undefined, evaluatorType: EvaluatorType): string {
+  return `${evaluator ?? ''}\u0000${evaluatorType}`;
 }
 
 function judgeContextOf(s: EvalScore): JudgeContext {
@@ -798,6 +844,8 @@ export class Benchmark {
   private _start: number;
   private _cases: TestCaseResult[] = [];
   private _resultKeys = new LocalResultKeys();
+  /** `log()` evaluator and type defaults of the run; decided, and warned about, in `close()`. */
+  private _typeDefaults = new Map<string, TypeDefaultUse>();
   private _closed = false;
   private _agent: Record<string, string>;
   private _ci: Record<string, string>;
@@ -874,9 +922,10 @@ export class Benchmark {
     /**
      * Default `opensearch.gen_ai.evaluation.evaluator.type` for the scores of
      * this call whose `evaluator` is unset or equals `evaluator`. An
-     * `EvalScore` that sets its own `evaluatorType` wins. When every score of
-     * the call names another evaluator it applies to none, with one warning
-     * per evaluator and type.
+     * `EvalScore` that sets its own `evaluatorType` wins. When every score
+     * logged with this `evaluator` and `evaluatorType` during the run names
+     * another evaluator it applies to none, and `close()` warns once per
+     * evaluator and type per process.
      */
     evaluatorType?: EvaluatorType;
   }): void {
@@ -906,8 +955,15 @@ export class Benchmark {
     // Trimmed; blank is unset (see evaluatorName).
     const evaluator = evaluatorName(options.evaluator);
     const errorType = options.errorType;
-    if (options.evaluatorType && evalScores.length > 0 && !evalScores.some(s => ownsScore(s, evaluator))) {
-      warnLogTypeAppliesToNoScore(evaluator, options.evaluatorType, evalScores);
+    if (options.evaluatorType && evalScores.length > 0) {
+      const key = typeDefaultKey(evaluator, options.evaluatorType);
+      let use = this._typeDefaults.get(key);
+      if (!use) {
+        use = { evaluator, evaluatorType: options.evaluatorType, reached: false, named: new Set() };
+        this._typeDefaults.set(key, use);
+      }
+      if (evalScores.some(s => ownsScore(s, evaluator))) use.reached = true;
+      else if (!use.reached) addEvaluatorsNamed(use.named, evalScores);
     }
     const values: Record<string, number> = {};
     const verdicts: Record<string, Verdict> = {};
@@ -953,6 +1009,11 @@ export class Benchmark {
       throw new Error('Benchmark is already closed');
     }
     this._closed = true;
+
+    // A log() type default that reached no score of the run warns, once per evaluator and type.
+    for (const use of this._typeDefaults.values()) {
+      if (!use.reached) warnLogTypeAppliesToNoScore(use);
+    }
 
     const summary = computeSummary(
       this._name,
@@ -1299,6 +1360,9 @@ function* evaluateSteps(options: EvaluateOptions): Generator<PromiseLike<unknown
   const runStart = performance.now();
   const cases: TestCaseResult[] = [];
   const resultKeys = new LocalResultKeys();
+  // Per scorer: did its declaration reach any result it returned in this run? Decided, and
+  // warned about, at the end of the run.
+  const declarationUses = new Map<string, DeclarationUse>();
   const declaredAgent = resolveAgent(options.agentName, options.agentVersion);
   const ci = ciPipelineAttributes(options.ciPipeline);
   const recordExpected = options.recordExpected ?? true;
@@ -1391,13 +1455,15 @@ function* evaluateSteps(options: EvaluateOptions): Generator<PromiseLike<unknown
           scorerError(`scorer "${evalName}" ${produced}`, INVALID_SCORER_RESULT);
           continue;
         }
-        if (
-          spec &&
-          produced.length > 0 &&
-          declaredFields(spec).length > 0 &&
-          !produced.some(s => ownsScore(s, owner))
-        ) {
-          warnDeclarationAppliesToNoResult(scorer, spec, evalName, owner, produced);
+        if (spec && produced.length > 0) {
+          const key = scorerKey(scorer, evalName);
+          let use = declarationUses.get(key);
+          if (!use) {
+            use = { scorer, spec, evalName, owner, reached: false, named: new Set() };
+            declarationUses.set(key, use);
+          }
+          if (produced.some(s => ownsScore(s, owner))) use.reached = true;
+          else if (!use.reached) addEvaluatorsNamed(use.named, produced);
         }
         const withSpec = produced.map(s => applySpec(s, spec, owner));
         resultKeys.record(withSpec, keyEvaluatorOf(scorer), caseScores, verdicts);
@@ -1436,6 +1502,14 @@ function* evaluateSteps(options: EvaluateOptions): Generator<PromiseLike<unknown
         scorerErrors: scorerErrors.length > 0 ? scorerErrors : undefined,
         verdicts: Object.keys(verdicts).length > 0 ? verdicts : undefined,
       });
+    }
+
+    // A declaration that reached none of the results its scorer returned in the run (each
+    // named another evaluator) warns, once per scorer.
+    for (const use of declarationUses.values()) {
+      if (!use.reached && userDeclaredFields(use.scorer, use.spec).length > 0) {
+        warnDeclarationAppliesToNoResult(use);
+      }
     }
 
     const summary = computeSummary(

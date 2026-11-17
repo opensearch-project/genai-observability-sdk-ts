@@ -380,10 +380,10 @@ describe('evaluator on EvalScore', () => {
     const data = [{ input: 'a' }, { input: 'b' }];
     const result = evaluate({ name: 'suite', task: tracedTask, data, scores: [s, own] });
     evaluate({ name: 'suite', task: tracedTask, data, scores: [s, own] });
-    const warnings = warnSpy.mock.calls.map(c => String(c[0])).filter(m => m.includes('apply to no result'));
+    const warnings = warnSpy.mock.calls.map(c => String(c[0])).filter(m => m.includes('applied to no result'));
     expect(warnings).toHaveLength(1);
     expect(warnings[0]).toContain('"deepevalWrap"');
-    expect(warnings[0]).toContain('every result names another evaluator');
+    expect(warnings[0]).toContain('every result it returned names another evaluator');
     expect(result.cases[0].resultStatus).toBe('pass');
   });
 
@@ -624,7 +624,7 @@ describe('a scorer that declares no evaluator', () => {
     const [record] = getFinishedLogRecords();
     expect(record.attributes['opensearch.gen_ai.evaluation.evaluator.name']).toBe('my-judge');
     expect(record.attributes['opensearch.gen_ai.evaluation.score.threshold']).toBeUndefined();
-    expect(warnSpy.mock.calls.some(c => String(c[0]).includes('apply to no result'))).toBe(true);
+    expect(warnSpy.mock.calls.some(c => String(c[0]).includes('applied to no result'))).toBe(true);
   });
 });
 
@@ -892,7 +892,7 @@ describe('evaluator names are trimmed and checked', () => {
 
 describe('the unused-declaration warning', () => {
   const foreign = (name: string): EvalScore => ({ name, value: 0.2, evaluator: `deepeval.${name}` });
-  const unused = () => warnSpy.mock.calls.map(c => String(c[0])).filter(m => m.includes('apply to no result'));
+  const unused = () => warnSpy.mock.calls.map(c => String(c[0])).filter(m => m.includes('applied to no result'));
 
   it('each scorer warns, also when they share an evaluation or function name', () => {
     const make = (metric: string) => defineScorer({ threshold: 0.7 }, () => [foreign(metric)]);
@@ -913,6 +913,66 @@ describe('the unused-declaration warning', () => {
     expect(w).toContain('"faithfulness"');
   });
 
+  it("does not warn when the scorer's own result appears in only one case of the run", () => {
+    let call = 0;
+    const s = defineScorer({ threshold: 0.7 }, function judge() {
+      call += 1;
+      return call === 2 ? [{ name: 'judge', value: 0.9 }] : [foreign('faith')];
+    });
+    const data = [{ input: 'a' }, { input: 'b' }, { input: 'c' }];
+    evaluate({ name: 'suite', task: tracedTask, data, scores: [s] });
+    expect(warnSpy.mock.calls.some(c => String(c[0]).includes('to no result'))).toBe(false);
+  });
+
+  it('warns once, at the end of the run, when no case has an own result', () => {
+    const s = defineScorer({ threshold: 0.7 }, function judge() { return [foreign('faith')]; });
+    const recordsAtWarning: number[] = [];
+    warnSpy.mockImplementation((m: unknown) => {
+      if (String(m).includes('to no result')) recordsAtWarning.push(getFinishedLogRecords().length);
+    });
+    const data = [{ input: 'a' }, { input: 'b' }, { input: 'c' }];
+    evaluate({ name: 'suite', task: tracedTask, data, scores: [s] });
+    // Decided once, after every case of the run was scored.
+    expect(recordsAtWarning).toEqual([3]);
+    expect(unused()).toHaveLength(1);
+    expect(unused()[0]).toContain('["deepeval.faith"]');
+  });
+
+  it('a threshold-only declaration does not list the defaulted direction', () => {
+    const s = defineScorer({ threshold: 0.7 }, function judge() { return [foreign('faith')]; });
+    expect(s.scorerSpec.direction).toBe('maximize');
+    evaluate({ name: 'suite', task: tracedTask, data: [{ input: 'a' }], scores: [s] });
+    const [w] = unused();
+    expect(w).toContain('declares threshold, which');
+    expect(w).not.toContain('direction');
+  });
+
+  it('an explicitly declared direction is listed', () => {
+    const s = defineScorer({ threshold: 0.7, direction: 'maximize' }, function judge() {
+      return [foreign('faith')];
+    });
+    evaluate({ name: 'suite', task: tracedTask, data: [{ input: 'a' }], scores: [s] });
+    expect(unused()[0]).toContain('declares threshold, direction, which');
+  });
+
+  it("Benchmark.log() does not warn when its evaluatorType reaches a score in one call of the run", () => {
+    const b = new Benchmark('b');
+    for (const input of ['q1', 'q2', 'q3']) {
+      const scores = input === 'q2' ? [{ name: 'f', value: 1 }] : [foreign('faith')];
+      b.log({ input, scores, evaluator: 'deepeval', evaluatorType: 'llm_judge' });
+    }
+    b.close();
+    expect(warnSpy.mock.calls.some(c => String(c[0]).includes('to no score'))).toBe(false);
+  });
+
+  it('Benchmark.log() decides its evaluatorType warning at close()', () => {
+    const b = new Benchmark('b');
+    b.log({ input: 'q', scores: [foreign('faith')], evaluator: 'deepeval', evaluatorType: 'llm_judge' });
+    expect(warnSpy.mock.calls.some(c => String(c[0]).includes('to no score'))).toBe(false);
+    b.close();
+    expect(warnSpy.mock.calls.filter(c => String(c[0]).includes('applied to no score'))).toHaveLength(1);
+  });
+
   it('Benchmark.log() warns once when its evaluatorType reaches no score', () => {
     const b = new Benchmark('b');
     for (const input of ['q1', 'q2']) {
@@ -920,7 +980,7 @@ describe('the unused-declaration warning', () => {
     }
     b.log({ input: 'q3', scores: [{ name: 'g', value: 1 }], evaluator: 'ragas', evaluatorType: 'llm_judge' });
     b.close();
-    const w = warnSpy.mock.calls.map(c => String(c[0])).filter(m => m.includes('applies to no score'));
+    const w = warnSpy.mock.calls.map(c => String(c[0])).filter(m => m.includes('applied to no score'));
     expect(w).toHaveLength(1);
     expect(w[0]).toContain('"deepeval.faith"');
   });
