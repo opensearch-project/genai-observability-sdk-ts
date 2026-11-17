@@ -236,8 +236,11 @@ function ruleError(rule: {
 export function defineScorer<F extends ScorerFn>(spec: ScorerSpec, fn: F): Scorer<F> {
   const invalid = ruleError(spec);
   if (invalid) throw new Error(invalid);
-  if (spec.evaluator !== undefined && typeof spec.evaluator !== 'string') {
-    throw new Error(`evaluator must be a string; got ${describeValue(spec.evaluator)}`);
+  for (const field of ['evaluator', ...JUDGE_FIELDS] as const) {
+    const v = spec[field];
+    if (v !== undefined && typeof v !== 'string') {
+      throw new Error(`${field} must be a string; got ${describeValue(v)}`);
+    }
   }
   const resolved: ScorerSpec = {
     ...spec,
@@ -249,12 +252,15 @@ export function defineScorer<F extends ScorerFn>(spec: ScorerSpec, fn: F): Score
     fn(input, output, expected)) as unknown as Scorer<F>;
   Object.defineProperty(scorer, 'name', { value: fn.name || spec.name || 'score' });
   Object.defineProperty(scorer, 'scorerSpec', { value: Object.freeze(resolved), enumerable: true });
-  ownEvaluators.set(scorer, resolved.evaluator ?? fnEvaluator(fn));
-  scorerIds.set(scorer, nextScorerId++);
+  // A nested defineScorer() carries the inner scorer's owner, not its wrapper name.
+  ownEvaluators.set(scorer, resolved.evaluator ?? keyEvaluatorOf(fn));
   // As given, before defaults: a direction implied by threshold is not the user's.
   explicitFields.set(scorer, declaredFields(spec));
   return scorer;
 }
+
+/** The judge context fields of a declaration: strings when set. */
+const JUDGE_FIELDS = ['evaluatorDescription', 'judgeModel', 'judgePromptName', 'judgePromptVersion'] as const;
 
 function specOf(fn: ScorerFn): ScorerSpec | undefined {
   return (fn as Partial<Scorer>).scorerSpec;
@@ -266,10 +272,6 @@ function specOf(fn: ScorerFn): ScorerSpec | undefined {
  * or `"score"`). Used for ownership only; nothing is sent from it.
  */
 const ownEvaluators = new WeakMap<ScorerFn, string | undefined>();
-
-/** One id per `defineScorer()` call: the once-per-scorer warning is keyed by it. */
-const scorerIds = new WeakMap<ScorerFn, number>();
-let nextScorerId = 0;
 
 /**
  * The declared fields of a `defineScorer()` scorer as the user gave them (see
@@ -397,20 +399,23 @@ function evaluatorsNamed(scores: EvalScore[]): string[] {
   return [...new Set(scores.map(s => evaluatorName(s.evaluator)).filter((e): e is string => !!e))].sort();
 }
 
-/** The once-per-scorer key of a scorer: its `defineScorer()` call, else its evaluation name. */
-function scorerKey(scorer: ScorerFn, evalName: string): string {
-  return String(scorerIds.get(scorer) ?? evalName);
+/**
+ * The once-per-scorer key of a scorer: its evaluation name and evaluator, so scorers rebuilt
+ * per test or request with the same name and evaluator warn once per process.
+ */
+function scorerKey(evalName: string, owner: string | undefined): string {
+  return JSON.stringify([evalName, owner ?? null]);
 }
 
 /**
  * Warn, once per scorer per process, that a scorer's declaration applied to no result of an
  * `evaluate()` run: it returned results, and every one names another evaluator, so none is
- * its own (see `ownsScore`). Called at the end of the run. Keyed by the `defineScorer()`
- * call, so scorers from one factory, or sharing a name, each warn.
+ * its own (see `ownsScore`). Called at the end of the run. Keyed by evaluation name and
+ * evaluator (see `scorerKey`).
  */
 function warnDeclarationAppliesToNoResult(use: DeclarationUse): void {
   const { scorer, spec, evalName, owner } = use;
-  if (firstWarnings('scorer-declaration-unused', [scorerKey(scorer, evalName)]).length === 0) return;
+  if (firstWarnings('scorer-declaration-unused', [scorerKey(evalName, owner)]).length === 0) return;
   const ownerText =
     owner === undefined
       ? 'none'
@@ -466,24 +471,47 @@ function verdictOf(s: EvalScore): Verdict | undefined {
 
 /**
  * Keys of the local results of one run (`TestCaseResult.scores` / `.verdicts` and the summary).
- * The first evaluator to report an evaluation name in the run keeps the plain name as its key;
- * a result of another evaluator with the same name is keyed `"<name> (<evaluator>)"`
- * (`"<name> (no evaluator)"` when it names none), so results of different evaluators never
- * overwrite each other. Results of one evaluator with the same name share a key: the last value
- * is kept, and a `fail` verdict is never replaced, so the case fails when any of them fails.
+ * In `evaluate()`, each scorer first claims its evaluation name for its own evaluator (see
+ * `claim`), so a scorer's own results keep the plain name whatever the order of results or
+ * errors. Otherwise the first evaluator to report an evaluation name in the run keeps the plain
+ * name; a result of another evaluator with the same name is keyed `"<name> (<evaluator>)"`
+ * (`"<name> (no evaluator)"` when it names none). A key already taken by another name and
+ * evaluator (a real evaluation named `"f (b)"`, say) gets `" (2)"`, `" (3)"`, ... appended, so
+ * results of different evaluators never overwrite each other. Results of one evaluator with the
+ * same name share a key: a `fail` verdict is never replaced, and the value of a failing result is
+ * kept over the value of a later passing one, so the case fails when any of them fails and the
+ * value shown is the failing one.
  */
 class LocalResultKeys {
+  /** Per evaluation name: the evaluator that owns the plain name. */
   private readonly first = new Map<string, string | undefined>();
+  /** Per name and evaluator pair: its key. */
+  private readonly keys = new Map<string, string>();
+  /** Keys in use. */
+  private readonly taken = new Set<string>();
+
+  /** Reserve the plain `name` for `evaluator`, unless another evaluator already has it. */
+  claim(name: string, evaluator: string | undefined): void {
+    if (!this.first.has(name)) this.first.set(name, evaluator);
+  }
 
   key(name: string, evaluator: string | undefined): string {
-    if (!this.first.has(name)) this.first.set(name, evaluator);
-    if (this.first.get(name) === evaluator) return name;
-    return `${name} (${evaluator ?? 'no evaluator'})`;
+    const pair = JSON.stringify([name, evaluator ?? null]);
+    const known = this.keys.get(pair);
+    if (known !== undefined) return known;
+    this.claim(name, evaluator);
+    const base = this.first.get(name) === evaluator ? name : `${name} (${evaluator ?? 'no evaluator'})`;
+    let key = base;
+    for (let n = 2; this.taken.has(key); n++) key = `${base} (${n})`;
+    this.keys.set(pair, key);
+    this.taken.add(key);
+    return key;
   }
 
   /**
    * Add `scores` to a case's values and verdicts. `evaluator` is the evaluator of the scores
-   * that name none (the scorer's, or the `log()` default).
+   * that name none (the scorer's, or the `log()` default). A score with no value and no verdict
+   * records nothing and claims no key.
    */
   record(
     scores: EvalScore[],
@@ -492,12 +520,20 @@ class LocalResultKeys {
     verdicts: Record<string, Verdict>,
   ): void {
     for (const s of scores) {
-      const key = this.key(s.name, evaluatorName(s.evaluator) ?? evaluator);
-      if (s.value !== undefined) values[key] = s.value;
       const v = verdictOf(s);
-      if (v && verdicts[key] !== 'fail') verdicts[key] = v;
+      if (s.value === undefined && v === undefined) continue;
+      const key = this.key(s.name, evaluatorName(s.evaluator) ?? evaluator);
+      const failedBefore = Object.prototype.hasOwnProperty.call(verdicts, key) && verdicts[key] === 'fail';
+      // A failing result's value is kept over a later passing one (see the class comment).
+      if (s.value !== undefined && (!failedBefore || v === 'fail')) setOwn(values, key, s.value);
+      if (v && !failedBefore) setOwn(verdicts, key, v);
     }
   }
+}
+
+/** Set an own property, also for names like `__proto__` that plain assignment would drop. */
+function setOwn<T>(target: Record<string, T>, key: string, value: T): void {
+  Object.defineProperty(target, key, { value, writable: true, enumerable: true, configurable: true });
 }
 
 function hasFailVerdict(verdicts: Record<string, Verdict>): boolean {
@@ -724,13 +760,13 @@ function computeSummary(
   durationMs: number,
   runName?: string,
 ): BenchmarkSummary {
-  const scoreAcc: Record<string, { sum: number; min: number; max: number; count: number }> = {};
+  const scoreAcc = new Map<string, { sum: number; min: number; max: number; count: number }>();
   for (const c of cases) {
     for (const [scoreName, scoreValue] of Object.entries(c.scores)) {
-      if (!scoreAcc[scoreName]) {
-        scoreAcc[scoreName] = { sum: scoreValue, min: scoreValue, max: scoreValue, count: 1 };
+      const acc = scoreAcc.get(scoreName);
+      if (!acc) {
+        scoreAcc.set(scoreName, { sum: scoreValue, min: scoreValue, max: scoreValue, count: 1 });
       } else {
-        const acc = scoreAcc[scoreName];
         acc.sum += scoreValue;
         acc.min = Math.min(acc.min, scoreValue);
         acc.max = Math.max(acc.max, scoreValue);
@@ -740,14 +776,14 @@ function computeSummary(
   }
 
   const scores: Record<string, ScoreSummary> = {};
-  for (const [scoreName, acc] of Object.entries(scoreAcc)) {
-    scores[scoreName] = {
+  for (const [scoreName, acc] of scoreAcc) {
+    setOwn(scores, scoreName, {
       name: scoreName,
       avg: acc.count > 0 ? acc.sum / acc.count : 0,
       min: acc.min,
       max: acc.max,
       count: acc.count,
-    };
+    });
   }
 
   return {
@@ -955,6 +991,9 @@ export class Benchmark {
     // Trimmed; blank is unset (see evaluatorName).
     const evaluator = evaluatorName(options.evaluator);
     const errorType = options.errorType;
+    const caseMeta = toAttributes(safeMetadata(options.metadata, `case:${caseId}`));
+    // Last step that can throw: an invalid call records nothing locally (no key claimed).
+    const evaluated = spanContextFrom(options.traceId, options.spanId);
     if (options.evaluatorType && evalScores.length > 0) {
       const key = typeDefaultKey(evaluator, options.evaluatorType);
       let use = this._typeDefaults.get(key);
@@ -974,8 +1013,6 @@ export class Benchmark {
       options.status ?? (hasError || errorType ? 'error' : failed ? 'fail' : 'pass');
     // Same rule as evaluate(): only a passing case has status `pass`.
     const status = resultStatus === 'pass' ? 'pass' : 'fail';
-    const caseMeta = toAttributes(safeMetadata(options.metadata, `case:${caseId}`));
-    const evaluated = spanContextFrom(options.traceId, options.spanId);
 
     if (evalScores.length > 0) {
       emitCaseScores(
@@ -1362,10 +1399,16 @@ function* evaluateSteps(options: EvaluateOptions): Generator<PromiseLike<unknown
   const resultKeys = new LocalResultKeys();
   // Per scorer: did its declaration reach any result it returned in this run? Decided, and
   // warned about, at the end of the run.
-  const declarationUses = new Map<string, DeclarationUse>();
+  const declarationUses = new Map<ScorerFn, DeclarationUse>();
   const declaredAgent = resolveAgent(options.agentName, options.agentVersion);
   const ci = ciPipelineAttributes(options.ciPipeline);
   const recordExpected = options.recordExpected ?? true;
+
+  // Each scorer's own results keep the plain evaluation name, in scorer order, whatever the
+  // order of results or errors in the run (see LocalResultKeys).
+  for (const scorer of options.scores) {
+    resultKeys.claim(specOf(scorer)?.name || scorer.name || 'score', keyEvaluatorOf(scorer));
+  }
 
   ensureGlobalTestCaseProcessor();
   const leaveRun = enterEvaluateRun();
@@ -1456,11 +1499,10 @@ function* evaluateSteps(options: EvaluateOptions): Generator<PromiseLike<unknown
           continue;
         }
         if (spec && produced.length > 0) {
-          const key = scorerKey(scorer, evalName);
-          let use = declarationUses.get(key);
+          let use = declarationUses.get(scorer);
           if (!use) {
             use = { scorer, spec, evalName, owner, reached: false, named: new Set() };
-            declarationUses.set(key, use);
+            declarationUses.set(scorer, use);
           }
           if (produced.some(s => ownsScore(s, owner))) use.reached = true;
           else if (!use.reached) addEvaluatorsNamed(use.named, produced);
