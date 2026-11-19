@@ -27,7 +27,7 @@ import { BedrockModel } from '@strands-agents/sdk/models/bedrock';
 
 export const AGENT_NAME = 'observability_assistant';
 export const AGENT_VERSION = process.env.AGENT_VERSION ?? '1.0.0';
-export const SERVICE_NAME = 'observability-assistant';
+export const SERVICE_NAME = 'observability-assistant-ts';
 
 export const SPAN_INDEX = process.env.SPAN_INDEX ?? 'otel-v1-apm-span*';
 export const LOG_INDEX = process.env.LOG_INDEX ?? 'logs-otel-v1*';

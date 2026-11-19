@@ -113,6 +113,24 @@ function numbers(text: string): Set<number> {
   return new Set((text.match(/\d[\d,]*/g) ?? []).map((n) => Number(n.replace(/,/g, ''))));
 }
 
+// Ground truth is re-queried after the agent answers, over a sliding window, while the stack
+// keeps writing spans and logs (this eval's own included). A count is right when it is within
+// this tolerance of the reference value.
+const COUNT_TOLERANCE = Number(process.env.COUNT_TOLERANCE ?? '0.05');
+
+/** The text names a number within COUNT_TOLERANCE (at least 2) of truth. */
+function mentionsCount(text: string, truth: number): boolean {
+  const slack = Math.max(2, Math.round(truth * COUNT_TOLERANCE));
+  return [...numbers(text)].some((n) => Math.abs(n - truth) <= slack);
+}
+
+/** The run's model-call spans; throws when none were recorded, so the scorer errors instead of passing. */
+function chatSpans(output: AgentAnswer): AgentAnswer['spans'] {
+  const chats = output.spans.filter((s) => s.operationName === 'chat');
+  if (!chats.length) throw new Error(`no model-call spans recorded for trace ${output.traceId}`);
+  return chats;
+}
+
 const answerCorrectness = scorer(
   {
     name: 'answer_correctness',
@@ -132,14 +150,14 @@ const answerCorrectness = scorer(
           why = 'no errored spans in the window; the answer must say so';
         } else {
           const top = Object.entries(truth).sort((a, b) => b[1] - a[1]).slice(0, 3);
-          ok = top.every(([svc, n]) => answer.includes(svc) && numbers(answer).has(n));
-          why = `top services by errors: ${JSON.stringify(top)}`;
+          ok = top.every(([svc, n]) => answer.includes(svc) && mentionsCount(answer, n));
+          why = `top services by errors: ${JSON.stringify(top)} (counts within ${Math.round(COUNT_TOLERANCE * 100)}%)`;
         }
         break;
       }
       case 'largest_index': {
         const rows = await queries.listIndices();
-        ok = rows.length > 0 && answer.includes(rows[0].index) && numbers(answer).has(rows[0].docs);
+        ok = rows.length > 0 && answer.includes(rows[0].index) && mentionsCount(answer, Number(rows[0].docs));
         why = rows.length ? `largest: ${rows[0].index} (${rows[0].docs} docs)` : 'no indices';
         break;
       }
@@ -171,7 +189,7 @@ const answerCorrectness = scorer(
       }
       case 'logs_count': {
         const { total } = await queries.searchLogs(expected.query, expected.minutes);
-        ok = total === 0 ? NO_DATA_WORDS.some((w) => low.includes(w)) : numbers(answer).has(total);
+        ok = total === 0 ? NO_DATA_WORDS.some((w) => low.includes(w)) : mentionsCount(answer, total);
         why = `${total} matching log records`;
         break;
       }
@@ -212,7 +230,7 @@ const noLoops = scorer(
     evaluatorType: 'code',
     evaluatorDescription: 'Model calls (chat spans) per agent run',
   },
-  (_input, output) => output.spans.filter((s) => s.operationName === 'chat').length,
+  (_input, output) => chatSpans(output).length,
 );
 
 const latencyOk = scorer(
@@ -234,10 +252,7 @@ const cost = scorer(
     evaluatorType: 'code',
     evaluatorDescription: "Total input + output tokens across the run's chat spans",
   },
-  (_input, output) =>
-    output.spans
-      .filter((s) => s.operationName === 'chat')
-      .reduce((sum, s) => sum + s.inputTokens + s.outputTokens, 0),
+  (_input, output) => chatSpans(output).reduce((sum, s) => sum + s.inputTokens + s.outputTokens, 0),
 );
 
 const REFUSAL_WORDS = ["can't", 'cannot', "won't", 'unable', 'not able', "don't have", 'do not have'];

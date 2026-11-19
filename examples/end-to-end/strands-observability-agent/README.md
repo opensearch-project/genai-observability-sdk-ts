@@ -31,7 +31,7 @@ Tools, all read-only except the guarded one:
 
 The agent never sees the OpenSearch credentials: they are read by `config.ts` and used only by the client.
 
-Instrumentation (`agent.ts`): `OTEL_SEMCONV_STABILITY_OPT_IN=gen_ai_latest_experimental,gen_ai_span_attributes_only` (set in code when unset) so Strands writes the latest GenAI conventions with messages and tool arguments / results as span attributes, `register({ serviceName: "observability-assistant", agentName, agentVersion })` (on Node it also installs an `AsyncLocalStorageContextManager`, so async code keeps the active span), then the entry point `askDetailed()` is a `withObserve(..., { op: Op.INVOKE_AGENT })` span with `markAgentRoot()`. It sets `gen_ai.agent.version`, and `enrich()` sets the model, the system instructions, the token usage and the question and answer as GenAI messages. Strands' own `invoke_agent`, `chat` and `execute_tool` spans nest under it. A small span processor keeps each run's finished spans in memory, so the scorers read the tool calls and model calls without waiting for ingestion.
+Instrumentation (`agent.ts`): `OTEL_SEMCONV_STABILITY_OPT_IN=gen_ai_latest_experimental,gen_ai_span_attributes_only` (set in code when unset) so Strands writes the latest GenAI conventions with messages and tool arguments / results as span attributes, `register({ serviceName: "observability-assistant-ts", agentName, agentVersion })` (on Node it also installs an `AsyncLocalStorageContextManager`, so async code keeps the active span), then the entry point `askDetailed()` is a `withObserve(..., { op: Op.INVOKE_AGENT })` span with `markAgentRoot()`. It sets `gen_ai.agent.version`, and `enrich()` sets the model, the system instructions, the token usage and the question and answer as GenAI messages. Strands' own `invoke_agent`, `chat` and `execute_tool` spans nest under it. A small span processor keeps each run's finished spans in memory, so the scorers read the tool calls and model calls without waiting for ingestion.
 
 ## Prerequisites
 
@@ -100,7 +100,7 @@ Scorers:
 
 | Scorer | Type | Checks |
 |---|---|---|
-| `answer_correctness` | code | The answer against a reference query run at eval time: the per-service error counts, the largest index and its document count, the slowest operation, the trace's root span, the live services, the matching log count. When the truth is "nothing", the answer must say so |
+| `answer_correctness` | code | The answer against a reference query run at eval time: the per-service error counts, the largest index and its document count, the slowest operation, the trace's root span, the live services, the matching log count. Counts match within `COUNT_TOLERANCE` (default 5%, at least 2), since the stack keeps writing while the reference query runs. When the truth is "nothing", the answer must say so |
 | `right_tool` | code | The expected tool was called |
 | `trajectory_match` | code | The distinct tools called, read from the run's `execute_tool` spans, equal the golden path |
 | `no_loops` | code | At most 4 model calls (`chat` spans) per run |
