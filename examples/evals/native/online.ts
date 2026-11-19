@@ -37,16 +37,22 @@ if (!password) throw new Error('Set OPENSEARCH_PASSWORD (and OPENSEARCH_USER, de
 const retriever = new OpenSearchTraceRetriever({
   host: url,
   auth: { username: process.env.OPENSEARCH_USER ?? 'admin', password },
-  verifyCerts: process.env.OPENSEARCH_VERIFY_CERTS === 'true', // false for the local stack's self-signed cert
+  // Off by default for the local stack's self-signed certificate; set it for a real cluster
+  verifyCerts: ['1', 'true', 'yes'].includes((process.env.OPENSEARCH_VERIFY_CERTS ?? '').toLowerCase()),
 });
 
+// The filters run on the client, after maxResults: keep the page large, or offline runs
+// (agent cases and judge calls) can push real traffic out of it.
 const roots = (
   await retriever.listRootSpans({
     services: [SERVICE_NAME],
     since: new Date(Date.now() - 60 * 60 * 1000),
-    maxResults: 50,
+    maxResults: 500,
   })
-).filter((r) => r.agentName === AGENT_NAME);
+).filter(
+  // This agent's online runs only: not the judge's own chat traces, not the offline cases
+  (r) => r.agentName === AGENT_NAME && !('test.suite.run.id' in ((r.raw.attributes ?? {}) as object)),
+);
 const done = await retriever.findEvaluatedTraceIds(
   roots.map((r) => r.traceId),
   { evaluator: JUDGE_NAME },
@@ -68,23 +74,36 @@ for (const root of todo) {
     agentVersion: root.agentVersion || undefined,
   };
 
-  const verdict = await judgePlan(question, EXPECTED, answer, toolResults);
-  score({
-    name: 'plan_quality',
-    value: verdict.score,
-    ...target,
-    explanation: verdict.reason,
-    threshold: 4,
-    scoreMin: 1,
-    scoreMax: 5,
+  const judgeContext = {
     evaluator: JUDGE_NAME,
-    evaluatorType: 'llm_judge',
+    evaluatorType: 'llm_judge' as const,
     evaluatorDescription: JUDGE_DESCRIPTION,
     judgeModel: JUDGE_MODEL_ID,
     judgePromptName: JUDGE_PROMPT_NAME,
     judgePromptVersion: JUDGE_PROMPT_VERSION,
-    judgeTraceId: verdict.traceId,
-  });
+  };
+  let verdict: Awaited<ReturnType<typeof judgePlan>> | undefined;
+  try {
+    verdict = await judgePlan(question, EXPECTED, answer, toolResults);
+  } catch (e) {
+    // The judge failed: record an evaluator error and go on with the other traces
+    const errorType = e instanceof Error ? e.name : 'Error';
+    score({ name: 'plan_quality', ...target, errorType, ...judgeContext });
+    console.log(`  ${root.traceId}  plan_quality: judge failed (${errorType})`);
+  }
+  if (verdict) {
+    score({
+      name: 'plan_quality',
+      value: verdict.score,
+      ...target,
+      explanation: verdict.reason,
+      threshold: 4,
+      scoreMin: 1,
+      scoreMax: 5,
+      judgeTraceId: verdict.traceId,
+      ...judgeContext,
+    });
+  }
 
   const toolData = usesToolData(question, answer);
   score({
@@ -96,7 +115,7 @@ for (const root of todo) {
     evaluator: 'uses_tool_data',
     evaluatorType: 'code',
   });
-  console.log(`  ${root.traceId}  plan_quality=${verdict.score} (${verdict.reason})  uses_tool_data=${toolData.passed}`);
+  console.log(`  ${root.traceId}  plan_quality=${verdict?.score} (${verdict?.reason})  uses_tool_data=${toolData.passed}`);
 }
 
 // Flush the judge spans and the evaluation results.

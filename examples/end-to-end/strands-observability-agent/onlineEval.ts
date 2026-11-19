@@ -72,12 +72,15 @@ export function knownServicesCheck(question: string, answer: string, live: Set<s
 
 async function onePass(minutes: number, sampleRate: number, maxTraces: number): Promise<number> {
   const since = new Date(Date.now() - minutes * 60_000);
-  const all = await retriever.listRootSpans({ services: [SERVICE_NAME], since, maxResults: 200 });
+  // The filters below run after maxResults: one offline run adds about 24 roots (agent cases
+  // and judge calls) to this service, so keep the page large.
+  const all = await retriever.listRootSpans({ services: [SERVICE_NAME], since, maxResults: 1000 });
   // This agent's runs only, and not the offline eval runs (their root spans carry
   // test.suite.run.id, and they are scored by offlineEval.ts).
   const attrsOf = (r: (typeof all)[number]) => (r.raw.attributes ?? {}) as Record<string, unknown>;
   const roots = all.filter((r) => r.agentName === AGENT_NAME && !('test.suite.run.id' in attrsOf(r)));
-  const done = await retriever.findEvaluatedTraceIds(roots.map((r) => r.traceId));
+  // Only this job's own results count: a trace scored by another evaluator is still judged.
+  const done = await retriever.findEvaluatedTraceIds(roots.map((r) => r.traceId), { evaluator: JUDGE_NAME });
   const todo = roots.filter((r) => !done.has(r.traceId));
   // Math.random is fine for sampling (not security relevant).
   const sampled = todo.filter(() => Math.random() < sampleRate).slice(0, maxTraces);

@@ -44,6 +44,35 @@ export function usesToolData(question: string, answer: string): { passed: boolea
   };
 }
 
+/** The first JSON object in a reply; the model may add text or a second object after it. */
+export function firstJsonObject(text: string): Record<string, unknown> {
+  const start = text.indexOf('{');
+  if (start < 0) return {};
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === '\\') escaped = true;
+      else if (ch === '"') inString = false;
+    } else if (ch === '"') {
+      inString = true;
+    } else if (ch === '{') {
+      depth++;
+    } else if (ch === '}' && --depth === 0) {
+      try {
+        const value: unknown = JSON.parse(text.slice(start, i + 1));
+        return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+      } catch {
+        return {};
+      }
+    }
+  }
+  return {};
+}
+
 export interface JudgeVerdict {
   score: number;
   reason: string;
@@ -75,8 +104,7 @@ export function judgePlan(question: string, expected: string, answer: string, to
         outputTokens: response.usage?.outputTokens,
         outputMessages: [{ role: 'assistant', parts: [{ type: 'text', content: reply }] }],
       });
-      const match = /\{[\s\S]*\}/.exec(reply);
-      const verdict = (match ? JSON.parse(match[0]) : {}) as { score?: unknown; reason?: unknown };
+      const verdict = firstJsonObject(reply) as { score?: unknown; reason?: unknown };
       const score = Number(verdict.score);
       if (!(score >= 1 && score <= 5)) throw new RangeError(`judge returned no score in 1..5: ${reply.slice(0, 200)}`);
       return { score, reason: String(verdict.reason ?? ''), traceId: span.spanContext().traceId };

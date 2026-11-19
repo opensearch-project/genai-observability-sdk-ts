@@ -22,7 +22,7 @@ A scorer is `(input, output, expected) => ...` returning a `boolean` (a verdict)
 ```typescript
 import { Op, defineScorer, evaluate, register, withObserve } from "@opensearch-project/genai-observability-sdk-ts";
 
-const provider = await register({ serviceName: "travel-assistant-evals-native", agentName: "travel_assistant", agentVersion: "1.0.0" });
+const provider = await register({ serviceName: "travel-assistant-evals-native-ts", agentName: "travel_assistant", agentVersion: "1.0.0" });
 
 const mentionsCity = defineScorer(
   { name: "mentions_city", evaluatorType: "code", evaluatorDescription: "The plan names the city" },
@@ -88,8 +88,15 @@ const retriever = new OpenSearchTraceRetriever({
 });
 
 const since = new Date(Date.now() - 60 * 60 * 1000);
-const roots = (await retriever.listRootSpans({ services: ["travel-assistant-evals-native"], since, maxResults: 50 }))
-  .filter((r) => !("test.suite.run.id" in ((r.raw.attributes ?? {}) as Record<string, unknown>))); // skip offline runs
+// The filters run after maxResults: keep the page large so offline runs don't push real traffic out
+const roots = (await retriever.listRootSpans({ services: ["travel-assistant-evals-native-ts"], since, maxResults: 500 }))
+  .filter(
+    (r) =>
+      r.agentName === "travel_assistant" && // not a traced judge's own chat traces
+      !("test.suite.run.id" in ((r.raw.attributes ?? {}) as Record<string, unknown>)) && // not offline runs
+      r.inputMessages.length > 0 &&
+      r.outputMessages.length > 0,
+  );
 const done = await retriever.findEvaluatedTraceIds(roots.map((r) => r.traceId), { evaluator: "travel_plan_judge" });
 
 for (const root of roots.filter((r) => !done.has(r.traceId))) {
@@ -113,7 +120,8 @@ await provider.shutdown();
 
 - `listRootSpans()` returns each trace's agent root, the row Agent Traces lists, with its GenAI messages, `agentName` and `agentVersion`. Pass both to `score()`, or the result is grouped under "(no version)".
 - `findEvaluatedTraceIds(ids, { evaluator })` makes the job safe to re-run. A result counts once it is indexed, so do not run two passes at once.
-- Skip the offline runs (root spans with `test.suite.run.id`) and sample the rest. Run the evaluator as its own service, so its judge spans stay apart from the agent's.
+- `listRootSpans()` also returns a traced judge's parentless `chat` spans when Data Prepper marks them `derived.gen_ai.is_root`, so keep only your agent's roots (`r.agentName`). Skip the offline runs (root spans with `test.suite.run.id`) and roots with no messages, and sample the rest. Run the evaluator as its own service, so its judge spans stay apart from the agent's.
+- The filters run after `maxResults`, so keep the page large enough that offline runs and judge traces don't push real traffic out of it.
 
 Shown in: [evals/native](../evals/native/), [end-to-end/strands-observability-agent](../end-to-end/strands-observability-agent/) (`traffic.ts`, then `onlineEval.ts`), [basics/02_scoring.ts](../basics/02_scoring.ts) (span, trace and standalone results).
 

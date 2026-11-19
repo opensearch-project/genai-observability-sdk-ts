@@ -43,6 +43,35 @@ If the reference data is given, use it as the ground truth.
 
 Reply with JSON only: {"score": <1-5>, "reason": "<one or two sentences>"}`;
 
+/** The first JSON object in a reply; the model may add text or a second object after it. */
+export function firstJsonObject(text: string): Record<string, unknown> {
+  const start = text.indexOf('{');
+  if (start < 0) return {};
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === '\\') escaped = true;
+      else if (ch === '"') inString = false;
+    } else if (ch === '"') {
+      inString = true;
+    } else if (ch === '{') {
+      depth++;
+    } else if (ch === '}' && --depth === 0) {
+      try {
+        const value: unknown = JSON.parse(text.slice(start, i + 1));
+        return value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : {};
+      } catch {
+        return {};
+      }
+    }
+  }
+  return {};
+}
+
 export interface Verdict {
   score: number;
   reason: string;
@@ -84,8 +113,7 @@ export function judge(question: string, answer: string, reference?: unknown): Pr
       });
       const { text, inputTokens, outputTokens } = await complete(prompt);
       enrich({ outputMessages: messages('assistant', text), inputTokens, outputTokens });
-      const match = /\{[\s\S]*\}/.exec(text);
-      const parsed = match ? (JSON.parse(match[0]) as { score?: unknown; reason?: unknown }) : {};
+      const parsed = firstJsonObject(text) as { score?: unknown; reason?: unknown };
       const score = Number(parsed.score ?? 0);
       if (!(score >= 1 && score <= 5)) {
         throw new RangeError(`judge returned no score in 1..5: ${JSON.stringify(text.slice(0, 200))}`);
