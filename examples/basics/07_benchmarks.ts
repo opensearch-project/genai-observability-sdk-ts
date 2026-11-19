@@ -77,6 +77,10 @@ bench2.log({
 bench2.close();
 
 // 3. Automated evaluation with evaluate()
+// The agent version groups results and runs, so runs of two versions can be compared:
+//   AGENT_VERSION=v2 npx tsx examples/basics/07_benchmarks.ts
+const AGENT_VERSION = process.env.AGENT_VERSION ?? 'v1';
+
 function lengthScore(_input: unknown, output: unknown): EvalScore {
   const len = String(output).length;
   return {
@@ -107,6 +111,8 @@ const evalResult = evaluate({
     { input: { question: 'What is NLP?' }, expected: 'NLP is natural language processing.' },
   ],
   scores: [lengthScore, matchScore],
+  agentVersion: AGENT_VERSION,
+  runName: `qa-agent ${AGENT_VERSION}`,
   metadata: { 'eval.model': 'gpt-4', 'eval.version': '1.0' },
 });
 
@@ -147,6 +153,8 @@ const asyncResult = await evaluate({
     { input: 'What is ML?', caseId: 'ml' },
   ],
   scores: [judge, lengthScore], // async and sync scorers mixed
+  agentVersion: AGENT_VERSION,
+  runName: `qa-agent async ${AGENT_VERSION}`,
 });
 
 console.log(`\nAsync evaluation: ${asyncResult.summary.benchmarkName}`);
