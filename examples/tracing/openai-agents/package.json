@@ -1,5 +1,5 @@
 {
-  "name": "travel-assistant-openai-agents",
+  "name": "travel-assistant-openai-agents-ts",
   "private": true,
   "version": "0.1.0",
   "description": "Travel assistant on the OpenAI Agents SDK (TypeScript), traced with the OpenSearch GenAI observability SDK",

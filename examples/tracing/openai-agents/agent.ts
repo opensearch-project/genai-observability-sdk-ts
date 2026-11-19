@@ -26,7 +26,9 @@ import type { Span, SpanData, TracingProcessor } from '@openai/agents';
 import { z } from 'zod';
 import { register } from '@opensearch-project/genai-observability-sdk-ts';
 
-const provider = await register({ serviceName: 'travel-assistant-openai-agents' });
+// autoInstrument: false. The bridge below already emits one chat span per model call; the
+// SDK's default OpenAI instrumentation would trace the Agents SDK's OpenAI client call again.
+const provider = await register({ serviceName: 'travel-assistant-openai-agents-ts', autoInstrument: false });
 
 // ---------------------------------------------------- Agents SDK -> OpenTelemetry
 
@@ -89,7 +91,16 @@ function describe(data: SpanData): { name: string; attributes: Record<string, st
 
 class OTelBridge implements TracingProcessor {
   private readonly tracer = trace.getTracer('openai-agents-otel-bridge');
-  private readonly spans = new Map<string, { parentId: string | null; otel?: OTelSpan }>();
+  private readonly spans = new Map<string, { parentId: string | null; otel?: OTelSpan; type?: string }>();
+  /** Per agent span: the first model call's input and the last one's output, set on the agent span at its end. */
+  private readonly agentMessages = new Map<string, { input?: unknown[]; output?: unknown[] }>();
+
+  private nearestAgent(parentId: string | null): string | undefined {
+    for (let id = parentId; id; id = this.spans.get(id)?.parentId ?? null) {
+      if (this.spans.get(id)?.type === 'agent') return id;
+    }
+    return undefined;
+  }
 
   private parentContext(parentId: string | null): Context {
     for (let id = parentId; id; id = this.spans.get(id)?.parentId ?? null) {
@@ -107,7 +118,8 @@ class OTelBridge implements TracingProcessor {
     const otel = d
       ? this.tracer.startSpan(d.name, { startTime: new Date(span.startedAt ?? Date.now()) }, this.parentContext(span.parentId))
       : undefined;
-    this.spans.set(span.spanId, { parentId: span.parentId, otel });
+    this.spans.set(span.spanId, { parentId: span.parentId, otel, type: span.spanData.type });
+    if (span.spanData.type === 'agent') this.agentMessages.set(span.spanId, {});
   }
 
   async onSpanEnd(span: Span<SpanData>): Promise<void> {
@@ -116,11 +128,28 @@ class OTelBridge implements TracingProcessor {
       const d = describe(span.spanData);
       // The model is known only at the end of a generation span.
       if (d) otel.updateName(d.name).setAttributes(d.attributes);
+      const data = span.spanData;
+      if (data.type === 'generation') {
+        // The agent's input is the first model call's input, its output the last one's output.
+        const agent = this.agentMessages.get(this.nearestAgent(span.parentId) ?? '');
+        if (agent) {
+          agent.input ??= toGenAI(data.input);
+          agent.output = toGenAI(data.output);
+        }
+      } else if (data.type === 'agent') {
+        const m = this.agentMessages.get(span.spanId);
+        if (m?.input) otel.setAttribute('gen_ai.input.messages', JSON.stringify(m.input));
+        if (m?.output) otel.setAttribute('gen_ai.output.messages', JSON.stringify(m.output));
+        this.agentMessages.delete(span.spanId);
+      }
       if (span.error) otel.setStatus({ code: SpanStatusCode.ERROR, message: span.error.message });
       otel.end(new Date(span.endedAt ?? Date.now()));
     }
     // Keep the entry while children may still look up their parent; drop it at the end of the run.
-    if (!span.parentId) this.spans.clear();
+    if (!span.parentId) {
+      this.spans.clear();
+      this.agentMessages.clear();
+    }
   }
 
   async shutdown(): Promise<void> {}

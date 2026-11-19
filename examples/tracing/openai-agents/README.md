@@ -12,10 +12,12 @@ the default OpenAI exporter:
 
 | Agents SDK span | OpenTelemetry span | Attributes |
 | --- | --- | --- |
-| `agent` | `invoke_agent travel_assistant` | `gen_ai.agent.name` |
+| `agent` | `invoke_agent travel_assistant` | `gen_ai.agent.name`, `gen_ai.input.messages` (the first model call's input), `gen_ai.output.messages` (the last model call's output) |
 | `generation` | `chat <model>` | model, `gen_ai.input.messages`, `gen_ai.output.messages`, token usage |
 | `function` | `execute_tool <tool>` | `gen_ai.tool.call.arguments`, `gen_ai.tool.call.result` |
 | `task`, `turn`, others | not exported | their children attach to the nearest exported span |
+
+`register({ autoInstrument: false })`: the bridge already emits one `chat` span per model call. The SDK's default OpenAI instrumentation would trace the Agents SDK's OpenAI client call a second time on the OpenAI path.
 
 ## Run
 
@@ -46,12 +48,12 @@ from the AWS default chain.
 ## Check the trace
 
 Open Agent Traces (`http://localhost:5601/app/agentTraces`) and pick service
-`travel-assistant-openai-agents`, or query the span index:
+`travel-assistant-openai-agents-ts`, or query the span index:
 
 ```bash
 curl -sk -u admin:<password> "https://localhost:9200/otel-v1-apm-span-*/_search" \
   -H 'Content-Type: application/json' -d '{
-  "query": {"term": {"serviceName": "travel-assistant-openai-agents"}},
+  "query": {"term": {"serviceName": "travel-assistant-openai-agents-ts"}},
   "aggs": {"ops": {"terms": {"field": "attributes.gen_ai.operation.name"}}}, "size": 0}'
 ```
 
