@@ -133,7 +133,8 @@ class OTelBridge implements TracingProcessor {
         // The agent's input is the first model call's input, its output the last one's output.
         const agent = this.agentMessages.get(this.nearestAgent(span.parentId) ?? '');
         if (agent) {
-          agent.input ??= toGenAI(data.input);
+          // Without the system prompt: the agent's input is the conversation
+          agent.input ??= toGenAI(data.input).filter((m) => (m as { role?: unknown }).role !== 'system');
           agent.output = toGenAI(data.output);
         }
       } else if (data.type === 'agent') {

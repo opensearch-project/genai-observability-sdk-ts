@@ -12,7 +12,7 @@ the default OpenAI exporter:
 
 | Agents SDK span | OpenTelemetry span | Attributes |
 | --- | --- | --- |
-| `agent` | `invoke_agent travel_assistant` | `gen_ai.agent.name`, `gen_ai.input.messages` (the first model call's input), `gen_ai.output.messages` (the last model call's output) |
+| `agent` | `invoke_agent travel_assistant` | `gen_ai.agent.name`, `gen_ai.input.messages` (the first model call's input, without the system prompt), `gen_ai.output.messages` (the last model call's output) |
 | `generation` | `chat <model>` | model, `gen_ai.input.messages`, `gen_ai.output.messages`, token usage |
 | `function` | `execute_tool <tool>` | `gen_ai.tool.call.arguments`, `gen_ai.tool.call.result` |
 | `task`, `turn`, others | not exported | their children attach to the nearest exported span |
