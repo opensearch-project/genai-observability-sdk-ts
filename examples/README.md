@@ -9,7 +9,7 @@ New here? Follow the runbooks:
 
 ## The example agents
 
-**Travel assistant** (the framework examples). A small agent that writes a short trip plan for a city. It has two tools, `get_weather(city)` and `find_events(city)`, which return fixed data from [`shared/travel_data.json`](shared/travel_data.json), so the only external call is the model. Every framework example uses the same tools, system prompt and test cases ([`shared/test_suite.jsonl`](shared/test_suite.jsonl)), so traces and scores are comparable across frameworks. Each example registers as service `travel-assistant-<framework>` and its agent is named `travel_assistant`.
+**Travel assistant** (the framework examples). A small agent that writes a short trip plan for a city. It has two tools, `get_weather(city)` and `find_events(city)`, which return fixed data from [`shared/travel_data.json`](shared/travel_data.json), so the only external call is the model. Every framework example uses the same tools, system prompt and test cases ([`shared/test_suite.jsonl`](shared/test_suite.jsonl)), so traces and scores are comparable across frameworks. Each example registers as service `travel-assistant-<framework>-ts` (`travel-assistant-evals-native-ts` for the eval example; the `-ts` suffix keeps them apart from the Python SDK's examples on the same stack) and its agent is named `travel_assistant`.
 
 **Observability assistant** (the end-to-end example). A Strands agent that answers questions about your own OpenSearch cluster (indices, errors, slow operations, traces, logs) with read-only tools. It shows the full lifecycle: tracing, two offline test suites whose ground truth is queried live, an LLM judge, online evals over sampled traces, and comparing runs in OpenSearch Dashboards.
 

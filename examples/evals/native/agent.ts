@@ -18,7 +18,7 @@ import {
 import { Op, enrich, observe, withObserve } from '@opensearch-project/genai-observability-sdk-ts';
 
 export const AGENT_NAME = 'travel_assistant';
-export const SERVICE_NAME = 'travel-assistant-evals-native';
+export const SERVICE_NAME = 'travel-assistant-evals-native-ts';
 export const MODEL_ID = process.env.MODEL_ID ?? 'us.anthropic.claude-haiku-4-5-20251001-v1:0';
 export const REGION = process.env.AWS_REGION ?? 'us-west-2';
 export const bedrock = new BedrockRuntimeClient({ region: REGION });

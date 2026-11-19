@@ -21,7 +21,7 @@ import { ToolNode } from '@langchain/langgraph/prebuilt';
 import { z } from 'zod';
 import { Op, enrich, observe, register, withObserve } from '@opensearch-project/genai-observability-sdk-ts';
 
-const provider = await register({ serviceName: 'travel-assistant-langgraph' });
+const provider = await register({ serviceName: 'travel-assistant-langgraph-ts' });
 
 // ------------------------------------------------------------ shared data + tools
 

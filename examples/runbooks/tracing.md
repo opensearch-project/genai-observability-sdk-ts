@@ -25,7 +25,7 @@ npm install @opensearch-project/genai-observability-sdk-ts @opentelemetry/api
 ```typescript
 import { register } from "@opensearch-project/genai-observability-sdk-ts";
 
-const provider = await register({ serviceName: "travel-assistant-strands" });
+const provider = await register({ serviceName: "travel-assistant-strands-ts" });
 ```
 
 Call it once, before the framework creates its first agent or client. It sends traces to `OTEL_EXPORTER_OTLP_ENDPOINT` (default `http://localhost:4318`; `endpoint: "grpc://localhost:4317"` for gRPC). On Node it also installs an `AsyncLocalStorageContextManager` (unless one is set), so async code keeps the active span. Pass `agentName` and `agentVersion` too if this process also emits evaluation results. In a short script, `await provider.shutdown()` before exit, or the last batch of spans is lost.
@@ -77,7 +77,7 @@ Run the agent once, then check the operations recorded for your service:
 ```bash
 curl -sk -u admin:"$OPENSEARCH_PASSWORD" -X POST https://localhost:9200/_plugins/_ppl \
   -H 'Content-Type: application/json' \
-  -d '{"query": "source=otel-v1-apm-span-* | where serviceName = '\''travel-assistant-strands'\'' | stats count() by `attributes.gen_ai.operation.name`"}'
+  -d '{"query": "source=otel-v1-apm-span-* | where serviceName = '\''travel-assistant-strands-ts'\'' | stats count() by `attributes.gen_ai.operation.name`"}'
 ```
 
 Expect `invoke_agent`, `chat` and `execute_tool` (frameworks add their own spans, such as Strands' event loop cycles). Then check one trace:
@@ -85,7 +85,7 @@ Expect `invoke_agent`, `chat` and `execute_tool` (frameworks add their own spans
 ```bash
 curl -sk -u admin:"$OPENSEARCH_PASSWORD" -X POST https://localhost:9200/_plugins/_ppl \
   -H 'Content-Type: application/json' \
-  -d '{"query": "source=otel-v1-apm-span-* | where serviceName = '\''travel-assistant-strands'\'' | fields traceId, name, `attributes.gen_ai.agent.name`, `attributes.gen_ai.tool.name`, `attributes.gen_ai.tool.call.arguments` | head 20"}'
+  -d '{"query": "source=otel-v1-apm-span-* | where serviceName = '\''travel-assistant-strands-ts'\'' | fields traceId, name, `attributes.gen_ai.agent.name`, `attributes.gen_ai.tool.name`, `attributes.gen_ai.tool.call.arguments` | head 20"}'
 ```
 
 Look for: one `traceId` per run, `gen_ai.agent.name` = `travel_assistant` on the `invoke_agent` span only, and each `execute_tool` span with its tool name and arguments.

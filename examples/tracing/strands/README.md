@@ -41,12 +41,12 @@ To use another model provider, swap `BedrockModel` for a Strands `OpenAIModel` o
 ## Check the trace
 
 Open Agent Traces (`http://localhost:5601/app/agentTraces`) and pick service
-`travel-assistant-strands`, or query the span index:
+`travel-assistant-strands-ts`, or query the span index:
 
 ```bash
 curl -sk -u admin:<password> "https://localhost:9200/otel-v1-apm-span-*/_search" \
   -H 'Content-Type: application/json' -d '{
-  "query": {"term": {"serviceName": "travel-assistant-strands"}},
+  "query": {"term": {"serviceName": "travel-assistant-strands-ts"}},
   "aggs": {"ops": {"terms": {"field": "attributes.gen_ai.operation.name"}}}, "size": 0}'
 ```
 

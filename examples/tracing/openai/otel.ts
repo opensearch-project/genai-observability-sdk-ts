@@ -15,4 +15,4 @@ import { register } from '@opensearch-project/genai-observability-sdk-ts';
 // ESM: let the instrumentation patch `import` statements.
 registerHooks('@opentelemetry/instrumentation/hook.mjs', import.meta.url);
 
-export const provider = await register({ serviceName: 'travel-assistant-openai' });
+export const provider = await register({ serviceName: 'travel-assistant-openai-ts' });

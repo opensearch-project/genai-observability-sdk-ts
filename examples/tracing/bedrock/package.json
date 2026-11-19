@@ -1,5 +1,5 @@
 {
-  "name": "travel-assistant-bedrock",
+  "name": "travel-assistant-bedrock-ts",
   "private": true,
   "version": "0.1.0",
   "description": "Travel assistant on the Amazon Bedrock Converse API (AWS SDK v3), traced with the OpenSearch GenAI observability SDK",

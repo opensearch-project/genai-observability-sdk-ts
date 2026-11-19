@@ -1,5 +1,5 @@
 {
-  "name": "travel-assistant-strands",
+  "name": "travel-assistant-strands-ts",
   "private": true,
   "version": "0.1.0",
   "description": "Travel assistant on Strands Agents (TypeScript), traced with the OpenSearch GenAI observability SDK",

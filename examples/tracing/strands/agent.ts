@@ -21,7 +21,7 @@ import { z } from 'zod';
 // Latest GenAI semantic conventions, with messages as span attributes (what Agent Traces reads).
 process.env.OTEL_SEMCONV_STABILITY_OPT_IN ??= 'gen_ai_latest_experimental,gen_ai_span_attributes_only';
 
-const provider = await register({ serviceName: 'travel-assistant-strands' });
+const provider = await register({ serviceName: 'travel-assistant-strands-ts' });
 
 // ------------------------------------------------------------ shared data + tools
 

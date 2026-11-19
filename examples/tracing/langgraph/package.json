@@ -1,5 +1,5 @@
 {
-  "name": "travel-assistant-langgraph",
+  "name": "travel-assistant-langgraph-ts",
   "private": true,
   "version": "0.1.0",
   "description": "Travel assistant on LangGraph.js, traced with the OpenSearch GenAI observability SDK",

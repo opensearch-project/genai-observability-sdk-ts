@@ -56,12 +56,12 @@ ANTHROPIC_API_KEY=<key> MODEL_ID=claude-haiku-4-5 npx tsx agent.ts
 ## Check the trace
 
 Open Agent Traces (`http://localhost:5601/app/agentTraces`) and pick service
-`travel-assistant-anthropic`, or query the span index:
+`travel-assistant-anthropic-ts`, or query the span index:
 
 ```bash
 curl -sk -u admin:<password> "https://localhost:9200/otel-v1-apm-span-*/_search" \
   -H 'Content-Type: application/json' -d '{
-  "query": {"term": {"serviceName": "travel-assistant-anthropic"}},
+  "query": {"term": {"serviceName": "travel-assistant-anthropic-ts"}},
   "aggs": {"ops": {"terms": {"field": "attributes.gen_ai.operation.name"}}}, "size": 0}'
 ```
 

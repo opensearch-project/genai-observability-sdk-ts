@@ -18,7 +18,7 @@ import type Anthropic from '@anthropic-ai/sdk';
 import { AnthropicBedrockMantle } from '@anthropic-ai/bedrock-sdk';
 import { Op, enrich, observe, register, withObserve } from '@opensearch-project/genai-observability-sdk-ts';
 
-const provider = await register({ serviceName: 'travel-assistant-anthropic' });
+const provider = await register({ serviceName: 'travel-assistant-anthropic-ts' });
 
 // ------------------------------------------------------------ shared data + tools
 

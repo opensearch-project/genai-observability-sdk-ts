@@ -47,12 +47,12 @@ it. Without `--import ./otel.ts` the `chat` spans are missing.
 ## Check the trace
 
 Open Agent Traces (`http://localhost:5601/app/agentTraces`) and pick service
-`travel-assistant-bedrock`, or query the span index:
+`travel-assistant-bedrock-ts`, or query the span index:
 
 ```bash
 curl -sk -u admin:<password> "https://localhost:9200/otel-v1-apm-span-*/_search" \
   -H 'Content-Type: application/json' -d '{
-  "query": {"term": {"serviceName": "travel-assistant-bedrock"}},
+  "query": {"term": {"serviceName": "travel-assistant-bedrock-ts"}},
   "aggs": {"ops": {"terms": {"field": "attributes.gen_ai.operation.name"}}}, "size": 0}'
 ```
 

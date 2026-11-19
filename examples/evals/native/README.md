@@ -64,7 +64,7 @@ OPENSEARCH_PASSWORD=<password> AWS_PROFILE=<profile> npx tsx online.ts
 4. `score({ traceId, spanId, ... })`: `plan_quality` and `uses_tool_data` on the agent's root
    span. Online results have no `test.suite.run.id`; they show on the trace in Agent Traces.
 
-The judge's own spans go to service `travel-assistant-evals-native-judge`, so the next
+The judge's own spans go to service `travel-assistant-evals-native-ts-judge`, so the next
 online run does not list them.
 
 ## Variables
