@@ -14,7 +14,7 @@
  */
 
 import { defineScorer, evaluate, register, type EvalScore } from '@opensearch-project/genai-observability-sdk-ts';
-import { AGENT_NAME, SERVICE_NAME, SYSTEM_PROMPT, loadTestSuite, runAgent } from './agent.js';
+import { AGENT_NAME, PROMPTS, SERVICE_NAME, loadTestSuite, runAgent } from './agent.js';
 import {
   JUDGE_DESCRIPTION,
   JUDGE_MODEL_ID,
@@ -26,11 +26,6 @@ import {
 } from './scorers.js';
 
 const SUITE = 'travel-assistant-suite';
-const PROMPTS: Record<string, string> = {
-  v1: SYSTEM_PROMPT,
-  v2: `${SYSTEM_PROMPT} Reply in at most two sentences.`,
-};
-
 const provider = await register({ serviceName: SERVICE_NAME, agentName: AGENT_NAME });
 
 const toolData = defineScorer(

@@ -36,6 +36,11 @@ const DATA = JSON.parse(readFileSync(new URL('travel_data.json', SHARED), 'utf8'
   cities: Record<string, City>;
 };
 export const SYSTEM_PROMPT = DATA.system_prompt;
+/** Prompt versions: the offline runs compare them, and traffic runs the one it is labeled with. */
+export const PROMPTS: Record<string, string> = {
+  v1: SYSTEM_PROMPT,
+  v2: `${SYSTEM_PROMPT} Reply in at most two sentences.`,
+};
 export const CITIES = DATA.cities;
 
 export interface TestCase {
