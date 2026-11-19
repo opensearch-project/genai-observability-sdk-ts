@@ -2,7 +2,7 @@
 
 This guide takes a TypeScript agent from its first instrumented trace to evaluation results in OpenSearch Dashboards, offline and online. It is the short path; [agent-evaluations.md](agent-evaluations.md) is the full reference (every attribute, ingestion pipelines, index templates).
 
-A complete, runnable version of everything below (a Strands agent with real OpenSearch tools, an offline test suite, an online evaluator and a traffic generator) is in the Strands observability example ([#101](https://github.com/opensearch-project/genai-observability-sdk-ts/pull/101)).
+A complete, runnable version of everything below (a Strands agent with real OpenSearch tools, an offline test suite, an online evaluator and a traffic generator) is in [examples/end-to-end/strands-observability-agent](../examples/end-to-end/strands-observability-agent/). For short, step-by-step checks against the travel assistant examples, see the [evals runbook](../examples/runbooks/evals.md).
 
 - [0. Where to start](#0-where-to-start)
 - [1. Define goals](#1-define-goals)
@@ -71,7 +71,7 @@ npm install "@opensearch-project/genai-observability-sdk-ts@>=0.2.0" @openteleme
 npm install @opensearch-project/opensearch
 ```
 
-This guide needs `@opensearch-project/genai-observability-sdk-ts@>=0.2.0`; until 0.2.0 is on npm, build the package from source (see [Setup](agent-evaluations.md#setup)).
+This guide needs `@opensearch-project/genai-observability-sdk-ts@>=0.2.0` (on npm).
 
 ## 3. Instrument the agent
 
@@ -85,7 +85,7 @@ export const AGENT_VERSION = "1.0.0";
 // so async code keeps the active span.
 // Traces and evaluation events go to OTEL_EXPORTER_OTLP_ENDPOINT, else http://localhost:4318.
 export const provider = await register({
-  serviceName: "observability-assistant",
+  serviceName: "observability-assistant-ts",
   agentName: AGENT_NAME,
   agentVersion: AGENT_VERSION,
 });
@@ -117,7 +117,7 @@ Run the agent once, then check each step before moving on. The commands use the 
    ```bash
    curl -sk -u "admin:$OPENSEARCH_PASSWORD" -H 'Content-Type: application/json' \
      -X POST https://localhost:9200/_plugins/_ppl \
-     -d '{"query": "source=otel-v1-apm-span-* | where serviceName = '\''observability-assistant'\'' | stats count() by `attributes.gen_ai.operation.name`"}'
+     -d '{"query": "source=otel-v1-apm-span-* | where serviceName = '\''observability-assistant-ts'\'' | stats count() by `attributes.gen_ai.operation.name`"}'
    ```
 
    Expect `invoke_agent`, `chat` and `execute_tool`.
@@ -245,8 +245,13 @@ const retriever = new OpenSearchTraceRetriever({
 });
 
 const since = new Date(Date.now() - 60 * 60 * 1000); // time window
-const roots = (await retriever.listRootSpans({ services: ["observability-assistant"], since, maxResults: 50 }))
-  .filter((r) => r.agentName === AGENT_NAME);
+// The filters run after maxResults: keep the page large so offline runs don't push real traffic out
+const roots = (await retriever.listRootSpans({ services: ["observability-assistant-ts"], since, maxResults: 500 }))
+  .filter(
+    (r) =>
+      r.agentName === AGENT_NAME && // this agent's runs, not a traced judge's chat traces
+      !("test.suite.run.id" in ((r.raw.attributes ?? {}) as Record<string, unknown>)), // not offline cases
+  );
 const done = await retriever.findEvaluatedTraceIds(roots.map((r) => r.traceId), {
   evaluator: "answer_quality_judge", // this job's own results
 });
@@ -280,7 +285,7 @@ await provider.forceFlush();
 
 - Run it on a schedule (cron, a loop with a sleep, a Lambda). The example's `onlineEval.ts --interval 300` loops.
 - Pair the LLM judge with a cheap deterministic check (for example "the answer names a service that exists"): it costs nothing and catches regressions the judge misses.
-- `listRootSpans()` returns one agent root per trace: the span marked `derived.gen_ai.is_root` (for example the agent span below an HTTP handler), or a trace root (no parent) whose `gen_ai.operation.name` is `invoke_agent` or `create_agent`. A judge's own parentless `chat` span is never listed. When a trace has no parentless agent root and several marked spans (agents of several services), the earliest marked span is returned. Its `agentName` and `agentVersion` come from the span; pass both to `score()`, or the results are grouped under "(no version)" on the agent page.
+- `listRootSpans()` returns one agent root per trace: the span marked `derived.gen_ai.is_root` (for example the agent span below an HTTP handler), or a trace root (no parent) whose `gen_ai.operation.name` is `invoke_agent` or `create_agent`. A traced judge's own parentless `chat` span is listed too when Data Prepper marks it `derived.gen_ai.is_root`, which is why the snippet keeps only the agent's roots and skips offline cases (`test.suite.run.id`). When a trace has no parentless agent root and several marked spans (agents of several services), the earliest marked span is returned. Its `agentName` and `agentVersion` come from the span; pass both to `score()`, or the results are grouped under "(no version)" on the agent page.
 - `findEvaluatedTraceIds(traceIds, { evaluator })` makes the job safe to re-run: a trace that already has a result from this evaluator is skipped. Without `evaluator` (or `evaluationName`), a result from any evaluator counts, so a new judge would skip traces another evaluator already scored. Results count as done once indexed (the pipeline flush interval), so do not run two passes at once.
 - Run the judge outside the agent's span. If the judge is itself traced, pass `judgeTraceId` so the result links to the judge's run.
 
@@ -295,7 +300,7 @@ Going to production is a configuration change, not a code change: the spans, res
     tracesEndpoint: "https://<traces-pipeline>.us-west-2.osis.amazonaws.com/v1/traces",
     logsEndpoint: "https://<logs-pipeline>.us-west-2.osis.amazonaws.com/v1/logs",
     sigv4: { service: "osis", region: "us-west-2" },
-    serviceName: "observability-assistant",
+    serviceName: "observability-assistant-ts",
     agentName: AGENT_NAME,
     agentVersion: AGENT_VERSION,
   });
@@ -316,7 +321,7 @@ Offline evals catch regressions before a release; online evals catch what the su
 
 ## Eval cookbook
 
-Copy and adapt. Each scorer returns an `EvalScore` and works with `Benchmark.log({ scores })`. Wrapped with `defineScorer()` (sync or async), it works as an `evaluate()` scorer, where a scorer may also return a number or a boolean. Runnable versions are in the Strands observability example ([#101](https://github.com/opensearch-project/genai-observability-sdk-ts/pull/101)). `AgentRun` is whatever your `ask()` returns, plus the spans of its trace. Build it once per case with `agentRun()` and pass the same object to every scorer: the spans are fetched from OpenSearch once per trace id (cached), not once per scorer.
+Copy and adapt. Each scorer returns an `EvalScore` and works with `Benchmark.log({ scores })`. Wrapped with `defineScorer()` (sync or async), it works as an `evaluate()` scorer, where a scorer may also return a number or a boolean. Runnable versions are in the [end-to-end example's `offlineEval.ts`](../examples/end-to-end/strands-observability-agent/offlineEval.ts). `AgentRun` is whatever your `ask()` returns, plus the spans of its trace. Build it once per case with `agentRun()` and pass the same object to every scorer: the spans are fetched from OpenSearch once per trace id (cached), not once per scorer.
 
 ```typescript
 import {
@@ -637,6 +642,7 @@ console.log(`${base}/app/agentTraces/evaluations#/compare/${e(runA)}/${e(runB)}`
 ## Further reading
 
 - [From day one to healthy production: instrumenting and evaluating AI agents with OpenSearch](https://github.com/anirudha/os-agent-observability-evals/blob/main/blog.md): the same journey end to end, with a sample support agent in several frameworks.
+- [Evals runbook](../examples/runbooks/evals.md) and [tracing runbook](../examples/runbooks/tracing.md): step by step against the example agents, with the checks to run.
 - [Agent evaluations](agent-evaluations.md): the full attribute reference, ingestion pipelines and index templates.
 - [API reference](api-reference.md): every option of `register()`, `score()`, `evaluate()`, `Benchmark` and `OpenSearchTraceRetriever`.
 - [Configuration](configuration.md): endpoints, environment variables and auto-instrumentation.

@@ -10,7 +10,7 @@
  * sets up, and Data Prepper routes them to the `otel-v1-genai-evaluation` index.
  */
 
-import { score, withObserve, Op, register } from '../src/index.js';
+import { score, withObserve, Op, register } from '../../src/index.js';
 
 // On Node, register() installs an AsyncLocalStorage context manager, so inline
 // scores find the active span.

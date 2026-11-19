@@ -12,9 +12,9 @@
  * - A running OpenSearch cluster with trace data
  */
 
-import { evaluate, register } from '../src/index.js';
-// import { score } from '../src/index.js'; // used in the commented retrieval section
-import type { EvalScore } from '../src/index.js';
+import { Op, evaluate, register, withObserve } from '../../src/index.js';
+// import { score } from '../../src/index.js'; // used in the commented retrieval section
+import type { EvalScore } from '../../src/index.js';
 
 const provider = await register({
   serviceName: 'eval-example',
@@ -41,11 +41,14 @@ function containsKeyword(input: unknown, output: unknown, _expected: unknown): E
 
 const result = evaluate({
   name: 'qa-evaluation',
-  task: (input) => {
-    // Simple echo task for demonstration
-    const query = (input as { query: string }).query;
-    return `The answer to "${query}" is 42.`;
-  },
+  // Trace the task: its root span gets the test.* ids and the scores are
+  // parented to it. An untraced task records scores without a trace.
+  task: (input) =>
+    withObserve('qa-agent', { op: Op.INVOKE_AGENT }, () => {
+      // Simple echo task for demonstration
+      const query = (input as { query: string }).query;
+      return `The answer to "${query}" is 42.`;
+    }),
   data: [
     { input: { query: 'meaning of life' }, expected: 'The answer to "meaning of life" is 42.' },
     { input: { query: 'universe' }, expected: 'The answer to "universe" is 42.' },
@@ -64,7 +67,7 @@ for (const [name, scoreSummary] of Object.entries(result.summary.scores)) {
 // 2. OpenSearchTraceRetriever usage (requires OpenSearch connection)
 // Uncomment the following if you have an OpenSearch cluster:
 //
-// import { OpenSearchTraceRetriever } from '../src/index.js';
+// import { OpenSearchTraceRetriever } from '../../src/index.js';
 //
 // const retriever = new OpenSearchTraceRetriever({
 //   host: 'https://localhost:9200',

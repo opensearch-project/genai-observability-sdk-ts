@@ -42,7 +42,7 @@ pnpm build       # Build ESM + CJS + type declarations
 pnpm test        # Run tests
 pnpm test:watch  # Run tests in watch mode
 pnpm typecheck   # Type-check with tsc
-pnpm lint        # Lint source and test files
+pnpm lint        # Lint source, test and example files
 ```
 
 ### Project Structure
@@ -71,7 +71,13 @@ tests/
 ├── retrieval.test.ts
 ├── internal.test.ts
 └── version.test.ts
-examples/           # Usage examples
+examples/           # Usage examples (see examples/README.md)
+├── basics/         # Numbered SDK basics (01_ to 07_)
+├── shared/         # Travel assistant data and test suite
+├── tracing/        # One travel assistant per framework
+├── evals/          # Offline and online evals
+├── end-to-end/     # Full lifecycle example
+└── runbooks/       # Step-by-step tracing and evals guides
 ```
 
 ## Submitting Changes

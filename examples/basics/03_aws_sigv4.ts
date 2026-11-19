@@ -16,7 +16,7 @@
  *   package, installed by default unless you omit optional dependencies)
  */
 
-import { register, observe, Op, enrich } from '../src/index.js';
+import { register, observe, Op, enrich } from '../../src/index.js';
 
 await register({
   serviceName: 'my-llm-app',

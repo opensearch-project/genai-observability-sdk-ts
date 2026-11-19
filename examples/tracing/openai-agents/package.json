@@ -1,0 +1,28 @@
+{
+  "name": "travel-assistant-openai-agents-ts",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Travel assistant on the OpenAI Agents SDK (TypeScript), traced with the OpenSearch GenAI observability SDK",
+  "type": "module",
+  "scripts": {
+    "start": "tsx agent.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@ai-sdk/amazon-bedrock": "^5.0.142",
+    "@aws-sdk/credential-providers": "^3.700.0",
+    "@openai/agents": "^0.22.0",
+    "@openai/agents-extensions": "^0.22.0",
+    "@opensearch-project/genai-observability-sdk-ts": "^0.2.0",
+    "@opentelemetry/api": "~1.9.0",
+    "zod": "^4.5.4"
+  },
+  "devDependencies": {
+    "@types/node": "^20.17.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  },
+  "overrides": {
+    "@opentelemetry/api": "$@opentelemetry/api"
+  }
+}
